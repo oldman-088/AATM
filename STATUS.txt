@@ -1,29 +1,33 @@
 ========================================================================
 AATM — SYSTEM STATUS REPORT
 ========================================================================
-Updated (UTC): 2026-11-15T10:45:00Z
-Current Phase: Sprint v2.1 Integrated — Unified 4-Worker Delivery Verified
-Current Division: Divisions 01–12 (All 4 Workers Integrated on arena/b15bbe5c-aatm)
+Updated (UTC): 2026-11-15T12:15:00Z
+Current Phase: Specification Alignment Round 1 Complete (Increments 1–5 Integrated)
+Current Branch: arena/e5fef882-aatm (Divisions 01–12)
 
-TEST RESULTS (verified via `scripts/ubuntu/verify.sh` + `bridge/tests/test_bridge.py`, exit 0):
-- Alembic upgrade head (a56f5804a0ab -> ee92483cefa3): PASSED
-- Backend & Bridge ruff check: PASSED (0 errors)
-- Backend pytest: PASSED (55/55)
+TEST RESULTS (verified via `scripts/ubuntu/verify.sh`, exit 0, 12/12 gates):
+- Prerequisites (`python3`, `git`, `node`): PASS (3/3)
+- Alembic upgrade head (`6c3ab8f4d2e1`): PASS
+- Backend `ruff check`: PASS (0 errors)
+- Bridge `ruff check`: PASS (0 errors)
+- Backend + E2E `pytest`: PASS (68/68)
     * test_aatm_backend.py: 5/5
+    * test_contracts_v2.py: 8/8
+    * test_e2e_verification.py: 30/30
     * test_enterprise_platform.py: 4/4
-    * test_contracts_v2.py (Worker 1 + cross-division integration): 7/7
-    * test_worker3_providers_browser.py (Worker 3): 11/11
-    * test_e2e_verification.py (Worker 4 + Backup W4): 28/28
-- Reference Arena Bridge pytest (`bridge/tests/test_bridge.py`): PASSED (3/3)
-- Static secret scan (`python -m app.qa.engine`): PASSED (0 findings, 101+ files)
-- Frontend `tsc --noEmit`: PASSED (0 errors)
-- Frontend `vitest run` (Worker 2 full 12-tab & EN/AR/FA RTL suite): PASSED (22/22)
-- Frontend production `vite build`: PASSED
+    * test_worker3_providers_browser.py: 21/21
+- Reference Arena Bridge `pytest` (`bridge/tests/test_bridge.py`): PASS (6/6)
+- Static secret & git-index scan (`python -m app.qa.engine`): PASS (0 findings, 130+ files including .md)
+- Frontend `tsc --noEmit`: PASS (0 errors)
+- Frontend `vitest run`: PASS (31/31 across 2 test files)
+- Frontend `vite build`: PASS
+- Combined Automated Tests Passing: 105/105
 
-SPRINT v2.1 INTEGRATED DELIVERABLES (Workers 1–4):
-- Worker 1: `contracts/schemas.json` v2.0.0, strict `env:*` validation, `GitHubPRCreateRequest` / `GitHubIssueCreateRequest`, HTTP 400 mapping in `infra.py`.
-- Worker 2: Full `enterprise` i18n namespace (EN/AR/FA), logical-CSS RTL parity, relative-URL enforcement, 22/22 Vitest suite.
-- Worker 3: Compliant `bridge/` Arena Local Bridge daemon with per-employee session/account isolation, daily/monthly global+per-provider spend caps, atomic `.aatm.lock` + PID liveness Playwright lifecycle, hardened Tampermonkey policy & role scoping.
-- Worker 4 (+ Backup): 5 defect remediations (D1–D5), Multi-Device Worker Daemon (`worker_daemon.py` + `device_auth.py`), approval-gated GitHub write helpers (`create_branch`, `create_pull_request`, `create_issue`), `verify.sh`/`verify.ps1`, and 28 E2E tests.
-- Manager Integration: Wired `browser_manager.shutdown_all()` in `main.py`, `stop_profile` in `replacement.py` emergency stop, role-scoped `POST /api/v1/userscripts`, `POST /api/v1/github/{prs,issues}`, and dual-auth (device token OR operator JWT) on `POST /api/v1/devices/{id}/heartbeat`.
+ROUND 1 INTEGRATED DELIVERABLES (Increments 1–5):
+- Increment 1 (Manager): `AATM_MASTER_SPECIFICATION.md`, `AGENTS.md`, `docs/{EXISTING_PROJECT_AUDIT,TEAM_STRUCTURE,DEVELOPMENT_PLAN}.md`.
+- Increment 2 (Worker 1): `ExecutionDevice.token_version` + Alembic migration `6c3ab8f4d2e1`, `POST /api/v1/devices/{id}/revoke`, `budget_summary` on `/providers/usage`, session-scoped `/providers/{id}/test`.
+- Increment 3 (Worker 2): Approval-gated GitHub PR/Issue UI, provider budget headroom UI, device token revocation UI, EN/AR/FA RTL parity (31/31 Vitest).
+- Increment 4 (Worker 3): `ArenaLocalBridgeAdapter.delete_session`, SSE streaming & scoped metrics in `bridge/server.py`, policy-checked `click_element`/`fill_input`/`capture_snapshot`, best-effort bridge cleanup in `replace_employee`, `HTTP 401` halt in `worker_daemon.py`.
+- Increment 5 (Worker 4/5): `.github/workflows/ci.yml`, PR/Issue templates, `docs/SECURITY_POLICY.md`, unified 12-gate `verify.sh`/`verify.ps1`, dynamic Alembic head stamp, 3 new E2E tests.
+- Integration Fix: `backend/alembic/env.py` `disable_existing_loggers=False` preserving module loggers during in-process migrations.
 ========================================================================

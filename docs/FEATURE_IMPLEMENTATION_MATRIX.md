@@ -1,7 +1,7 @@
 # AATM — Feature Implementation Matrix
 
 **Last Verified (UTC):** 2026-11-15  
-**Verified By:** `scripts/ubuntu/verify.sh` (10/10 gates, exit 0) + `bridge/tests/test_bridge.py` — `alembic upgrade head` (head `ee92483cefa3`), `ruff check` (0 errors across `backend/` and `bridge/`), `pytest -v` (**55/55** backend + **3/3** bridge), `python -m app.qa.engine` (secret scan, 0 findings), `tsc --noEmit` (0 errors), `vitest run` (**22/22**), `vite build`, plus a **live multi-device round trip**.
+**Verified By:** `scripts/ubuntu/verify.sh` (**12/12 gates, exit 0**) — `alembic upgrade head` (head `6c3ab8f4d2e1`), `ruff check` (0 errors across `backend/` and `bridge/`), `pytest -v` (**68/68** backend + **6/6** bridge), `python -m app.qa.engine` (secret scan, 0 findings across 130+ files including `.md`), `tsc --noEmit` (0 errors), `vitest run` (**31/31**), `vite build`.
 
 | Feature | Status | Implementation Details | Verification |
 |---|---|---|---|
