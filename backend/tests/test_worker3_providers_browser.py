@@ -1,0 +1,629 @@
+import asyncio
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+
+from app.browser.engines import (
+    BROWSER_ENGINE_REGISTRY,
+    authorize_userscript_execution,
+    match_url_pattern,
+    validate_userscript_policy,
+)
+from app.browser.manager import BrowserManager, detect_playwright_capabilities, validate_navigation_url
+from app.core.config import get_settings
+from app.db.base import Base
+from app.db.seed import seed_initial_data
+from app.db.session import AsyncSessionLocal, engine
+from app.models import AIProvider, BrowserProfile, BrowserSession, ProviderUsageLog, SystemSetting
+from app.providers.adapters import AnthropicClaudeAdapter, ArenaLocalBridgeAdapter
+from app.providers.base import ProviderRequest, validate_credential_ref
+from app.providers.router import ProviderRouter
+
+
+class _MockBridgeServer:
+    """Real loopback HTTP server implementing the Arena Local Bridge & Anthropic Messages test contracts."""
+
+    def __init__(self, expected_bearer: str | None = None, expected_api_key: str | None = None):
+        self.expected_bearer = expected_bearer
+        self.expected_api_key = expected_api_key
+        self.empty_choices = False
+        self.received_headers: list[dict[str, str]] = []
+        self._server: HTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self.base_url: str = ""
+
+    def __enter__(self) -> "_MockBridgeServer":
+        parent = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                return
+
+            def do_GET(self) -> None:
+                parent.received_headers.append({k.lower(): v for k, v in self.headers.items()})
+                if self.path == "/health":
+                    if parent.expected_bearer and self.headers.get("Authorization") != f"Bearer {parent.expected_bearer}":
+                        self.send_response(401)
+                        self.end_headers()
+                        self.wfile.write(b'{"error":"unauthorized"}')
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"ok","models":["arena-bridge-default"]}')
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(raw.decode("utf-8"))
+                parent.received_headers.append({k.lower(): v for k, v in self.headers.items()})
+
+                if self.path == "/v1/chat/completions":
+                    if parent.expected_bearer and self.headers.get("Authorization") != f"Bearer {parent.expected_bearer}":
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    body = {
+                        "id": "chatcmpl-test",
+                        "model": payload.get("model", "arena-bridge-default"),
+                        "choices": []
+                        if parent.empty_choices
+                        else [{"index": 0, "message": {"role": "assistant", "content": "Bridge live pong"}}],
+                        "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+                    }
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(body).encode("utf-8"))
+                    return
+
+                if self.path == "/v1/messages":
+                    if parent.expected_api_key and self.headers.get("x-api-key") != parent.expected_api_key:
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    body = {
+                        "id": "msg-test",
+                        "type": "message",
+                        "model": payload.get("model", "claude-sonnet-4-5"),
+                        "content": [{"type": "text", "text": "Claude live pong"}],
+                        "usage": {"input_tokens": 20, "output_tokens": 10},
+                    }
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(body).encode("utf-8"))
+                    return
+
+                self.send_response(404)
+                self.end_headers()
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = self._server.server_address[1]
+        self.base_url = f"http://127.0.0.1:{port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
+
+
+@pytest.fixture
+async def db_session():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    async with AsyncSessionLocal() as db:
+        await seed_initial_data(db)
+        yield db
+
+
+# ---------------------------------------------------------------------------
+# Division 05: AI Providers, Credential Indirection, Budgets & Failover
+# ---------------------------------------------------------------------------
+
+
+async def test_credential_ref_indirection_blocks_raw_secrets():
+    assert validate_credential_ref(None)[0] is True
+    assert validate_credential_ref("env:ANTHROPIC_API_KEY")[0] is True
+    assert validate_credential_ref("env:ARENA_BRIDGE_TOKEN")[0] is True
+
+    raw_secret = "raw-inline-secret-key-NEVER-LEAK"
+    ok, msg = validate_credential_ref(raw_secret)
+    assert ok is False
+    assert raw_secret not in msg
+
+    assert validate_credential_ref("file:/etc/passwd")[0] is False
+    assert validate_credential_ref("env:lowercase_invalid")[0] is False
+
+    adapter = AnthropicClaudeAdapter("anthropic-bad", "https://api.anthropic.com/v1", raw_secret, "claude-sonnet-4-5")
+    health = await adapter.health_check()
+    assert health.status == "degraded"
+    assert health.credentials_configured is False
+    assert raw_secret not in health.detail
+
+    resp = await adapter.generate(ProviderRequest(prompt="hello", dry_run=False))
+    assert resp.success is False
+    assert resp.estimated_cost_usd == 0.0
+    assert raw_secret not in (resp.error_message or "")
+
+
+async def test_arena_local_bridge_live_auth_and_offline(monkeypatch):
+    monkeypatch.setenv("ARENA_TEST_BRIDGE_TOKEN", "bridge-secret-123")
+    with _MockBridgeServer(expected_bearer="bridge-secret-123") as srv:
+        adapter = ArenaLocalBridgeAdapter(
+            "arena-local-bridge",
+            srv.base_url,
+            "env:ARENA_TEST_BRIDGE_TOKEN",
+            "arena-bridge-default",
+        )
+        health = await adapter.health_check()
+        assert health.status == "healthy"
+        assert health.credentials_configured is True
+
+        # Dry-run never spends budget
+        dry = await adapter.generate(ProviderRequest(prompt="test", model="arena-reasoning-pro", dry_run=True))
+        assert dry.success is True
+        assert dry.estimated_cost_usd == 0.0
+        assert dry.metadata["dry_run"] is True
+        assert dry.metadata["projected_cost_usd"] > 0.0
+
+        # Live call reads OpenAI-compatible usage & content
+        live = await adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
+        assert live.success is True
+        assert live.content == "Bridge live pong"
+        assert live.input_tokens == 11
+        assert live.output_tokens == 7
+        assert live.metadata["confirmed_usage"] is True
+
+        # Empty choices array handled gracefully without IndexError
+        srv.empty_choices = True
+        empty_resp = await adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
+        assert empty_resp.success is True
+        assert empty_resp.content == ""
+
+        # Wrong token yields degraded auth error on health check
+        monkeypatch.setenv("ARENA_TEST_BRIDGE_TOKEN", "wrong-token")
+        bad_health = await adapter.health_check()
+        assert bad_health.status == "degraded"
+        assert "401" in bad_health.detail
+
+    # Offline bridge after server shutdown
+    offline_adapter = ArenaLocalBridgeAdapter("arena-local-bridge", srv.base_url, "env:ARENA_TEST_BRIDGE_TOKEN", "arena-bridge-default")
+    off_health = await offline_adapter.health_check()
+    assert off_health.status == "offline"
+    assert srv.base_url in off_health.detail
+
+    off_gen = await offline_adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
+    assert off_gen.success is False
+    assert off_gen.metadata.get("bridge_offline") is True
+
+
+async def test_anthropic_safe_diagnostic_and_live_confirmed_usage(db_session, monkeypatch):
+    # Without API key -> safe zero-spend diagnostic mode
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    adapter = AnthropicClaudeAdapter("anthropic-claude", None, "env:ANTHROPIC_API_KEY", "claude-sonnet-4-5")
+    h = await adapter.health_check()
+    assert h.status == "degraded"
+    assert h.credentials_configured is False
+
+    diag = await adapter.generate(ProviderRequest(prompt="Analyze architecture", dry_run=False))
+    assert diag.success is True
+    assert diag.estimated_cost_usd == 0.0
+    assert diag.metadata["dry_run"] is True
+
+    # With API key + loopback mock Anthropic endpoint -> live confirmed usage logged
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    with _MockBridgeServer(expected_api_key="test-anthropic-key") as srv:
+        p = await db_session.get(AIProvider, "anthropic-claude")
+        p.endpoint_url = f"{srv.base_url}/v1"
+        await db_session.commit()
+
+        router = ProviderRouter()
+        resp = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Live check", dry_run=False, agent_id="worker-3"),
+            preferred_provider_id="anthropic-claude",
+        )
+        assert resp.success is True
+        assert resp.content == "Claude live pong"
+        assert resp.input_tokens == 20
+        assert resp.output_tokens == 10
+        assert resp.estimated_cost_usd > 0.0
+
+        logs = (await db_session.execute(select(ProviderUsageLog).where(ProviderUsageLog.provider_id == "anthropic-claude"))).scalars().all()
+        assert len(logs) == 1
+        assert logs[0].confirmed_cost_usd == resp.estimated_cost_usd
+
+
+async def test_router_daily_monthly_spend_caps_and_failover(db_session):
+    router = ProviderRouter()
+
+    # Point arena-local-bridge to an unused loopback port so it is guaranteed offline
+    bridge = await db_session.get(AIProvider, "arena-local-bridge")
+    bridge.endpoint_url = "http://127.0.0.1:1"
+    await db_session.commit()
+
+    # Requesting a bridge-specific model fails over cleanly to arena-agent using arena-agent's compatible default model
+    failover = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Failover test", model="arena-reasoning-pro", dry_run=False),
+        preferred_provider_id="arena-local-bridge",
+    )
+    assert failover.success is True
+    assert failover.provider_id == "arena-agent"
+    assert failover.model == "arena-agent-orchestrator"
+
+    await db_session.refresh(bridge)
+    assert bridge.health_status == "offline"
+
+    # When ONLY offline local bridge is enabled, safe diagnostic fallback engages cleanly when allow_diagnostic_fallback=True
+    for pid in ("arena-agent", "anthropic-claude"):
+        prov = await db_session.get(AIProvider, pid)
+        prov.is_enabled = False
+    await db_session.commit()
+
+    diag = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Bridge offline check", dry_run=False, allow_diagnostic_fallback=True),
+    )
+    assert diag.success is True
+    assert diag.estimated_cost_usd == 0.0
+    assert diag.metadata["mode"] == "bridge_offline_diagnostic"
+
+    strict_fail = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Bridge offline strict", dry_run=False, allow_diagnostic_fallback=False),
+    )
+    assert strict_fail.success is False
+
+    # Re-enable all providers and test daily & monthly spend caps
+    for pid in ("arena-agent", "anthropic-claude"):
+        prov = await db_session.get(AIProvider, pid)
+        prov.is_enabled = True
+
+    # Configure tight monthly budget cap ($1.00) and record $1.05 spend
+    budgets = await db_session.get(SystemSetting, "budgets")
+    budgets.value = {"daily_limit_usd": 20.0, "monthly_limit_usd": 1.0, "require_approval_above_usd": 5.0}
+    db_session.add(
+        ProviderUsageLog(
+            provider_id="anthropic-claude",
+            model_name="claude-sonnet-4-5",
+            input_tokens=1000,
+            output_tokens=1000,
+            estimated_cost_usd=1.05,
+            latency_ms=50.0,
+            success=True,
+        )
+    )
+    await db_session.commit()
+
+    summary = await router.get_spend_summary(db_session)
+    assert summary["global_monthly_spend_usd"] >= 1.05
+    assert summary["monthly_remaining_usd"] == 0.0
+
+    # Live call strictly blocked by monthly spend cap
+    blocked_monthly = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Should block on monthly cap", dry_run=False),
+        preferred_provider_id="anthropic-claude",
+    )
+    assert blocked_monthly.success is False
+    assert blocked_monthly.metadata.get("budget_exceeded") is True
+    assert "monthly budget cap" in (blocked_monthly.error_message or "").lower()
+
+    # Dry-run remains permitted even when monthly cap is reached and adds $0 spend
+    dry_ok = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Dry-run diagnostic", dry_run=True),
+        preferred_provider_id="anthropic-claude",
+    )
+    assert dry_ok.success is True
+    assert dry_ok.estimated_cost_usd == 0.0
+    after_dry = await router.get_spend_summary(db_session)
+    assert after_dry["global_monthly_spend_usd"] == summary["global_monthly_spend_usd"]
+
+    # Raise monthly cap to $100, lower global daily cap to $1.00 -> blocked by global daily cap
+    budgets.value = {"daily_limit_usd": 1.0, "monthly_limit_usd": 100.0, "require_approval_above_usd": 5.0}
+    await db_session.commit()
+    blocked_daily = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Should block on global daily cap", dry_run=False),
+    )
+    assert blocked_daily.success is False
+    assert blocked_daily.metadata.get("budget_exceeded") is True
+    assert "daily budget cap" in (blocked_daily.error_message or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Division 06: Browser Lifecycle, DB+File+Async Locking & Crash Recovery
+# ---------------------------------------------------------------------------
+
+
+def test_playwright_capability_detection_and_url_validation(tmp_path, monkeypatch):
+    caps = detect_playwright_capabilities()
+    assert caps["playwright_installed"] is True
+    assert caps["engine_mode"] in ("playwright", "headless_fallback")
+    assert "browser_source" in caps
+
+    # Verify PLAYWRIGHT_BROWSERS_PATH discovery works cleanly
+    fake_cache = tmp_path / "ms-playwright" / "chromium-1234" / "chrome-linux"
+    fake_cache.mkdir(parents=True)
+    fake_chrome = fake_cache / "chrome"
+    fake_chrome.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_chrome.chmod(0o755)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "ms-playwright"))
+
+    custom_caps = detect_playwright_capabilities()
+    assert custom_caps["chromium_installed"] is True
+    assert custom_caps["browser_source"] == "playwright_cache"
+    assert custom_caps["executable_path"] == str(fake_chrome)
+
+    # URL scheme safety
+    assert validate_navigation_url("https://fastapi.tiangolo.com") == "https://fastapi.tiangolo.com"
+    assert validate_navigation_url("http://localhost:5173") == "http://localhost:5173"
+    assert validate_navigation_url("about:blank") == "about:blank"
+    for bad_url in ("file:///etc/passwd", "javascript:alert(1)", "data:text/html,<h1>x</h1>", "chrome://settings"):
+        with pytest.raises(ValueError):
+            validate_navigation_url(bad_url)
+
+
+async def test_browser_db_file_async_locks_stale_recovery_and_crash(db_session, tmp_path):
+    mgr = BrowserManager()
+    bp = BrowserProfile(
+        id="profile-worker3-locktest",
+        name="Worker 3 Lock Test Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "profile-worker3-locktest"),
+        mode="background",
+        status="ready",
+        current_url="about:blank",
+    )
+    db_session.add(bp)
+    await db_session.commit()
+
+    # 1. Foreign LIVE file lock blocks launch even when DB status is 'ready'
+    pdir = Path(bp.profile_dir)
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / ".aatm.lock").write_text(
+        json.dumps({"owner": "external-worker", "pid": os.getpid(), "profile_id": bp.id}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="file-locked"):
+        await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background")
+
+    # 2. Foreign STALE file lock (dead PID) is automatically recovered
+    (pdir / ".aatm.lock").write_text(
+        json.dumps({"owner": "dead-worker", "pid": 999999, "profile_id": bp.id}),
+        encoding="utf-8",
+    )
+    launched = await mgr.launch_profile(db_session, bp, owner="worker-3", mode="visible", url="http://localhost:5173")
+    assert launched.status == "running"
+    assert launched.lock_owner == "worker-3"
+    lock_info = mgr.get_lock_status(launched)
+    assert lock_info["file_lock_present"] is True
+    assert lock_info["file_lock_owner"] == "worker-3"
+    assert lock_info["file_lock_alive"] is True
+
+    # 3. DB lock blocks different owner
+    with pytest.raises(ValueError, match="locked by 'worker-3'"):
+        await mgr.launch_profile(db_session, launched, owner="worker-2", mode="background")
+
+    # 4. Same owner can re-launch cleanly (e.g., mode switch visible -> background)
+    relaunched = await mgr.launch_profile(db_session, launched, owner="worker-3", mode="background")
+    assert relaunched.mode == "background"
+    assert relaunched.status == "running"
+
+    # 5. Crash & self-healing recovery preserves lock file & creates recovered BrowserSession
+    recovered = await mgr.simulate_crash_and_recover(db_session, relaunched, recover=True)
+    assert recovered.crash_count == 1
+    assert recovered.status == "running"
+    assert (pdir / ".aatm.lock").exists()
+    sessions = (
+        await db_session.execute(select(BrowserSession).where(BrowserSession.profile_id == bp.id))
+    ).scalars().all()
+    assert any(s.status == "crashed" for s in sessions)
+    assert any(s.status == "active" and (s.recovery_notes or "").startswith("Auto-recovered") for s in sessions)
+
+    # 6. Clean stop removes lock file and closes active session
+    stopped = await mgr.stop_profile(db_session, recovered, actor="worker-3")
+    assert stopped.status == "stopped"
+    assert stopped.lock_owner is None
+    assert not (pdir / ".aatm.lock").exists()
+
+    # 7. Concurrent launch race by two different owners: exactly one succeeds, one fails
+    async def attempt(owner: str) -> str:
+        async with AsyncSessionLocal() as s:
+            prof = await s.get(BrowserProfile, bp.id)
+            await mgr.launch_profile(s, prof, owner=owner, mode="background")
+            return owner
+
+    results = await asyncio.gather(attempt("worker-3"), attempt("worker-4"), return_exceptions=True)
+    successes = [r for r in results if isinstance(r, str)]
+    errors = [r for r in results if isinstance(r, ValueError)]
+    assert len(successes) == 1
+    assert len(errors) == 1
+
+    # Cleanup
+    refreshed = await db_session.get(BrowserProfile, bp.id)
+    await mgr.stop_profile(db_session, refreshed, actor="pytest")
+    await mgr.shutdown_all()
+
+
+async def test_browser_max_concurrency_limit(db_session, tmp_path, monkeypatch):
+    mgr = BrowserManager()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "MAX_CONCURRENT_BROWSERS", 1)
+
+    bp1 = BrowserProfile(
+        id="profile-cap-1",
+        name="Cap Test 1",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "cap1"),
+        mode="background",
+        status="ready",
+    )
+    bp2 = BrowserProfile(
+        id="profile-cap-2",
+        name="Cap Test 2",
+        agent_id="worker-4",
+        profile_dir=str(tmp_path / "cap2"),
+        mode="background",
+        status="ready",
+    )
+    db_session.add_all([bp1, bp2])
+    await db_session.commit()
+
+    await mgr.launch_profile(db_session, bp1, owner="worker-3")
+    with pytest.raises(ValueError, match="Max concurrent browser limit"):
+        await mgr.launch_profile(db_session, bp2, owner="worker-4")
+
+    await mgr.stop_profile(db_session, bp1, actor="pytest")
+
+
+# ---------------------------------------------------------------------------
+# Division 06: Tampermonkey Userscript Policy, Role Scoping & Browser Engines
+# ---------------------------------------------------------------------------
+
+
+def test_tampermonkey_policy_blocks_evasion_harvesting_and_wildcards():
+    valid_patterns = ["http://localhost:5173/*", "https://fastapi.tiangolo.com/*"]
+
+    # Prohibited code patterns must all be rejected
+    bad_scripts = [
+        "solveRecaptcha(); // captcha",
+        "await solveTurnstile();",
+        "Object.defineProperty(navigator, 'webdriver', { get: () => false });",
+        "if (navigator.webdriver) console.log('stealth');",
+        "import stealth from 'playwright-stealth';",
+        "console.log(document.cookie);",
+        'const t = localStorage.getItem("token");',
+        "const t = localStorage['auth_token'];",
+        "const s = sessionStorage.jwt;",
+        "// @grant GM_cookie\nconsole.log('ok');",
+        "unsafeWindow.fetch = () => {};",
+        "GM_xmlhttpRequest({ method: 'GET', url: 'https://evil.test' });",
+        "eval('console.log(1)');",
+        "new Function('return 1')();",
+        "XMLHttpRequest.prototype.setRequestHeader = function() {};",
+        "// ==UserScript==\n// @match *://*/*\n// ==/UserScript==\nconsole.log('ok');",
+    ]
+    for code in bad_scripts:
+        ok, _ = validate_userscript_policy(code, valid_patterns, allowed_roles=["worker"])
+        assert ok is False, f"Expected policy rejection for: {code}"
+
+    # Overly broad or non-HTTP(S) @match patterns must be rejected
+    for bad_pat in ("<all_urls>", "*://*/*", "https://*/*", "http://*/*", "file:///*", "javascript:alert(1)"):
+        ok, _ = validate_userscript_policy("console.log('ok');", [bad_pat], allowed_roles=["worker"])
+        assert ok is False, f"Expected @match rejection for: {bad_pat}"
+
+    # Wildcard or empty role-scoping must be rejected
+    assert validate_userscript_policy("console.log('ok');", valid_patterns, allowed_roles=["*"])[0] is False
+    assert validate_userscript_policy("console.log('ok');", valid_patterns, allowed_roles=[], allowed_agent_ids=[])[0] is False
+    assert validate_userscript_policy("console.log('ok');", valid_patterns, allowed_roles=["worker"], allowed_agent_ids=["all"])[0] is False
+
+    # Valid, clean, host-scoped, role-scoped userscript is approved
+    clean_code = (
+        "// ==UserScript==\n"
+        "// @name AATM Safe DOM Inspector\n"
+        "// @match http://localhost:*/*\n"
+        "// ==/UserScript==\n"
+        "console.info('Headings:', document.querySelectorAll('h1').length);"
+    )
+    ok, status = validate_userscript_policy(
+        clean_code,
+        ["http://localhost:*/*", "https://*.example.com/docs/*"],
+        allowed_roles=["worker", "manager"],
+        allowed_agent_ids=["worker-3"],
+    )
+    assert ok is True
+    assert status == "approved"
+
+
+def test_tampermonkey_url_matching_and_role_scoped_authorization():
+    assert match_url_pattern("http://localhost:*/*", "http://localhost:5173/browsers") is True
+    assert match_url_pattern("http://localhost:5173/*", "http://localhost:8000/api") is False
+    assert match_url_pattern("https://*.example.com/docs/*", "https://api.example.com/docs/v1") is True
+    assert match_url_pattern("https://*.example.com/docs/*", "https://evil-example.com/docs/v1") is False
+
+    script = {
+        "is_enabled": True,
+        "audit_status": "approved",
+        "code": "console.info('Safe title:', document.title);",
+        "match_patterns": ["http://localhost:*/*", "https://fastapi.tiangolo.com/*"],
+        "allowed_roles": ["worker"],
+        "allowed_agent_ids": ["worker-2", "worker-3"],
+    }
+
+    # Authorized worker + matching URL
+    ok, _ = authorize_userscript_execution(
+        script, agent_id="worker-3", agent_role="worker", target_url="http://localhost:5173/app"
+    )
+    assert ok is True
+
+    # Unauthorized role
+    ok, msg = authorize_userscript_execution(
+        script, agent_id="worker-3", agent_role="guest", target_url="http://localhost:5173/app"
+    )
+    assert ok is False
+    assert "Role" in msg
+
+    # Unauthorized agent ID
+    ok, msg = authorize_userscript_execution(
+        script, agent_id="worker-1", agent_role="worker", target_url="http://localhost:5173/app"
+    )
+    assert ok is False
+    assert "Agent" in msg
+
+    # Non-matching URL
+    ok, msg = authorize_userscript_execution(
+        script, agent_id="worker-3", agent_role="worker", target_url="https://github.com/oldman-088/AATM"
+    )
+    assert ok is False
+    assert "@match" in msg
+
+    # Disabled script
+    disabled = dict(script, is_enabled=False)
+    assert authorize_userscript_execution(
+        disabled, agent_id="worker-3", agent_role="worker", target_url="http://localhost:5173/app"
+    )[0] is False
+
+
+async def test_browser_engine_adapters_capabilities_and_policy():
+    pw_caps = BROWSER_ENGINE_REGISTRY["playwright"].capabilities()
+    real_caps = detect_playwright_capabilities()
+    assert pw_caps["chromium_installed"] == real_caps["chromium_installed"]
+    assert pw_caps["status"] == ("ready" if real_caps["chromium_installed"] else "headless_fallback")
+
+    # Prohibited action rejected across engines
+    rej = await BROWSER_ENGINE_REGISTRY["playwright"].execute_action("profile-1", "bypass_captcha", {})
+    assert rej["status"] == "rejected"
+
+    # Automa workflow validates safe vs. unsafe steps
+    automa = BROWSER_ENGINE_REGISTRY["automa"]
+    good_wf = await automa.execute_action(
+        "profile-1",
+        "run_workflow",
+        {"steps": [{"type": "navigate", "url": "https://fastapi.tiangolo.com"}, {"type": "snapshot"}]},
+    )
+    assert good_wf["status"] == "executed"
+    assert good_wf["steps_validated"] == 2
+
+    bad_wf = await automa.execute_action(
+        "profile-1",
+        "run_workflow",
+        {"steps": [{"type": "javascript", "url": "https://example.com/", "code": "console.log(document.cookie)"}]},
+    )
+    assert bad_wf["status"] == "rejected"

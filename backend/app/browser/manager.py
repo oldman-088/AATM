@@ -1,45 +1,99 @@
+import asyncio
 import html
+import json
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from sqlalchemy import select
+import psutil
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.models import AuditLog, BrowserProfile, BrowserSession
+
+SAFE_CHROMIUM_ARGS = [
+    "--disable-dev-shm-usage",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+
+
+def validate_navigation_url(url: str) -> str:
+    """Allow only safe web navigation schemes (http, https, about:blank)."""
+    cleaned = (url or "").strip()
+    if not cleaned or cleaned == "about:blank":
+        return "about:blank"
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"Blocked unsafe navigation URL scheme '{parsed.scheme or 'none'}': only http://, https://, and about:blank are allowed."
+        )
+    return cleaned
+
+
+def _candidate_playwright_cache_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+    if env_path and env_path != "0":
+        dirs.append(Path(env_path))
+    dirs.append(Path.home() / ".cache" / "ms-playwright")
+    dirs.append(Path("/root/.cache/ms-playwright"))
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        dirs.append(Path(local_app_data) / "ms-playwright")
+    dirs.append(Path.home() / "Library" / "Caches" / "ms-playwright")
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for d in dirs:
+        key = str(d)
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+    return unique
 
 
 def detect_playwright_capabilities() -> dict[str, Any]:
     playwright_pkg = False
     chromium_installed = False
     executable_path: str | None = None
+    browser_source: str | None = None
     try:
         import playwright  # noqa: F401
-        playwright_pkg = True
         from playwright.sync_api import sync_playwright
 
-        # Check standard Playwright browser cache paths without launching
-        cache_dirs = [
-            Path.home() / ".cache" / "ms-playwright",
-            Path("/root/.cache/ms-playwright"),
-        ]
-        for cdir in cache_dirs:
-            if cdir.exists():
-                for chrome in cdir.rglob("chrome"):
-                    if chrome.is_file() and os.access(chrome, os.X_OK):
+        playwright_pkg = True
+
+        # Search Playwright browser caches across Linux, Windows 11, and macOS without launching a browser
+        preferred_names = ("chrome", "chrome.exe", "headless_shell", "headless_shell.exe")
+        for cdir in _candidate_playwright_cache_dirs():
+            if not cdir.exists():
+                continue
+            for exe_name in preferred_names:
+                for candidate in cdir.rglob(exe_name):
+                    if candidate.is_file() and (exe_name.endswith(".exe") or os.access(candidate, os.X_OK)):
                         chromium_installed = True
-                        executable_path = str(chrome)
+                        executable_path = str(candidate)
+                        browser_source = "playwright_cache"
                         break
+                if chromium_installed:
+                    break
+            if chromium_installed:
+                break
+
         if not chromium_installed:
-            for bin_name in ("chromium", "chromium-browser", "google-chrome"):
+            for bin_name in ("chromium", "chromium-browser", "google-chrome", "chrome", "msedge"):
                 found = shutil.which(bin_name)
                 if found:
                     chromium_installed = True
                     executable_path = found
+                    browser_source = "system_binary"
                     break
         _ = sync_playwright
     except Exception:
@@ -50,6 +104,8 @@ def detect_playwright_capabilities() -> dict[str, Any]:
         "chromium_installed": chromium_installed,
         "executable_path": executable_path,
         "engine_mode": "playwright" if chromium_installed else "headless_fallback",
+        "browser_source": browser_source,
+        "playwright_browsers_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or None,
     }
 
 
@@ -97,15 +153,185 @@ def render_browser_wall_svg(profile: BrowserProfile, note: str = "") -> str:
 
 
 class BrowserManager:
-    """Manages persistent isolated Playwright browser profiles, locks, visible/background modes & recovery."""
+    """Manages persistent isolated Playwright browser profiles, DB+file+async locks, visible/background modes & recovery."""
 
     def __init__(self) -> None:
-        self._active_contexts: dict[str, Any] = {}
+        self._active_contexts: dict[str, tuple[Any, Any]] = {}
+        self._profile_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_profile_lock(self, profile_id: str) -> asyncio.Lock:
+        lock = self._profile_locks.get(profile_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._profile_locks[profile_id] = lock
+        return lock
 
     def _lock_file(self, profile: BrowserProfile) -> Path:
         pdir = Path(profile.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
         return pdir / ".aatm.lock"
+
+    @staticmethod
+    def _is_pid_alive(pid: int | None) -> bool:
+        if pid is None:
+            return True
+        if pid <= 0:
+            return False
+        try:
+            return bool(psutil.pid_exists(pid))
+        except Exception:
+            return False
+
+    def _read_lock_file(self, profile: BrowserProfile) -> dict[str, Any] | None:
+        lfile = Path(profile.profile_dir) / ".aatm.lock"
+        if not lfile.exists():
+            return None
+        try:
+            raw = lfile.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("owner"):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        # Backward compatibility with legacy "owner|timestamp" format
+        parts = raw.split("|", 1)
+        return {
+            "owner": parts[0].strip(),
+            "pid": None,
+            "acquired_at": parts[1].strip() if len(parts) > 1 else None,
+            "profile_id": profile.id,
+        }
+
+    def get_lock_status(self, profile: BrowserProfile) -> dict[str, Any]:
+        file_lock = self._read_lock_file(profile)
+        file_pid = file_lock.get("pid") if file_lock else None
+        pid_alive = self._is_pid_alive(file_pid) if file_lock else False
+        return {
+            "profile_id": profile.id,
+            "db_status": profile.status,
+            "db_lock_owner": profile.lock_owner,
+            "file_lock_present": file_lock is not None,
+            "file_lock_owner": file_lock.get("owner") if file_lock else None,
+            "file_lock_pid": file_pid,
+            "file_lock_alive": pid_alive,
+            "active_playwright_context": profile.id in self._active_contexts,
+        }
+
+    def _acquire_file_lock(self, profile: BrowserProfile, owner: str) -> bool:
+        """Acquire profile directory lock atomically; returns True if a stale lock was recovered."""
+        lfile = self._lock_file(profile)
+        stale_recovered = False
+        existing = self._read_lock_file(profile)
+        if existing:
+            existing_owner = existing.get("owner")
+            existing_pid = existing.get("pid")
+            if existing_owner and existing_owner != owner:
+                if self._is_pid_alive(existing_pid):
+                    raise ValueError(
+                        f"Browser profile '{profile.id}' is file-locked by '{existing_owner}'"
+                        + (f" (pid={existing_pid})." if existing_pid is not None else ".")
+                    )
+                stale_recovered = True
+            try:
+                lfile.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        payload = json.dumps(
+            {
+                "owner": owner,
+                "pid": os.getpid(),
+                "acquired_at": utcnow().isoformat(),
+                "profile_id": profile.id,
+            }
+        )
+        try:
+            fd = os.open(str(lfile), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, payload.encode("utf-8"))
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            racer = self._read_lock_file(profile)
+            racer_owner = racer.get("owner") if racer else "another-worker"
+            raise ValueError(f"Browser profile '{profile.id}' is concurrently locked by '{racer_owner}'.")
+        return stale_recovered
+
+    def _release_file_lock(self, profile: BrowserProfile) -> None:
+        lfile = Path(profile.profile_dir) / ".aatm.lock"
+        try:
+            lfile.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    async def _close_active_context(self, profile_id: str) -> None:
+        pair = self._active_contexts.pop(profile_id, None)
+        if not pair:
+            return
+        pw, ctx = pair
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+
+    async def _launch_playwright_context(
+        self,
+        profile: BrowserProfile,
+        pdir: Path,
+        caps: dict[str, Any],
+        url: str | None,
+    ) -> tuple[bool, str | None]:
+        pw = None
+        ctx = None
+        try:
+            from playwright.async_api import async_playwright
+
+            pw = await async_playwright().start()
+            launch_kwargs: dict[str, Any] = {
+                "user_data_dir": str(pdir),
+                "headless": (profile.mode != "visible"),
+                "viewport": {"width": profile.viewport_width, "height": profile.viewport_height},
+                "args": list(SAFE_CHROMIUM_ARGS),
+            }
+            if caps.get("browser_source") == "system_binary" and caps.get("executable_path"):
+                launch_kwargs["executable_path"] = caps["executable_path"]
+
+            ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            if url and url != "about:blank":
+                await page.goto(url, timeout=10_000)
+                profile.page_title = await page.title() or profile.page_title
+            self._active_contexts[profile.id] = (pw, ctx)
+            return True, None
+        except Exception as exc:
+            if ctx is not None:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            if pw is not None:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            return False, str(exc)
+
+    async def _close_db_sessions(self, db: AsyncSession, profile_id: str, final_status: str = "closed") -> None:
+        sess_res = await db.execute(
+            select(BrowserSession).where(BrowserSession.profile_id == profile_id, BrowserSession.status == "active")
+        )
+        for sess in sess_res.scalars().all():
+            sess.status = final_status
+            sess.ended_at = utcnow()
 
     async def launch_profile(
         self,
@@ -115,153 +341,220 @@ class BrowserManager:
         mode: str | None = None,
         url: str | None = None,
     ) -> BrowserProfile:
-        if profile.lock_owner and profile.lock_owner != owner and profile.status == "running":
-            raise ValueError(f"Browser profile '{profile.id}' is locked by '{profile.lock_owner}'.")
+        async with self._get_profile_lock(profile.id):
+            if profile.lock_owner and profile.lock_owner != owner and profile.status == "running":
+                raise ValueError(f"Browser profile '{profile.id}' is locked by '{profile.lock_owner}'.")
 
-        caps = detect_playwright_capabilities()
-        if mode in ("visible", "background"):
-            profile.mode = mode
-        if url:
-            profile.current_url = url
+            safe_url = validate_navigation_url(url) if url is not None else None
 
-        pdir = Path(profile.profile_dir)
-        pdir.mkdir(parents=True, exist_ok=True)
-        self._lock_file(profile).write_text(f"{owner}|{utcnow().isoformat()}", encoding="utf-8")
-
-        profile.lock_owner = owner
-        profile.engine_mode = caps["engine_mode"]
-        profile.status = "running"
-        profile.memory_mb = 142.5 if caps["chromium_installed"] else 28.4
-        profile.last_heartbeat = utcnow()
-        profile.last_snapshot_svg = render_browser_wall_svg(
-            profile,
-            note="Live Playwright Chromium context" if caps["chromium_installed"] else "Fallback renderer (Chromium binary not installed on host)",
-        )
-
-        # Attempt real Playwright persistent context if Chromium exists
-        if caps["chromium_installed"]:
-            try:
-                from playwright.async_api import async_playwright
-
-                pw = await async_playwright().start()
-                ctx = await pw.chromium.launch_persistent_context(
-                    user_data_dir=str(pdir),
-                    headless=(profile.mode != "visible"),
-                    viewport={"width": profile.viewport_width, "height": profile.viewport_height},
+            # Enforce host concurrency limit when starting an inactive profile
+            if profile.status != "running":
+                settings = get_settings()
+                running_res = await db.execute(
+                    select(func.count(BrowserProfile.id)).where(BrowserProfile.status == "running")
                 )
-                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                if url and url != "about:blank":
-                    await page.goto(url, timeout=10_000)
-                    profile.page_title = await page.title() or profile.page_title
-                self._active_contexts[profile.id] = (pw, ctx)
-            except Exception as exc:
-                profile.engine_mode = "headless_fallback"
-                profile.last_snapshot_svg = render_browser_wall_svg(profile, note=f"Playwright fallback active: {exc}")
+                running_count = int(running_res.scalar_one() or 0)
+                if running_count >= settings.MAX_CONCURRENT_BROWSERS:
+                    raise ValueError(
+                        f"Max concurrent browser limit ({settings.MAX_CONCURRENT_BROWSERS}) reached; stop an active profile first."
+                    )
 
-        session = BrowserSession(profile_id=profile.id, mode=profile.mode, status="active", pid=os.getpid())
-        db.add(session)
-        db.add(
-            AuditLog(
-                actor=owner,
-                action="browser.launch",
-                resource_type="browser_profile",
-                resource_id=profile.id,
-                details={"mode": profile.mode, "engine": profile.engine_mode, "url": profile.current_url},
-            )
-        )
-        await db.commit()
-        await db.refresh(profile)
-        await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "status": profile.status, "mode": profile.mode})
-        return profile
+            stale_lock_recovered = self._acquire_file_lock(profile, owner)
 
-    async def navigate_profile(self, db: AsyncSession, profile: BrowserProfile, url: str, title: str | None = None) -> BrowserProfile:
-        profile.current_url = url
-        profile.page_title = title or f"Preview: {url}"
-        profile.last_heartbeat = utcnow()
-        if profile.id in self._active_contexts:
-            try:
-                _, ctx = self._active_contexts[profile.id]
-                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                await page.goto(url, timeout=10_000)
-                profile.page_title = await page.title() or profile.page_title
-            except Exception:
-                pass
-        profile.last_snapshot_svg = render_browser_wall_svg(profile)
-        await db.commit()
-        await db.refresh(profile)
-        await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "url": url})
-        return profile
+            # Prevent Chromium SingletonLock / process leaks when same owner re-launches
+            if profile.id in self._active_contexts or profile.status == "running":
+                await self._close_active_context(profile.id)
+                await self._close_db_sessions(db, profile.id, final_status="closed")
 
-    async def stop_profile(self, db: AsyncSession, profile: BrowserProfile, actor: str = "system") -> BrowserProfile:
-        if profile.id in self._active_contexts:
-            pw, ctx = self._active_contexts.pop(profile.id)
-            try:
-                await ctx.close()
-                await pw.stop()
-            except Exception:
-                pass
+            caps = detect_playwright_capabilities()
+            if mode in ("visible", "background"):
+                profile.mode = mode
+            if safe_url:
+                profile.current_url = safe_url
 
-        lfile = self._lock_file(profile)
-        if lfile.exists():
-            lfile.unlink()
+            pdir = Path(profile.profile_dir)
+            pdir.mkdir(parents=True, exist_ok=True)
 
-        profile.status = "stopped"
-        profile.lock_owner = None
-        profile.memory_mb = 0.0
-        profile.last_heartbeat = utcnow()
-        profile.last_snapshot_svg = render_browser_wall_svg(profile, note="Session stopped cleanly; persistent storage preserved.")
-
-        sess_res = await db.execute(
-            select(BrowserSession).where(BrowserSession.profile_id == profile.id, BrowserSession.status == "active")
-        )
-        for sess in sess_res.scalars().all():
-            sess.status = "closed"
-            sess.ended_at = utcnow()
-
-        db.add(
-            AuditLog(
-                actor=actor,
-                action="browser.stop",
-                resource_type="browser_profile",
-                resource_id=profile.id,
-                details={"status": "stopped"},
-            )
-        )
-        await db.commit()
-        await db.refresh(profile)
-        await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "status": "stopped"})
-        return profile
-
-    async def simulate_crash_and_recover(self, db: AsyncSession, profile: BrowserProfile, recover: bool = True) -> BrowserProfile:
-        profile.crash_count += 1
-        profile.status = "crashed"
-        profile.lock_owner = None
-        lfile = self._lock_file(profile)
-        if lfile.exists():
-            lfile.unlink()
-        profile.last_snapshot_svg = render_browser_wall_svg(profile, note="Browser crash detected! Preparing self-healing recovery...")
-        await db.commit()
-
-        if recover:
+            profile.lock_owner = owner
+            profile.engine_mode = caps["engine_mode"]
             profile.status = "running"
-            profile.lock_owner = profile.agent_id or "recovery-daemon"
+            profile.memory_mb = 142.5 if caps["chromium_installed"] else 28.4
             profile.last_heartbeat = utcnow()
-            profile.memory_mb = 32.0 if profile.engine_mode != "playwright" else 140.0
-            profile.last_snapshot_svg = render_browser_wall_svg(profile, note="Recovered automatically from crash; persistent cookies & storage intact.")
+            launch_note = (
+                "Live Playwright Chromium context"
+                if caps["chromium_installed"]
+                else "Fallback renderer (Chromium binary not installed on host)"
+            )
+            if stale_lock_recovered:
+                launch_note += " (recovered stale lock file)"
+
+            # Attempt real Playwright persistent context if Chromium exists
+            if caps["chromium_installed"]:
+                launched_ok, err = await self._launch_playwright_context(profile, pdir, caps, safe_url)
+                if not launched_ok:
+                    profile.engine_mode = "headless_fallback"
+                    profile.memory_mb = 28.4
+                    launch_note = f"Playwright fallback active: {err}"
+
+            profile.last_snapshot_svg = render_browser_wall_svg(profile, note=launch_note)
+
+            session = BrowserSession(profile_id=profile.id, mode=profile.mode, status="active", pid=os.getpid())
+            db.add(session)
             db.add(
                 AuditLog(
-                    actor="self-healing",
-                    action="browser.recover",
+                    actor=owner,
+                    action="browser.launch",
                     resource_type="browser_profile",
                     resource_id=profile.id,
-                    details={"crash_count": profile.crash_count},
-                    severity="warning",
+                    details={
+                        "mode": profile.mode,
+                        "engine": profile.engine_mode,
+                        "url": profile.current_url,
+                        "stale_lock_recovered": stale_lock_recovered,
+                    },
                 )
             )
             await db.commit()
-        await db.refresh(profile)
-        await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "status": profile.status})
-        return profile
+            await db.refresh(profile)
+            await event_bus.emit(
+                "browser.snapshot",
+                {"profile_id": profile.id, "status": profile.status, "mode": profile.mode},
+            )
+            return profile
+
+    async def navigate_profile(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        url: str,
+        title: str | None = None,
+    ) -> BrowserProfile:
+        safe_url = validate_navigation_url(url)
+        async with self._get_profile_lock(profile.id):
+            profile.current_url = safe_url
+            profile.page_title = title or f"Preview: {safe_url}"
+            profile.last_heartbeat = utcnow()
+            nav_note = ""
+            if profile.id in self._active_contexts:
+                try:
+                    _, ctx = self._active_contexts[profile.id]
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    if safe_url != "about:blank":
+                        await page.goto(safe_url, timeout=10_000)
+                        profile.page_title = await page.title() or profile.page_title
+                except Exception as exc:
+                    nav_note = f"Navigation warning: {type(exc).__name__}"
+            profile.last_snapshot_svg = render_browser_wall_svg(profile, note=nav_note)
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "url": safe_url})
+            return profile
+
+    async def stop_profile(self, db: AsyncSession, profile: BrowserProfile, actor: str = "system") -> BrowserProfile:
+        async with self._get_profile_lock(profile.id):
+            await self._close_active_context(profile.id)
+            self._release_file_lock(profile)
+
+            profile.status = "stopped"
+            profile.lock_owner = None
+            profile.memory_mb = 0.0
+            profile.last_heartbeat = utcnow()
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note="Session stopped cleanly; persistent storage preserved.",
+            )
+
+            await self._close_db_sessions(db, profile.id, final_status="closed")
+
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="browser.stop",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={"status": "stopped"},
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "status": "stopped"})
+            return profile
+
+    async def simulate_crash_and_recover(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        recover: bool = True,
+    ) -> BrowserProfile:
+        async with self._get_profile_lock(profile.id):
+            await self._close_active_context(profile.id)
+            await self._close_db_sessions(db, profile.id, final_status="crashed")
+            self._release_file_lock(profile)
+
+            profile.crash_count += 1
+            profile.status = "crashed"
+            profile.lock_owner = None
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note="Browser crash detected! Preparing self-healing recovery...",
+            )
+            await db.commit()
+
+            if recover:
+                recovery_owner = profile.agent_id or "recovery-daemon"
+                self._acquire_file_lock(profile, recovery_owner)
+                caps = detect_playwright_capabilities()
+                pdir = Path(profile.profile_dir)
+                pdir.mkdir(parents=True, exist_ok=True)
+
+                profile.status = "running"
+                profile.lock_owner = recovery_owner
+                profile.engine_mode = caps["engine_mode"]
+                profile.last_heartbeat = utcnow()
+                profile.memory_mb = 140.0 if caps["chromium_installed"] else 32.0
+                recovery_note = "Recovered automatically from crash; persistent cookies & storage intact."
+
+                if caps["chromium_installed"]:
+                    launched_ok, err = await self._launch_playwright_context(
+                        profile, pdir, caps, profile.current_url
+                    )
+                    if not launched_ok:
+                        profile.engine_mode = "headless_fallback"
+                        profile.memory_mb = 32.0
+                        recovery_note = f"Recovered in fallback mode: {err}"
+
+                profile.last_snapshot_svg = render_browser_wall_svg(profile, note=recovery_note)
+                db.add(
+                    BrowserSession(
+                        profile_id=profile.id,
+                        mode=profile.mode,
+                        status="active",
+                        pid=os.getpid(),
+                        recovery_notes=f"Auto-recovered after crash #{profile.crash_count}",
+                    )
+                )
+                db.add(
+                    AuditLog(
+                        actor="self-healing",
+                        action="browser.recover",
+                        resource_type="browser_profile",
+                        resource_id=profile.id,
+                        details={"crash_count": profile.crash_count, "engine": profile.engine_mode},
+                        severity="warning",
+                    )
+                )
+                await db.commit()
+
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "status": profile.status})
+            return profile
+
+    async def shutdown_all(self) -> int:
+        """Gracefully close all active Playwright contexts held by this process."""
+        profile_ids = list(self._active_contexts.keys())
+        for pid in profile_ids:
+            await self._close_active_context(pid)
+        return len(profile_ids)
 
 
 browser_manager = BrowserManager()
