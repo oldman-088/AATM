@@ -21,12 +21,16 @@ from app.models import (
     WorkspaceArtifact,
 )
 from app.runtime.sandbox import (
+    SandboxExecutionPolicy,
     WorkspaceSandboxError,
     assert_allowed_binary,
+    build_isolated_command,
+    build_resource_preexec,
+    build_sanitized_env,
     resolve_contained_path,
 )
 
-__all__ = ["AgentRuntimeExecutor", "WorkspaceSandboxError", "agent_runtime"]
+__all__ = ["AgentRuntimeExecutor", "SandboxExecutionPolicy", "WorkspaceSandboxError", "agent_runtime"]
 
 
 class AgentRuntimeExecutor:
@@ -83,19 +87,63 @@ class AgentRuntimeExecutor:
         command: list[str],
         project_id: str | None = None,
         task_id: str | None = None,
+        *,
+        policy: SandboxExecutionPolicy | None = None,
+        sandbox_mode: str | None = None,
     ) -> dict[str, Any]:
-        """Execute an allowed development tool command strictly inside the employee's isolated workspace."""
+        """Execute an allowed development tool strictly inside the employee's isolated workspace with env scrubbing & limits."""
         exe = assert_allowed_binary(command)
 
         ws = ensure_employee_workspace(agent_id)
         settings = get_settings()
-        if exe in ("python", "python3", "pytest", "ruff"):
+        eff_policy = policy or SandboxExecutionPolicy.from_env(timeout_seconds=20)
+        eff_mode = (sandbox_mode or eff_policy.sandbox_mode).strip().lower() or "process"
+
+        exec_command = list(command)
+        if eff_mode == "process" and exe in ("python", "python3", "pytest", "ruff"):
             venv_bin = settings.REPO_ROOT / ".venv" / "bin" / exe
             if venv_bin.exists():
-                command = [str(venv_bin), *command[1:]]
+                exec_command = [str(venv_bin), *command[1:]]
+
+        isolated_cmd = build_isolated_command(
+            exec_command,
+            ws,
+            sandbox_mode=eff_mode,
+            memory_mb=eff_policy.memory_mb,
+            cpu_limit=eff_policy.cpu_limit,
+            pids_limit=eff_policy.max_procs,
+            docker_image=eff_policy.docker_image,
+        )
+        sanitized_env = build_sanitized_env({"HOME": str(ws)})
+        preexec = (
+            build_resource_preexec(
+                memory_mb=eff_policy.memory_mb,
+                cpu_seconds=eff_policy.cpu_seconds,
+                max_procs=eff_policy.max_procs,
+            )
+            if eff_mode == "process"
+            else None
+        )
 
         t0 = time.perf_counter()
-        proc = subprocess.run(command, cwd=str(ws), capture_output=True, text=True, timeout=20)
+        try:
+            proc = subprocess.run(
+                isolated_cmd,
+                cwd=str(ws),
+                env=sanitized_env,
+                preexec_fn=preexec,
+                capture_output=True,
+                text=True,
+                timeout=eff_policy.timeout_seconds,
+            )
+            exit_code = proc.returncode
+            stdout = proc.stdout
+            stderr = proc.stderr
+        except subprocess.TimeoutExpired:
+            exit_code = 124
+            stdout = ""
+            stderr = f"Command timed out after {eff_policy.timeout_seconds}s."
+
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
         art = WorkspaceArtifact(
             agent_id=agent_id,
@@ -103,17 +151,40 @@ class AgentRuntimeExecutor:
             task_id=task_id,
             relative_path=".",
             action="test",
-            summary=(proc.stdout or proc.stderr)[:1000],
-            exit_code=proc.returncode,
+            summary=(stdout or stderr)[:1000],
+            exit_code=exit_code,
         )
         db.add(art)
         await db.commit()
         return {
-            "exit_code": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
             "elapsed_ms": elapsed_ms,
+            "sandbox_mode": eff_mode,
         }
+
+    async def run_tool(
+        self,
+        db: AsyncSession,
+        agent_id: str,
+        command: list[str],
+        *,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        policy: SandboxExecutionPolicy | None = None,
+        sandbox_mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Alias for `run_workspace_command` enforcing sandbox policy, env scrubbing, and resource limits."""
+        return await self.run_workspace_command(
+            db,
+            agent_id,
+            command,
+            project_id=project_id,
+            task_id=task_id,
+            policy=policy,
+            sandbox_mode=sandbox_mode,
+        )
 
     async def send_and_execute_task_message(
         self,

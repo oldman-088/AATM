@@ -1,4 +1,6 @@
+import logging
 import re
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -10,7 +12,12 @@ from app.core.events import event_bus
 from app.db.base import utcnow
 from app.employees.catalog import ensure_employee_workspace
 from app.models import Agent, AgentMessage, ApprovalRequest, AuditLog, ChatMessage, Notification, Task
+from app.providers.router import provider_router
 from app.runtime.temporal import to_naive_utc
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_SESSION_RECOVERY_INTERVAL_SECONDS = 60.0
 
 PRIORITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
@@ -93,6 +100,48 @@ HIGH_RISK_DIRECTIVE_RULES: list[tuple[re.Pattern[str], str, str]] = [
 class TaskScheduler:
     """Dependency-aware DAG scheduler, lock manager, retry engine & Manager coordinator."""
 
+    def __init__(self, session_recovery_interval_seconds: float = DEFAULT_SESSION_RECOVERY_INTERVAL_SECONDS) -> None:
+        self.session_recovery_interval_seconds = max(0.0, float(session_recovery_interval_seconds))
+        self._last_session_recovery_at: float | None = None
+
+    def reset_session_recovery_cooldown(self) -> None:
+        """Clear the periodic throttle so the next cycle checks degraded sessions immediately."""
+        self._last_session_recovery_at = None
+
+    async def recover_sessions_if_needed(
+        self,
+        db: AsyncSession,
+        *,
+        force: bool = False,
+        health_threshold: float = 50.0,
+        actor: str = "scheduler",
+    ) -> dict[str, Any]:
+        """Periodic, best-effort hook delegating degraded ProviderSession recovery to ProviderRouter."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_session_recovery_at is not None
+            and (now - self._last_session_recovery_at) < self.session_recovery_interval_seconds
+        ):
+            return {"skipped": True, "recovered_count": 0, "sessions": []}
+
+        self._last_session_recovery_at = now
+        try:
+            result = await provider_router.recover_degraded_sessions(
+                db,
+                health_threshold=health_threshold,
+                actor=actor,
+            )
+            return {"skipped": False, **result}
+        except Exception as exc:  # noqa: BLE001 - best-effort recovery must never block task dispatch
+            logger.warning("Scheduler session recovery skipped after error: %s", type(exc).__name__)
+            return {
+                "skipped": False,
+                "recovered_count": 0,
+                "sessions": [],
+                "error": f"Session recovery error: {type(exc).__name__}",
+            }
+
     @staticmethod
     def _has_cycle(task_id: str, new_deps: list[str], all_tasks: dict[str, Task]) -> bool:
         visited: set[str] = set()
@@ -142,8 +191,15 @@ class TaskScheduler:
         task.locked_at = None
         await db.commit()
 
-    async def run_orchestration_cycle(self, db: AsyncSession) -> dict[str, Any]:
+    async def run_orchestration_cycle(
+        self,
+        db: AsyncSession,
+        *,
+        force_session_recovery: bool = False,
+    ) -> dict[str, Any]:
         """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
+        session_recovery = await self.recover_sessions_if_needed(db, force=force_session_recovery)
+
         settings = get_settings()
         agents_res = await db.execute(
             select(Agent).where(
@@ -159,7 +215,7 @@ class TaskScheduler:
         tasks_res = await db.execute(select(Task).where(Task.status.in_(["queued", "assigned", "in_progress"])))
         tasks = list(tasks_res.scalars().all())
         queued = [t for t in tasks if t.status == "queued"]
-        queued.sort(key=lambda t: (-PRIORITY_WEIGHT.get(t.priority, 2), t.created_at))
+        queued.sort(key=lambda t: (-PRIORITY_WEIGHT.get(t.priority, 2), to_naive_utc(t.created_at) or to_naive_utc(utcnow())))
 
         assigned: list[dict[str, str]] = []
         available_slots = max(0, settings.MAX_CONCURRENT_WORKERS - working_count)
@@ -242,7 +298,21 @@ class TaskScheduler:
         await db.commit()
         if assigned:
             await event_bus.emit("orchestration.cycle", {"dispatched": assigned})
-        return {"dispatched": assigned, "working_workers": working_count + len(assigned), "idle_workers": len(idle_workers)}
+        return {
+            "dispatched": assigned,
+            "working_workers": working_count + len(assigned),
+            "idle_workers": len(idle_workers),
+            "session_recovery": session_recovery,
+        }
+
+    async def dispatch_ready_tasks(
+        self,
+        db: AsyncSession,
+        *,
+        force_session_recovery: bool = False,
+    ) -> dict[str, Any]:
+        """Alias for `run_orchestration_cycle` that also runs the periodic degraded-session recovery hook."""
+        return await self.run_orchestration_cycle(db, force_session_recovery=force_session_recovery)
 
     async def complete_task(self, db: AsyncSession, task: Task, summary: str = "Completed and verified") -> Task:
         task.status = "completed"

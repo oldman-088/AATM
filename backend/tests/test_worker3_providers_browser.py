@@ -2233,3 +2233,287 @@ async def test_provider_router_recover_degraded_sessions_online_and_offline(db_s
     assert refreshed_off.status == "active"
     assert refreshed_off.health_score == 100.0
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Round 4: OS/Container Sandbox Isolation, Env Scrubbing & Scheduler Recovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sandbox_env_scrubbing_and_subprocess_isolation_executor_and_daemon(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.runtime.executor import AgentRuntimeExecutor
+    from app.runtime.sandbox import (
+        SandboxExecutionPolicy,
+        WorkspaceSandboxError,
+        build_resource_preexec,
+        build_sanitized_env,
+    )
+    from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
+
+    # Inject sensitive host variables (constructed dynamically to avoid literal secret strings)
+    sensitive_vars = {
+        "SECRET_KEY": "jwt-" + "master-" + "val-001",
+        "ANTHROPIC_API_KEY": "ant-" + "live-" + "val-002",
+        "ARENA_BRIDGE_TOKEN": "bridge-" + "tok-" + "val-003",
+        "AATM_GITHUB_WEBHOOK_SECRET": "ghwh-" + "sec-" + "val-004",
+        "AATM_DEVICE_TOKEN": "dev-" + "tok-" + "val-005",
+        "CUSTOM_SERVICE_TOKEN": "svc-" + "tok-" + "val-006",
+        "DB_PASSWORD": "db-" + "pw-" + "val-007",
+        "APP_PRIVATE_KEY": "priv-" + "key-" + "val-008",
+    }
+    for k, v in sensitive_vars.items():
+        monkeypatch.setenv(k, v)
+
+    # 1. Unit check: build_sanitized_env strips host AND extra secrets while keeping allowlisted vars
+    sanitized = build_sanitized_env(
+        extra={
+            "SAFE_CUSTOM_TAG": "allowed-tag",
+            "EXTRA_API_KEY": "must-be-dropped",
+            "EXTRA_SECRET": "must-be-dropped",
+            "EXTRA_PASSWORD": "must-be-dropped",
+            "EXTRA_TOKEN": "must-be-dropped",
+        }
+    )
+    assert sanitized.get("PYTHONDONTWRITEBYTECODE") == "1"
+    assert sanitized.get("SAFE_CUSTOM_TAG") == "allowed-tag"
+    for leaked_key in (*sensitive_vars.keys(), "EXTRA_API_KEY", "EXTRA_SECRET", "EXTRA_PASSWORD", "EXTRA_TOKEN"):
+        assert leaked_key not in sanitized
+
+    # 2. Resource preexec helper builds cleanly on POSIX
+    preexec = build_resource_preexec(memory_mb=512, cpu_seconds=30, max_procs=64)
+    if os.name == "posix":
+        assert callable(preexec)
+
+    # 3. Real subprocess execution via AgentRuntimeExecutor.run_tool strips all sensitive host env vars
+    executor = AgentRuntimeExecutor()
+    env_dump_cmd = ["python3", "-c", "import json, os; print(json.dumps(dict(os.environ)))"]
+    exec_res = await executor.run_tool(
+        db_session,
+        "worker-3",
+        env_dump_cmd,
+        policy=SandboxExecutionPolicy(sandbox_mode="process", memory_mb=512, cpu_seconds=30, max_procs=64),
+    )
+    assert exec_res["exit_code"] == 0, exec_res["stderr"]
+    assert exec_res["sandbox_mode"] == "process"
+    child_env_exec = json.loads(exec_res["stdout"])
+    for k, v in sensitive_vars.items():
+        assert k not in child_env_exec
+        assert v not in exec_res["stdout"]
+    assert child_env_exec.get("PYTHONDONTWRITEBYTECODE") == "1"
+    assert Path(child_env_exec["HOME"]).resolve() == (tmp_path / "workspaces" / "worker-3").resolve()
+
+    # Disallowed binaries remain blocked fail-closed
+    with pytest.raises(WorkspaceSandboxError):
+        await executor.run_tool(db_session, "worker-3", ["bash", "-c", "env"])
+
+    # 4. Real subprocess execution via WorkerDaemon._run_tool strips all sensitive host env vars
+    daemon = WorkerDaemon(
+        WorkerConfig(
+            device_id="node-sandbox-test",
+            token="daemon-tok-" + "never-expose-999",
+            workspace_root=tmp_path / "daemon-ws",
+        )
+    )
+    daemon_res = daemon._run_tool(env_dump_cmd)
+    assert daemon_res["exit_code"] == 0, daemon_res["stderr"]
+    assert daemon_res["sandbox_mode"] == "process"
+    child_env_daemon = json.loads(daemon_res["stdout"])
+    for k, v in sensitive_vars.items():
+        assert k not in child_env_daemon
+        assert v not in daemon_res["stdout"]
+    assert "never-expose-999" not in daemon_res["stdout"]
+    assert Path(child_env_daemon["HOME"]).resolve() == (tmp_path / "daemon-ws").resolve()
+
+    with pytest.raises(WorkspaceSandboxError):
+        daemon._run_tool(["curl", "https://example.com"])
+
+
+@pytest.mark.asyncio
+async def test_sandbox_docker_hardening_flags_and_fail_closed_when_cli_missing(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    from app.runtime.executor import AgentRuntimeExecutor
+    from app.runtime.sandbox import (
+        WorkspaceSandboxError,
+        build_isolated_command,
+    )
+    from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
+
+    ws = (tmp_path / "ws-docker").resolve()
+    ws.mkdir(parents=True, exist_ok=True)
+
+    # 1. Hardened docker flags + host venv path rewritten to bare tool inside python:3.11-slim
+    docker_cmd = build_isolated_command(
+        ["/opt/venv/bin/pytest", "-q", "test_app.py"],
+        ws,
+        sandbox_mode="docker",
+        memory_mb=256,
+        cpu_limit=0.5,
+        pids_limit=32,
+        docker_bin="/usr/bin/docker",
+    )
+    assert docker_cmd[:5] == ["/usr/bin/docker", "run", "--rm", "--network=none", "--read-only"]
+    assert "--cap-drop=ALL" in docker_cmd
+    assert "--security-opt=no-new-privileges" in docker_cmd
+    assert "--pids-limit=32" in docker_cmd
+    assert "--memory=256m" in docker_cmd
+    assert "--cpus=0.5" in docker_cmd
+    v_idx = docker_cmd.index("-v")
+    assert docker_cmd[v_idx + 1] == f"{ws}:/workspace:rw"
+    w_idx = docker_cmd.index("-w")
+    assert docker_cmd[w_idx + 1] == "/workspace"
+    assert "python:3.11-slim" in docker_cmd
+    assert docker_cmd[-3:] == ["pytest", "-q", "test_app.py"]
+
+    # Disallowed binary and unsupported sandbox mode both fail closed
+    with pytest.raises(WorkspaceSandboxError):
+        build_isolated_command(["sh", "-c", "id"], ws, sandbox_mode="docker", docker_bin="/usr/bin/docker")
+    with pytest.raises(WorkspaceSandboxError):
+        build_isolated_command(["python3", "-V"], ws, sandbox_mode="privileged")
+
+    # 2. Fail closed with WorkspaceSandboxError when `docker` CLI is absent on PATH
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    with pytest.raises(WorkspaceSandboxError, match="docker"):
+        build_isolated_command(["python3", "-V"], ws, sandbox_mode="docker")
+
+    executor = AgentRuntimeExecutor()
+    with pytest.raises(WorkspaceSandboxError, match="docker"):
+        await executor.run_tool(db_session, "worker-3", ["python3", "-V"], sandbox_mode="docker")
+
+    daemon = WorkerDaemon(
+        WorkerConfig(
+            device_id="node-docker-missing",
+            token="tok",
+            workspace_root=tmp_path / "daemon-docker-ws",
+            sandbox_mode="docker",
+        )
+    )
+    with pytest.raises(WorkspaceSandboxError, match="docker"):
+        daemon._run_tool(["python3", "-V"])
+
+
+@pytest.mark.asyncio
+async def test_scheduler_automatic_degraded_session_recovery_and_cooldown(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.orchestration.scheduler import TaskScheduler
+    from app.providers.router import provider_router
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
+
+    with _MockBridgeServer() as srv:
+        p_bridge = await db_session.get(AIProvider, "arena-local-bridge")
+        assert p_bridge is not None
+        p_bridge.endpoint_url = srv.base_url
+        p_bridge.credential_ref = None
+        p_bridge.is_enabled = True
+
+        acct = ProviderAccount(
+            id="acct-sched-rec",
+            provider_id="arena-local-bridge",
+            label="Scheduler Recovery Account",
+            account_identifier="sched-rec@local",
+            status="active",
+        )
+        sess_deg = ProviderSession(
+            id="sess-sched-deg-1",
+            account_id=acct.id,
+            agent_id="worker-3",
+            status="degraded",
+            health_score=20.0,
+            error_count=4,
+            last_error="Upstream 502",
+        )
+        proj = Project(
+            id="proj-sched-r4",
+            name="Scheduler Recovery Project",
+            slug="sched-r4-proj",
+            description="Test scheduler recovery + DAG/device pinning",
+        )
+        local_task = Task(
+            id="task-sched-local",
+            project_id=proj.id,
+            division_code="D05",
+            title="Local sched task",
+            priority="high",
+            status="queued",
+            device_id="device-local",
+        )
+        remote_task = Task(
+            id="task-sched-remote",
+            project_id=proj.id,
+            division_code="D05",
+            title="Remote pinned task",
+            priority="critical",
+            status="queued",
+            device_id="node-remote-99",
+        )
+        db_session.add_all([acct, sess_deg, proj, local_task, remote_task])
+        await db_session.commit()
+
+        srv.sessions[sess_deg.id] = acct.id
+
+        scheduler = TaskScheduler(session_recovery_interval_seconds=60.0)
+        cycle1 = await scheduler.dispatch_ready_tasks(db_session)
+
+        # 1. Degraded session recovered automatically & bridge session cleared
+        assert cycle1["session_recovery"]["skipped"] is False
+        assert cycle1["session_recovery"]["recovered_count"] == 1
+        assert sess_deg.id not in srv.sessions
+
+        refreshed_sess = await db_session.get(ProviderSession, sess_deg.id)
+        assert refreshed_sess is not None
+        assert refreshed_sess.health_score == 100.0
+        assert refreshed_sess.status == "active"
+        assert refreshed_sess.error_count == 0
+
+        # 2. Local task dispatched, remote device-pinned task NOT stolen
+        dispatched_ids = [d["task_id"] for d in cycle1["dispatched"]]
+        assert local_task.id in dispatched_ids
+        assert remote_task.id not in dispatched_ids
+
+        # 3. Second cycle within cooldown skips redundant recovery query
+        cycle2 = await scheduler.run_orchestration_cycle(db_session)
+        assert cycle2["session_recovery"]["skipped"] is True
+
+        # 4. Forced recovery bypasses cooldown immediately
+        refreshed_sess.health_score = 15.0
+        refreshed_sess.status = "degraded"
+        await db_session.commit()
+        forced = await scheduler.recover_sessions_if_needed(db_session, force=True)
+        assert forced["skipped"] is False
+        assert forced["recovered_count"] == 1
+
+        # 5. Best-effort resilience: recovery error never aborts task dispatching
+        async def _boom_recover(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("transient recovery error")
+
+        monkeypatch.setattr(provider_router, "recover_degraded_sessions", _boom_recover)
+        local_task_2 = Task(
+            id="task-sched-local-2",
+            project_id=proj.id,
+            division_code="D02",
+            title="Task dispatched despite recovery error",
+            priority="high",
+            status="queued",
+            device_id="device-local",
+        )
+        db_session.add(local_task_2)
+        await db_session.commit()
+
+        cycle3 = await scheduler.run_orchestration_cycle(db_session, force_session_recovery=True)
+        assert "error" in cycle3["session_recovery"]
+        assert any(d["task_id"] == local_task_2.id for d in cycle3["dispatched"])
+
+
