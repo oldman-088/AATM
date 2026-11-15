@@ -11,11 +11,15 @@
 ```bash
 cp .env.example .env
 # Edit .env and set DATABASE_URL=postgresql+psycopg://aatm:<password>@localhost:5432/aatm
-docker compose up -d
+# (postgres://, postgresql://, postgresql+asyncpg://, and postgresql+psycopg2:// are also normalized automatically)
+docker compose up -d postgres
 cd backend && ../.venv/bin/alembic upgrade head
 ```
 The Compose file reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` and
-`POSTGRES_PORT` from the environment, so the credentials are not hard-coded.
+`POSTGRES_PORT` from the environment, so the credentials are not hard-coded. It also
+includes a hardened `worker` container service (`read_only: true`, `cap_drop: [ALL]`,
+`no-new-privileges:true`, `pids_limit: 64`, `mem_limit: 512m`, non-root user
+`65534:65534`, `AATM_SANDBOX_MODE`).
 
 ### SQLite (Zero-Dependency Local)
 Default `.env.example` uses `sqlite+aiosqlite:///./data/aatm.db`.
