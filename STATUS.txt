@@ -1,33 +1,31 @@
 ========================================================================
 AATM — SYSTEM STATUS REPORT
 ========================================================================
-Updated (UTC): 2026-11-15T12:15:00Z
-Current Phase: Specification Alignment Round 1 Complete (Increments 1–5 Integrated)
+Updated (UTC): 2026-11-15T12:45:00Z
+Current Phase: Specification Alignment Round 2 Complete (W1+W2+W3+W4 Integrated)
 Current Branch: arena/e5fef882-aatm (Divisions 01–12)
 
 TEST RESULTS (verified via `scripts/ubuntu/verify.sh`, exit 0, 12/12 gates):
 - Prerequisites (`python3`, `git`, `node`): PASS (3/3)
-- Alembic upgrade head (`6c3ab8f4d2e1`): PASS
+- Alembic upgrade head (`6c3ab8f4d2e1`, `path_separator = os`): PASS
 - Backend `ruff check`: PASS (0 errors)
 - Bridge `ruff check`: PASS (0 errors)
-- Backend + E2E `pytest`: PASS (68/68)
+- Backend + E2E `pytest`: PASS (80/80, 0 warnings)
     * test_aatm_backend.py: 5/5
-    * test_contracts_v2.py: 8/8
-    * test_e2e_verification.py: 30/30
+    * test_contracts_v2.py: 15/15
+    * test_e2e_verification.py: 32/32
     * test_enterprise_platform.py: 4/4
-    * test_worker3_providers_browser.py: 21/21
-- Reference Arena Bridge `pytest` (`bridge/tests/test_bridge.py`): PASS (6/6)
-- Static secret & git-index scan (`python -m app.qa.engine`): PASS (0 findings, 130+ files including .md)
+    * test_worker3_providers_browser.py: 24/24 (17->23+1 parameterized)
+- Reference Arena Bridge `pytest` (`bridge/tests/test_bridge.py`): PASS (8/8)
+- Static secret & git-index scan (`python -m app.qa.engine`): PASS (0 findings, 132 files)
 - Frontend `tsc --noEmit`: PASS (0 errors)
-- Frontend `vitest run`: PASS (31/31 across 2 test files)
-- Frontend `vite build`: PASS
-- Combined Automated Tests Passing: 105/105
+- Frontend `vitest run`: PASS (38/38 across 2 test files)
+- Frontend `vite build`: PASS (1,584 modules)
+- Combined Automated Tests Passing: 126/126
 
-ROUND 1 INTEGRATED DELIVERABLES (Increments 1–5):
-- Increment 1 (Manager): `AATM_MASTER_SPECIFICATION.md`, `AGENTS.md`, `docs/{EXISTING_PROJECT_AUDIT,TEAM_STRUCTURE,DEVELOPMENT_PLAN}.md`.
-- Increment 2 (Worker 1): `ExecutionDevice.token_version` + Alembic migration `6c3ab8f4d2e1`, `POST /api/v1/devices/{id}/revoke`, `budget_summary` on `/providers/usage`, session-scoped `/providers/{id}/test`.
-- Increment 3 (Worker 2): Approval-gated GitHub PR/Issue UI, provider budget headroom UI, device token revocation UI, EN/AR/FA RTL parity (31/31 Vitest).
-- Increment 4 (Worker 3): `ArenaLocalBridgeAdapter.delete_session`, SSE streaming & scoped metrics in `bridge/server.py`, policy-checked `click_element`/`fill_input`/`capture_snapshot`, best-effort bridge cleanup in `replace_employee`, `HTTP 401` halt in `worker_daemon.py`.
-- Increment 5 (Worker 4/5): `.github/workflows/ci.yml`, PR/Issue templates, `docs/SECURITY_POLICY.md`, unified 12-gate `verify.sh`/`verify.ps1`, dynamic Alembic head stamp, 3 new E2E tests.
-- Integration Fix: `backend/alembic/env.py` `disable_existing_loggers=False` preserving module loggers during in-process migrations.
+ROUND 2 INTEGRATED DELIVERABLES:
+- W1 (`791aa55`): RBAC-restricted atomic `/devices/{id}/revoke`, `POST /api/v1/github/branches`, read-only `GET /api/v1/traces`, `contracts/schemas.json` v2.1.0, `alembic.ini` `path_separator = os`.
+- W2 (`7cf24af`): Aligned GitHub approval payloads (`kind`, `base`, `target_branch`, `url`/`pr_number`/`issue_number`), initial `device_token` display, provider `agent_id`/`session_id` context, division grouping, and `ExecutionTraces` UI.
+- W3 (`09b587d`): Native SSE streaming client (`generate_stream`, `route_and_stream`), Bridge state persistence (`0o600`) & TTL eviction, cross-account guard + dynamic `health_score`, executable `AutomaWorkflowAdapter`, policy-checked `BrowserManager.run_userscript`, browser lock release on employee replacement, and mid-task `WorkerDaemon` keepalive halting cleanly on HTTP 401.
+- W4 (`80d0633`): Per-agent `git worktree` isolation (`create_agent_worktree` / `remove_agent_worktree` under `data/worktrees/`), QA scan hygiene, and Round 2 E2E regression tests.
 ========================================================================
