@@ -1,6 +1,8 @@
 # AATM — AI Agent Team Manager
 
-Full-stack autonomous engineering orchestration platform managing a **Chief AI Engineering Manager** and **4 Specialized Worker Agents** across **12 Development Divisions**.
+> **Master Specification:** [`AATM_MASTER_SPECIFICATION.md`](./AATM_MASTER_SPECIFICATION.md) | **Agent Guide:** [`AGENTS.md`](./AGENTS.md)
+
+Full-stack autonomous engineering orchestration platform managing a **Chief AI Engineering Manager** and **Specialized Worker Agents** (scalable to 20+ dynamic AI employees) across **12 Development Divisions**.
 
 ## Key Capabilities
 - **Four-Worker Architecture**: Backend Engineer (`worker-1`), Frontend Engineer (`worker-2`), AI Provider & Browser Engineer (`worker-3`), Orchestration & QA Engineer (`worker-4`).
