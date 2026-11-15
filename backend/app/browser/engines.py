@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 from urllib.parse import urlparse
 
-from app.browser.manager import detect_playwright_capabilities, validate_navigation_url
+from app.browser.manager import detect_playwright_capabilities, validate_navigation_url, validate_selector
 
 MAX_USERSCRIPT_BYTES = 100_000
 
@@ -64,7 +64,11 @@ WILDCARD_SCOPE_VALUES = {"*", "all", "any", "everyone"}
 ALLOWED_BROWSER_ACTIONS = {
     "navigate",
     "snapshot",
+    "capture_snapshot",
     "click",
+    "click_element",
+    "fill",
+    "fill_input",
     "type",
     "extract_text",
     "wait",
@@ -287,7 +291,20 @@ def _validate_engine_action(action: str, params: dict[str, Any]) -> tuple[bool, 
             validate_navigation_url(str(params["url"]))
         except ValueError as exc:
             return False, str(exc)
+    if "selector" in params and params["selector"] is not None:
+        try:
+            validate_selector(str(params["selector"]))
+        except ValueError as exc:
+            return False, str(exc)
     return True, "ok"
+
+
+def _redact_action_params(params: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(params)
+    if "value" in sanitized and sanitized["value"] is not None:
+        sanitized["value_length"] = len(str(sanitized["value"]))
+        sanitized["value"] = "<redacted>"
+    return sanitized
 
 
 class BaseBrowserEngineAdapter(ABC):
@@ -322,7 +339,16 @@ class PlaywrightEngineAdapter(BaseBrowserEngineAdapter):
         ok, msg = _validate_engine_action(action, params)
         if not ok:
             return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
-        return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "executed", "params": params}
+        caps = detect_playwright_capabilities()
+        return {
+            "engine": self.engine_name,
+            "profile_id": profile_id,
+            "action": action,
+            "engine_mode": caps["engine_mode"],
+            "executed_live": bool(caps["chromium_installed"]),
+            "status": "executed" if caps["chromium_installed"] else "headless_fallback",
+            "params": _redact_action_params(params),
+        }
 
 
 class BrowserUseEngineAdapter(BaseBrowserEngineAdapter):
@@ -403,6 +429,16 @@ class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
             if step.get("url"):
                 try:
                     validate_navigation_url(str(step["url"]))
+                except ValueError as exc:
+                    return {
+                        "engine": self.engine_name,
+                        "profile_id": profile_id,
+                        "status": "rejected",
+                        "reason": f"Policy violation at step {idx}: {exc}",
+                    }
+            if step.get("selector"):
+                try:
+                    validate_selector(str(step["selector"]))
                 except ValueError as exc:
                     return {
                         "engine": self.engine_name,

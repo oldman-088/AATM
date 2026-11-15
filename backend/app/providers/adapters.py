@@ -1,6 +1,7 @@
+import re
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -13,6 +14,7 @@ from app.providers.base import (
 
 DEFAULT_ARENA_BRIDGE_URL = "http://127.0.0.1:4100"
 DEFAULT_ANTHROPIC_URL = "https://api.anthropic.com/v1"
+SAFE_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
 
 MODEL_PRICING_PER_1M = {
     "claude-sonnet-4-5": (3.0, 15.0),
@@ -283,6 +285,9 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
 
     async def get_session(self, session_id: str, account_id: str | None = None) -> dict[str, Any] | None:
         """Inspect a per-employee session context from the Arena Local Bridge daemon."""
+        cleaned_sid = (session_id or "").strip()
+        if not cleaned_sid or not SAFE_SESSION_ID_RE.fullmatch(cleaned_sid):
+            return None
         if not self.credential_ref_valid:
             return None
         ok, normalized_or_err = _validate_http_endpoint(self._base_url())
@@ -294,7 +299,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
             headers["Authorization"] = f"Bearer {token}"
         if account_id:
             headers["X-AATM-Account-Id"] = str(account_id)
-        url = f"{normalized_or_err}/v1/sessions/{session_id}"
+        url = f"{normalized_or_err}/v1/sessions/{quote(cleaned_sid, safe='')}"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(url, headers=headers)
@@ -305,6 +310,103 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    async def delete_session(self, session_id: str, account_id: str | None = None) -> dict[str, Any]:
+        """Teardown an isolated employee session on the Arena Local Bridge daemon (for employee replacement handoff)."""
+        cleaned_sid = (session_id or "").strip()
+        if not cleaned_sid or not SAFE_SESSION_ID_RE.fullmatch(cleaned_sid):
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "invalid_session_id",
+                "bridge_reachable": False,
+                "error": "Invalid session_id format.",
+            }
+        if not self.credential_ref_valid:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "policy_error",
+                "bridge_reachable": False,
+                "error": self.credential_ref_error,
+            }
+        ok, normalized_or_err = _validate_http_endpoint(self._base_url())
+        if not ok:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "invalid_endpoint",
+                "bridge_reachable": False,
+                "error": normalized_or_err,
+            }
+
+        headers: dict[str, str] = {}
+        token = self.resolve_credential()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if account_id:
+            headers["X-AATM-Account-Id"] = str(account_id)
+
+        url = f"{normalized_or_err}/v1/sessions/{quote(cleaned_sid, safe='')}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.delete(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json() if resp.content else {}
+                    return {
+                        "deleted": bool(data.get("deleted", True)) if isinstance(data, dict) else True,
+                        "session_id": cleaned_sid,
+                        "account_id": account_id,
+                        "status": "deleted",
+                        "bridge_reachable": True,
+                    }
+                if resp.status_code == 404:
+                    return {
+                        "deleted": False,
+                        "session_id": cleaned_sid,
+                        "account_id": account_id,
+                        "status": "not_found",
+                        "bridge_reachable": True,
+                    }
+                if resp.status_code == 403:
+                    return {
+                        "deleted": False,
+                        "session_id": cleaned_sid,
+                        "account_id": account_id,
+                        "status": "forbidden",
+                        "bridge_reachable": True,
+                        "error": "Cross-account session delete denied (HTTP 403).",
+                    }
+                return {
+                    "deleted": False,
+                    "session_id": cleaned_sid,
+                    "account_id": account_id,
+                    "status": "http_error",
+                    "http_status": resp.status_code,
+                    "bridge_reachable": True,
+                    "error": f"Bridge returned HTTP {resp.status_code} on session delete.",
+                }
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "bridge_offline",
+                "bridge_reachable": False,
+                "error": f"Arena Local Bridge offline at {normalized_or_err}: {type(exc).__name__}",
+            }
+        except Exception as exc:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "error",
+                "bridge_reachable": False,
+                "error": f"Session delete error: {type(exc).__name__}",
+            }
 
 
 class ArenaAgentAdapter(BaseProviderAdapter):

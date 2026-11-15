@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -33,7 +35,10 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+BRIDGE_VERSION = "2.2.0"
 
 DEFAULT_MODELS = [
     "arena-bridge-default",
@@ -67,6 +72,7 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessageInput] = Field(min_length=1)
     max_tokens: int = Field(default=1024, ge=1, le=32768)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    stream: bool = False
     user: str | None = None
     session_id: str | None = None
     account_id: str | None = None
@@ -226,6 +232,42 @@ class BridgeSessionStore:
         async with self._lock:
             return len(self._sessions)
 
+    async def metrics(self, account_id: str | None = None) -> dict[str, Any]:
+        """Return aggregate session count & token telemetry strictly scoped to account_id when provided."""
+        async with self._lock:
+            scoped = [
+                sess
+                for sess in self._sessions.values()
+                if account_id is None or sess.account_id == account_id
+            ]
+            accounts_breakdown: dict[str, int] = {}
+            agents: set[str] = set()
+            total_turns = 0
+            total_messages = 0
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            for sess in scoped:
+                acct_key = sess.account_id or "unassigned"
+                accounts_breakdown[acct_key] = accounts_breakdown.get(acct_key, 0) + 1
+                if sess.agent_id:
+                    agents.add(sess.agent_id)
+                total_turns += sess.turn_count
+                total_messages += len(sess.messages)
+                total_prompt_tokens += sess.total_prompt_tokens
+                total_completion_tokens += sess.total_completion_tokens
+
+            return {
+                "total_sessions": len(scoped),
+                "total_turns": total_turns,
+                "total_messages": total_messages,
+                "total_prompt_tokens": total_prompt_tokens,
+                "total_completion_tokens": total_completion_tokens,
+                "unique_accounts": len(accounts_breakdown),
+                "unique_agents": len(agents),
+                "accounts_breakdown": accounts_breakdown,
+                "max_history_per_session": self.max_history,
+            }
+
 
 def _verify_bearer_auth(authorization: str | None = Header(default=None)) -> None:
     expected = os.environ.get("ARENA_BRIDGE_TOKEN", "").strip()
@@ -317,6 +359,12 @@ def _generate_local_reference_completion(
     return content, prompt_tokens, completion_tokens
 
 
+def _split_sse_chunks(content: str, chunk_size: int = 32) -> list[str]:
+    if not content:
+        return []
+    return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
+
+
 def create_app(max_history: int | None = None) -> FastAPI:
     hist_limit = max_history if max_history is not None else int(os.environ.get("ARENA_BRIDGE_MAX_HISTORY", "40"))
     store = BridgeSessionStore(max_history=hist_limit)
@@ -324,8 +372,8 @@ def create_app(max_history: int | None = None) -> FastAPI:
 
     bridge_app = FastAPI(
         title="AATM Arena Local Bridge (Reference Daemon)",
-        version="2.1.0",
-        description="Compliant loopback bridge daemon for AATM Division 05 with Bearer auth and per-employee session isolation.",
+        version=BRIDGE_VERSION,
+        description="Compliant loopback bridge daemon for AATM Division 05 with Bearer auth, SSE streaming & per-employee session isolation.",
     )
     bridge_app.state.session_store = store
 
@@ -336,22 +384,23 @@ def create_app(max_history: int | None = None) -> FastAPI:
         return {
             "status": "ok",
             "service": "aatm-arena-local-bridge",
-            "version": "2.1.0",
+            "version": BRIDGE_VERSION,
             "mode": "upstream_proxy" if upstream else "local_reference",
             "auth_required": token_configured,
+            "streaming_supported": True,
             "models": list(DEFAULT_MODELS),
             "active_sessions": await store.count(),
             "uptime_seconds": round(time.monotonic() - started_at, 2),
         }
 
-    @bridge_app.post("/v1/chat/completions", dependencies=[Depends(_verify_bearer_auth)])
+    @bridge_app.post("/v1/chat/completions", dependencies=[Depends(_verify_bearer_auth)], response_model=None)
     async def chat_completions(
         body: ChatCompletionRequest,
         x_aatm_session_id: str | None = Header(default=None),
         x_aatm_account_id: str | None = Header(default=None),
         x_aatm_agent_id: str | None = Header(default=None),
         x_aatm_conversation_id: str | None = Header(default=None),
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | StreamingResponse:
         meta = dict(body.metadata or {})
         session_id = (
             (x_aatm_session_id or "").strip()
@@ -420,10 +469,62 @@ def create_app(max_history: int | None = None) -> FastAPI:
             model=body.model,
         )
 
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created_ts = int(time.time())
+        usage_payload = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+        session_summary = updated.to_summary()
+
+        if body.stream:
+            async def sse_events() -> AsyncIterator[str]:
+                role_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": body.model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                    "session": session_summary,
+                }
+                yield f"data: {json.dumps(role_chunk)}\n\n"
+
+                for piece in _split_sse_chunks(content):
+                    delta_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": body.model,
+                        "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(delta_chunk)}\n\n"
+
+                final_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": body.model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": usage_payload,
+                    "session": session_summary,
+                }
+                yield f"data: {json.dumps(final_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            sse_headers = {
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-AATM-Session-Id": updated.session_id,
+            }
+            if updated.account_id:
+                sse_headers["X-AATM-Account-Id"] = updated.account_id
+            return StreamingResponse(sse_events(), media_type="text/event-stream", headers=sse_headers)
+
         return {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "id": completion_id,
             "object": "chat.completion",
-            "created": int(time.time()),
+            "created": created_ts,
             "model": body.model,
             "choices": [
                 {
@@ -432,12 +533,8 @@ def create_app(max_history: int | None = None) -> FastAPI:
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-            "session": updated.to_summary(),
+            "usage": usage_payload,
+            "session": session_summary,
         }
 
     @bridge_app.get("/v1/sessions", dependencies=[Depends(_verify_bearer_auth)])
@@ -446,7 +543,18 @@ def create_app(max_history: int | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         account_filter = (x_aatm_account_id or "").strip() or None
         sessions = await store.list_summaries(account_id=account_filter)
-        return {"count": len(sessions), "sessions": sessions}
+        metrics = await store.metrics(account_id=account_filter)
+        metrics["uptime_seconds"] = round(time.monotonic() - started_at, 2)
+        return {
+            "status": "ok",
+            "service": "aatm-arena-local-bridge",
+            "version": BRIDGE_VERSION,
+            "count": len(sessions),
+            "active_sessions": len(sessions),
+            "account_scope": account_filter,
+            "metrics": metrics,
+            "sessions": sessions,
+        }
 
     @bridge_app.get("/v1/sessions/{session_id}", dependencies=[Depends(_verify_bearer_auth)])
     async def get_session(
