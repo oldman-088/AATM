@@ -1,0 +1,32 @@
+{
+  "version": "1.0.0",
+  "api_prefix": "/api/v1",
+  "languages": [
+    {"code": "en", "name": "English", "nativeName": "English", "dir": "ltr"},
+    {"code": "ar", "name": "Arabic", "nativeName": "العربية", "dir": "rtl"},
+    {"code": "fa", "name": "Persian", "nativeName": "فارسی", "dir": "rtl"}
+  ],
+  "divisions": [
+    {"id": 1, "code": "D01", "name": "System Foundation and Architecture", "owner": "manager+worker-1"},
+    {"id": 2, "code": "D02", "name": "Backend and Database", "owner": "worker-1"},
+    {"id": 3, "code": "D03", "name": "Frontend and User Experience", "owner": "worker-2"},
+    {"id": 4, "code": "D04", "name": "Multilingual System", "owner": "worker-2"},
+    {"id": 5, "code": "D05", "name": "AI Provider Integration", "owner": "worker-3"},
+    {"id": 6, "code": "D06", "name": "Browser Profile Infrastructure", "owner": "worker-3"},
+    {"id": 7, "code": "D07", "name": "Manager and Worker Agent System", "owner": "worker-4"},
+    {"id": 8, "code": "D08", "name": "Task Orchestration and Scheduling", "owner": "worker-4"},
+    {"id": 9, "code": "D09", "name": "Project Management and Memory", "owner": "worker-1+worker-4"},
+    {"id": 10, "code": "D10", "name": "GitHub and Development Workflows", "owner": "worker-4"},
+    {"id": 11, "code": "D11", "name": "Quality, Intelligence, Security and Recovery", "owner": "worker-4"},
+    {"id": 12, "code": "D12", "name": "Integration, Cross-Platform Testing and Delivery", "owner": "manager+all"}
+  ],
+  "enums": {
+    "agent_status": ["idle", "working", "paused", "error", "offline"],
+    "task_status": ["backlog", "queued", "assigned", "in_progress", "review", "blocked", "completed", "failed", "cancelled"],
+    "task_priority": ["critical", "high", "medium", "low"],
+    "approval_types": ["spend", "deploy", "merge", "delete", "credential", "security", "irreversible"],
+    "memory_scopes": ["global", "project", "agent", "task", "decision"],
+    "browser_modes": ["visible", "background"],
+    "provider_types": ["arena_local_bridge", "arena_agent", "anthropic_claude"]
+  }
+}

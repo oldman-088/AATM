@@ -1,0 +1,13 @@
+========================================================================
+AATM — PRIORITIZED NEXT ACTIONS
+========================================================================
+Updated (UTC): 2026-11-15T06:27:00Z
+
+COMPLETED DELIVERABLES:
+- All 12 Divisions implemented, integrated, and verified.
+
+OPTIONAL TARGET-HOST DEPLOYMENT ACTIONS:
+1. On Ubuntu / Windows 11 host: run `scripts/ubuntu/install.sh` or `scripts/windows/install.ps1` to install Playwright Chromium.
+2. Start PostgreSQL via `docker compose up -d` and set `DATABASE_URL` in `.env` for production PostgreSQL persistence.
+3. Set `ANTHROPIC_API_KEY` in `.env` (or start Arena Local Bridge on `:4100`) to enable live provider completions.
+========================================================================

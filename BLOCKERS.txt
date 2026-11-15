@@ -1,0 +1,15 @@
+========================================================================
+AATM — REAL BLOCKERS & ENVIRONMENT CONSTRAINTS
+========================================================================
+Updated (UTC): 2026-11-15T06:27:00Z
+
+ACTIVE BLOCKERS:
+- None blocking the running platform.
+
+ENVIRONMENT CONSTRAINTS (DOCUMENTED):
+1. Chromium binary not pre-installed in this sandbox (Playwright CDN outside sandbox allowlist).
+   -> Handled: `BrowserManager` reports exact capability status and runs deterministic Browser Wall fallback mode locally; `install.sh` / `install.ps1` run `playwright install chromium` on target hosts.
+2. Live Anthropic Claude API / Arena Local Bridge calls require `ANTHROPIC_API_KEY` or a running Arena Local Bridge daemon on port 4100.
+   -> Handled: Safe zero-spend dry-run mode and health diagnostics operate cleanly without credentials.
+3. Windows 11 `.ps1` scripts cannot be natively executed inside this Linux sandbox; verified by inspection and matched against Ubuntu `.sh` scripts.
+========================================================================
