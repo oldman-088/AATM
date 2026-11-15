@@ -3,14 +3,22 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.models import Agent, AIProvider, ProviderSession, ProviderUsageLog, SystemSetting
-from app.providers.adapters import build_adapter
+from app.models import (
+    Agent,
+    AIProvider,
+    AuditLog,
+    ProviderAccount,
+    ProviderSession,
+    ProviderUsageLog,
+    SystemSetting,
+)
+from app.providers.adapters import ArenaLocalBridgeAdapter, build_adapter
 from app.providers.base import (
     BaseProviderAdapter,
     ProviderHealth,
@@ -577,6 +585,106 @@ class ProviderRouter:
             error_message=last_err,
             metadata={"budget_exceeded": budget_blocked, "stream": True},
         )
+
+    async def recover_degraded_sessions(
+        self,
+        db: AsyncSession,
+        *,
+        health_threshold: float = 50.0,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        """Reset degraded ProviderSessions (health_score < threshold or status='degraded'), clearing bridge state cleanly."""
+        res = await db.execute(
+            select(ProviderSession).where(
+                ProviderSession.status != "closed",
+                or_(
+                    ProviderSession.health_score < health_threshold,
+                    ProviderSession.status == "degraded",
+                ),
+            )
+        )
+        degraded_sessions = list(res.scalars().all())
+        recovered: list[dict[str, Any]] = []
+
+        for sess in degraded_sessions:
+            bridge_provider: AIProvider | None = None
+            if sess.account_id:
+                acct = await db.get(ProviderAccount, sess.account_id)
+                if acct and acct.provider_id:
+                    cand = await db.get(AIProvider, acct.provider_id)
+                    if cand and cand.provider_type == "arena_local_bridge":
+                        bridge_provider = cand
+
+            if bridge_provider is None and sess.agent_id:
+                ag = await db.get(Agent, sess.agent_id)
+                if ag and ag.provider_id:
+                    cand = await db.get(AIProvider, ag.provider_id)
+                    if cand and cand.provider_type == "arena_local_bridge":
+                        bridge_provider = cand
+
+            bridge_reset: dict[str, Any] | None = None
+            if bridge_provider is not None:
+                adapter = ArenaLocalBridgeAdapter(
+                    provider_id=bridge_provider.id,
+                    endpoint_url=bridge_provider.endpoint_url,
+                    credential_ref=bridge_provider.credential_ref,
+                    default_model=bridge_provider.default_model,
+                )
+                try:
+                    bridge_reset = await adapter.delete_session(sess.id, account_id=sess.account_id)
+                except Exception as exc:  # noqa: BLE001 - recovery must not abort on offline bridge
+                    bridge_reset = {
+                        "deleted": False,
+                        "session_id": sess.id,
+                        "account_id": sess.account_id,
+                        "status": "error",
+                        "bridge_reachable": False,
+                        "error": f"Bridge reset error: {type(exc).__name__}",
+                    }
+
+            prev_score = float(sess.health_score)
+            prev_status = sess.status
+            prev_errors = int(sess.error_count)
+
+            sess.health_score = 100.0
+            sess.status = "active"
+            sess.error_count = 0
+            sess.last_error = None
+
+            entry = {
+                "session_id": sess.id,
+                "account_id": sess.account_id,
+                "agent_id": sess.agent_id,
+                "previous_health_score": prev_score,
+                "previous_status": prev_status,
+                "previous_error_count": prev_errors,
+                "new_health_score": 100.0,
+                "new_status": "active",
+                "bridge_reset": bridge_reset,
+            }
+            recovered.append(entry)
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="provider.session_recovered",
+                    resource_type="provider_session",
+                    resource_id=sess.id,
+                    details=entry,
+                )
+            )
+
+        if recovered:
+            await db.commit()
+            await event_bus.emit(
+                "provider.sessions_recovered",
+                {"recovered_count": len(recovered), "session_ids": [r["session_id"] for r in recovered]},
+            )
+
+        return {
+            "recovered_count": len(recovered),
+            "threshold": health_threshold,
+            "sessions": recovered,
+        }
 
 
 provider_router = ProviderRouter()

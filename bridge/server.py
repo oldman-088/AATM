@@ -39,7 +39,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-BRIDGE_VERSION = "2.3.0"
+BRIDGE_VERSION = "2.4.0"
 
 DEFAULT_MODELS = [
     "arena-bridge-default",
@@ -602,6 +602,161 @@ def create_app(
 
         incoming = [{"role": m.role, "content": m.content} for m in body.messages]
         upstream_url = os.environ.get("ARENA_BRIDGE_UPSTREAM_URL", "").strip()
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created_ts = int(time.time())
+
+        if upstream_url and body.stream:
+            try:
+                upstream_base = _validate_http_url(upstream_url)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Invalid upstream URL: {exc}",
+                ) from exc
+
+            combined_history = list(session.messages) + [m for m in incoming if m.get("content")]
+            prompt_text = "\n".join(m.get("content", "") for m in combined_history)
+
+            async def upstream_sse_events() -> AsyncIterator[str]:
+                up_headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+                upstream_key = os.environ.get("ARENA_BRIDGE_UPSTREAM_API_KEY", "").strip()
+                if upstream_key:
+                    up_headers["Authorization"] = f"Bearer {upstream_key}"
+
+                collected_parts: list[str] = []
+                upstream_usage: dict[str, Any] = {}
+                finish_reason = "stop"
+
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{upstream_base}/v1/chat/completions",
+                            headers=up_headers,
+                            json={
+                                "model": body.model,
+                                "messages": combined_history,
+                                "max_tokens": body.max_tokens,
+                                "temperature": body.temperature,
+                                "stream": True,
+                            },
+                        ) as resp:
+                            if resp.status_code >= 400:
+                                await resp.aread()
+                                err_chunk = {
+                                    "id": completion_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created_ts,
+                                    "model": body.model,
+                                    "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                                    "error": {
+                                        "type": "upstream_http_error",
+                                        "status_code": resp.status_code,
+                                        "message": f"Upstream returned HTTP {resp.status_code} during SSE stream.",
+                                    },
+                                }
+                                yield f"data: {json.dumps(err_chunk)}\n\n"
+                                yield "data: [DONE]\n\n"
+                                return
+
+                            async for raw_line in resp.aiter_lines():
+                                line = raw_line.strip()
+                                if not line or not line.startswith("data:"):
+                                    continue
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    frame = json.loads(data_str)
+                                except json.JSONDecodeError:
+                                    continue
+                                if not isinstance(frame, dict):
+                                    continue
+
+                                if isinstance(frame.get("usage"), dict):
+                                    upstream_usage = frame["usage"]
+
+                                choices = frame.get("choices")
+                                is_terminal_only = False
+                                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                                    first = choices[0]
+                                    delta_obj = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+                                    piece = delta_obj.get("content")
+                                    if isinstance(piece, str) and piece:
+                                        collected_parts.append(piece)
+                                    if first.get("finish_reason"):
+                                        finish_reason = str(first["finish_reason"])
+                                        if not piece and not delta_obj.get("role"):
+                                            is_terminal_only = True
+                                        else:
+                                            # Forward delta immediately; final chunk with session+usage follows below
+                                            frame = dict(frame)
+                                            frame["choices"] = [
+                                                {**first, "finish_reason": None},
+                                                *choices[1:],
+                                            ]
+
+                                if not is_terminal_only:
+                                    yield f"data: {json.dumps(frame)}\n\n"
+
+                    full_content = "".join(collected_parts)
+                    p_tok = (
+                        int(upstream_usage["prompt_tokens"])
+                        if upstream_usage.get("prompt_tokens") is not None
+                        else _estimate_tokens(prompt_text)
+                    )
+                    c_tok = (
+                        int(upstream_usage["completion_tokens"])
+                        if upstream_usage.get("completion_tokens") is not None
+                        else _estimate_tokens(full_content)
+                    )
+                    updated_sess = await store.record_turn(
+                        session_id=session.session_id,
+                        user_messages=incoming,
+                        assistant_content=full_content,
+                        prompt_tokens=p_tok,
+                        completion_tokens=c_tok,
+                        model=body.model,
+                    )
+                    final_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": body.model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                        "usage": {
+                            "prompt_tokens": p_tok,
+                            "completion_tokens": c_tok,
+                            "total_tokens": p_tok + c_tok,
+                        },
+                        "session": updated_sess.to_summary(),
+                    }
+                    yield f"data: {json.dumps(final_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception as exc:
+                    err_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": body.model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+                        "error": {
+                            "type": "upstream_stream_error",
+                            "message": f"Upstream SSE stream failed: {type(exc).__name__}",
+                        },
+                    }
+                    yield f"data: {json.dumps(err_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+            sse_headers = {
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-AATM-Session-Id": session.session_id,
+            }
+            if session.account_id:
+                sse_headers["X-AATM-Account-Id"] = session.account_id
+            return StreamingResponse(upstream_sse_events(), media_type="text/event-stream", headers=sse_headers)
+
         if upstream_url:
             combined_history = list(session.messages) + [m for m in incoming if m.get("content")]
             try:
@@ -633,8 +788,6 @@ def create_app(
             model=body.model,
         )
 
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        created_ts = int(time.time())
         usage_payload = {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,

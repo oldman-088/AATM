@@ -167,3 +167,196 @@ async def create_dynamic_employee(
     await db.commit()
     await db.refresh(agent)
     return agent
+
+
+def _normalize_tokens(items: list[str] | None, *, upper: bool = False) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in items or []:
+        cleaned = str(raw).strip()
+        if not cleaned:
+            continue
+        norm = cleaned.upper() if upper else cleaned.lower()
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+async def analyze_team_skill_gaps(
+    db: AsyncSession,
+    required_skills: list[str],
+    divisions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Compare active AI employees' skills/divisions against project requirements and rank matching ROLE_TEMPLATES."""
+    norm_skills = _normalize_tokens(required_skills, upper=False)
+    norm_divisions = _normalize_tokens(divisions, upper=True)
+
+    active_res = await db.execute(
+        select(Agent).where(
+            Agent.is_enabled.is_(True),
+            Agent.is_emergency_stopped.is_(False),
+            Agent.status != "offline",
+        )
+    )
+    active_agents = list(active_res.scalars().all())
+
+    team_skills: set[str] = set()
+    team_divisions: set[str] = set()
+    for ag in active_agents:
+        for s in ag.skills or []:
+            team_skills.add(str(s).strip().lower())
+        for d in ag.divisions or []:
+            team_divisions.add(str(d).strip().upper())
+
+    covered_skills = [s for s in norm_skills if s in team_skills]
+    missing_skills = [s for s in norm_skills if s not in team_skills]
+    missing_divisions = [d for d in norm_divisions if d not in team_divisions]
+
+    # Greedily select minimal ROLE_TEMPLATES maximizing coverage of remaining missing skills & divisions
+    uncovered_skills = set(missing_skills)
+    uncovered_divs = set(missing_divisions)
+    used_template_ids: set[str] = set()
+    recommended_templates: list[dict[str, Any]] = []
+
+    while uncovered_skills or uncovered_divs:
+        best_template: dict[str, Any] | None = None
+        best_key: tuple[int, int] = (0, 0)
+        best_matched_skills: list[str] = []
+        best_matched_divs: list[str] = []
+
+        for tmpl in ROLE_TEMPLATES:
+            if tmpl["id"] in used_template_ids:
+                continue
+            t_skills = {s.lower() for s in tmpl["skills"]}
+            t_divs = {d.upper() for d in tmpl["divisions"]}
+            matched_s = sorted(uncovered_skills & t_skills)
+            matched_d = sorted(uncovered_divs & t_divs)
+            if not matched_s and not matched_d:
+                continue
+            rank_key = (len(matched_s), len(matched_d))
+            if rank_key > best_key:
+                best_key = rank_key
+                best_template = tmpl
+                best_matched_skills = matched_s
+                best_matched_divs = matched_d
+
+        if best_template is None:
+            break
+
+        used_template_ids.add(best_template["id"])
+        uncovered_skills -= set(best_matched_skills)
+        uncovered_divs -= set(best_matched_divs)
+        recommended_templates.append(
+            {
+                "template_id": best_template["id"],
+                "title": best_template["title"],
+                "matched_skills": best_matched_skills,
+                "matched_divisions": best_matched_divs,
+                "skills": list(best_template["skills"]),
+                "divisions": list(best_template["divisions"]),
+                "permissions": list(best_template["permissions"]),
+            }
+        )
+
+    coverage_ratio = 1.0 if not norm_skills else round(len(covered_skills) / len(norm_skills), 4)
+    return {
+        "required_skills": norm_skills,
+        "required_divisions": norm_divisions,
+        "active_employee_count": len(active_agents),
+        "covered_skills": covered_skills,
+        "missing_skills": missing_skills,
+        "missing_divisions": missing_divisions,
+        "coverage_ratio": coverage_ratio,
+        "recommended_templates": recommended_templates,
+        "unmatched_skills": sorted(uncovered_skills),
+    }
+
+
+async def provision_missing_specialists(
+    db: AsyncSession,
+    required_skills: list[str],
+    *,
+    divisions: list[str] | None = None,
+    provider_id: str = "arena-agent",
+    allocation_mode: str = "hybrid",
+    preferred_account_id: str | None = None,
+    create_browser_profile: bool = False,
+    max_new_employees: int = 5,
+    device_id: str = "device-local",
+    actor: str = "manager-0",
+) -> dict[str, Any]:
+    """Analyze skill gaps and dynamically provision missing specialist employees from ROLE_TEMPLATES (or custom)."""
+    before = await analyze_team_skill_gaps(db, required_skills, divisions=divisions)
+    limit = max(0, int(max_new_employees))
+    provisioned: list[dict[str, Any]] = []
+
+    for rec in before["recommended_templates"]:
+        if len(provisioned) >= limit:
+            break
+        emp = await create_dynamic_employee(
+            db,
+            name=f"{rec['title']} (Auto-Provisioned)",
+            role_template_id=rec["template_id"],
+            specialty=rec["title"],
+            skills=list(rec["skills"]),
+            divisions=list(rec["divisions"]),
+            permissions=list(rec["permissions"]),
+            provider_id=provider_id,
+            allocation_mode=allocation_mode,
+            preferred_account_id=preferred_account_id,
+            create_browser_profile=create_browser_profile,
+            device_id=device_id,
+            actor=actor,
+        )
+        provisioned.append(
+            {
+                "id": emp.id,
+                "name": emp.name,
+                "role_template": emp.role_template,
+                "specialty": emp.specialty,
+                "skills": list(emp.skills or []),
+                "divisions": list(emp.divisions or []),
+                "provider_account_id": emp.provider_account_id,
+                "provider_session_id": emp.provider_session_id,
+            }
+        )
+
+    unmatched = list(before["unmatched_skills"])
+    if unmatched and len(provisioned) < limit:
+        custom_divs = before["missing_divisions"] or before["required_divisions"] or ["D01"]
+        emp = await create_dynamic_employee(
+            db,
+            name=f"Custom Specialist ({', '.join(unmatched[:2])})",
+            role_template_id=None,
+            specialty=f"Custom Specialist: {', '.join(unmatched)}",
+            skills=unmatched,
+            divisions=custom_divs,
+            permissions=["workspace_exec", "read_memory"],
+            provider_id=provider_id,
+            allocation_mode=allocation_mode,
+            preferred_account_id=preferred_account_id,
+            create_browser_profile=create_browser_profile,
+            device_id=device_id,
+            actor=actor,
+        )
+        provisioned.append(
+            {
+                "id": emp.id,
+                "name": emp.name,
+                "role_template": emp.role_template,
+                "specialty": emp.specialty,
+                "skills": list(emp.skills or []),
+                "divisions": list(emp.divisions or []),
+                "provider_account_id": emp.provider_account_id,
+                "provider_session_id": emp.provider_session_id,
+            }
+        )
+
+    after = await analyze_team_skill_gaps(db, required_skills, divisions=divisions)
+    return {
+        "before": before,
+        "provisioned_employees": provisioned,
+        "provisioned_count": len(provisioned),
+        "after": after,
+    }

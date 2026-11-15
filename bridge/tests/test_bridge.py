@@ -1,12 +1,17 @@
+import asyncio
 import json
 import socket
 import sys
 import threading
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import uvicorn
+from fastapi import FastAPI, Header
+from fastapi.responses import JSONResponse, StreamingResponse
 from httpx import ASGITransport, AsyncClient
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -588,3 +593,231 @@ async def test_adapter_generate_stream_and_router_route_and_stream_e2e(monkeypat
         assert fb_chunks[-1].done is True
         assert fb_chunks[-1].success is True
         assert fb_chunks[-1].metadata["mode"] == "bridge_offline_diagnostic"
+
+
+class _MockUpstreamSSEServer:
+    """Loopback OpenAI-compatible SSE upstream server to verify incremental passthrough."""
+
+    def __init__(self, *, chunks: list[str] | None = None, fail_status: int | None = None) -> None:
+        self.port = _free_loopback_port()
+        self.base_url = f"http://127.0.0.1:{self.port}"
+        self.chunks = chunks or ["Upstream chunk one. ", "Upstream chunk two."]
+        self.fail_status = fail_status
+        self.received_requests: list[dict[str, Any]] = []
+        self.received_auth_headers: list[str | None] = []
+        self._server: uvicorn.Server | None = None
+        self._thread: threading.Thread | None = None
+
+    def _build_app(self) -> FastAPI:
+        up_app = FastAPI()
+
+        @up_app.get("/health")
+        async def _health() -> dict[str, str]:
+            return {"status": "ok"}
+
+        @up_app.post("/v1/chat/completions", response_model=None)
+        async def _completions(
+            body: dict[str, Any],
+            authorization: str | None = Header(default=None),
+        ) -> Any:
+            self.received_requests.append(body)
+            self.received_auth_headers.append(authorization)
+            if self.fail_status is not None:
+                return JSONResponse(status_code=self.fail_status, content={"error": "upstream boom"})
+
+            async def _gen() -> AsyncIterator[str]:
+                role_evt = {
+                    "id": "up-cmpl-1",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": body.get("model", "arena-default"),
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(role_evt)}\n\n"
+                for piece in self.chunks:
+                    await asyncio.sleep(0.01)
+                    evt = {
+                        "id": "up-cmpl-1",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": body.get("model", "arena-default"),
+                        "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(evt)}\n\n"
+                end_evt = {
+                    "id": "up-cmpl-1",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": body.get("model", "arena-default"),
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 14, "completion_tokens": 9, "total_tokens": 23},
+                }
+                yield f"data: {json.dumps(end_evt)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_gen(), media_type="text/event-stream")
+
+        return up_app
+
+    def __enter__(self) -> "_MockUpstreamSSEServer":
+        config = uvicorn.Config(self._build_app(), host="127.0.0.1", port=self.port, log_level="error")
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
+                    return self
+            except OSError:
+                time.sleep(0.05)
+        raise RuntimeError("Mock upstream SSE server did not start")
+
+    def __exit__(self, *_: object) -> None:
+        if self._server:
+            self._server.should_exit = True
+        if self._thread:
+            self._thread.join(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_bridge_upstream_sse_incremental_passthrough_and_session_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ARENA_BRIDGE_TOKEN", raising=False)
+    up_secret = "upstream-" + "bearer-" + "test-" + "991"
+
+    with _MockUpstreamSSEServer(chunks=["Delta A | ", "Delta B | ", "Delta C"]) as upstream:
+        monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_URL", upstream.base_url)
+        monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_API_KEY", up_secret)
+
+        with _LiveBridgeProcess() as bridge:
+            adapter = ArenaLocalBridgeAdapter(
+                provider_id="arena-local-bridge",
+                endpoint_url=bridge.base_url,
+                credential_ref=None,
+                default_model="arena-default",
+            )
+            chunks = [
+                c
+                async for c in adapter.generate_stream(
+                    ProviderRequest(
+                        prompt="Stream incrementally from upstream",
+                        agent_id="worker-3",
+                        metadata={"session_id": "sess-up-sse-1", "account_id": "acct-up-1"},
+                        dry_run=False,
+                    )
+                )
+            ]
+
+            deltas = [c.delta for c in chunks if not c.done]
+            assert deltas == ["Delta A | ", "Delta B | ", "Delta C"]
+            assert chunks[-1].done is True
+            assert chunks[-1].success is True
+            assert chunks[-1].finish_reason == "stop"
+            assert chunks[-1].input_tokens == 14
+            assert chunks[-1].output_tokens == 9
+            assert chunks[-1].metadata["confirmed_usage"] is True
+            assert chunks[-1].metadata["bridge_session"]["turn_count"] == 1
+
+            # Verify upstream received stream=True and Authorization header
+            assert len(upstream.received_requests) == 1
+            assert upstream.received_requests[0]["stream"] is True
+            assert upstream.received_auth_headers[0] == f"Bearer {up_secret}"
+
+            # Verify session metadata recorded turn and cross-account 403 rejects BEFORE hitting upstream
+            async with AsyncClient(base_url=bridge.base_url) as client:
+                sess_res = await client.get("/v1/sessions/sess-up-sse-1", headers={"X-AATM-Account-Id": "acct-up-1"})
+                assert sess_res.status_code == 200
+                summary = sess_res.json()
+                assert summary["turn_count"] == 1
+                assert summary["message_count"] >= 2
+                assert summary["total_prompt_tokens"] == 14
+                assert summary["total_completion_tokens"] == 9
+
+                forged = await client.post(
+                    "/v1/chat/completions",
+                    headers={"X-AATM-Session-Id": "sess-up-sse-1", "X-AATM-Account-Id": "acct-other"},
+                    json={"model": "arena-default", "stream": True, "messages": [{"role": "user", "content": "hijack"}]},
+                )
+                assert forged.status_code == 403
+                # Upstream must NOT have been called on the rejected cross-account request
+                assert len(upstream.received_requests) == 1
+
+            # Second turn confirms prior streamed assistant reply is forwarded in upstream conversation history
+            chunks_t2 = [
+                c
+                async for c in adapter.generate_stream(
+                    ProviderRequest(
+                        prompt="Follow-up turn",
+                        agent_id="worker-3",
+                        metadata={"session_id": "sess-up-sse-1", "account_id": "acct-up-1"},
+                        dry_run=False,
+                    )
+                )
+            ]
+            assert chunks_t2[-1].success is True
+            assert len(upstream.received_requests) == 2
+            hist = upstream.received_requests[1]["messages"]
+            assert any(m["role"] == "assistant" and m["content"] == "Delta A | Delta B | Delta C" for m in hist)
+
+
+@pytest.mark.asyncio
+async def test_bridge_upstream_sse_safe_error_chunk_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ARENA_BRIDGE_TOKEN", raising=False)
+    up_secret = "secret-upstream-" + "never-leak-" + "774"
+    monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_API_KEY", up_secret)
+
+    # 1. Upstream HTTP 500 during SSE -> structured safe error chunk + [DONE], no key leak
+    with _MockUpstreamSSEServer(fail_status=500) as broken_upstream:
+        monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_URL", broken_upstream.base_url)
+        with _LiveBridgeProcess() as bridge:
+            async with AsyncClient(base_url=bridge.base_url) as client:
+                raw_res = await client.post(
+                    "/v1/chat/completions",
+                    headers={"X-AATM-Session-Id": "sess-up-err-1", "X-AATM-Account-Id": "acct-up-err"},
+                    json={"model": "arena-default", "stream": True, "messages": [{"role": "user", "content": "test"}]},
+                )
+                assert raw_res.status_code == 200
+                assert "text/event-stream" in raw_res.headers.get("content-type", "")
+                assert up_secret not in raw_res.text
+                assert "data: [DONE]" in raw_res.text
+                assert '"upstream_http_error"' in raw_res.text
+
+            adapter = ArenaLocalBridgeAdapter(
+                provider_id="arena-local-bridge",
+                endpoint_url=bridge.base_url,
+                credential_ref=None,
+                default_model="arena-default",
+            )
+            err_chunks = [
+                c
+                async for c in adapter.generate_stream(
+                    ProviderRequest(
+                        prompt="Trigger upstream HTTP 500",
+                        agent_id="worker-3",
+                        metadata={"session_id": "sess-up-err-2", "account_id": "acct-up-err"},
+                        dry_run=False,
+                    )
+                )
+            ]
+            assert err_chunks[-1].done is True
+            assert err_chunks[-1].success is False
+            assert err_chunks[-1].finish_reason == "error"
+            assert err_chunks[-1].metadata.get("upstream_stream_error") is True
+            assert up_secret not in (err_chunks[-1].error_message or "")
+
+    # 2. Unreachable upstream port during SSE -> safe upstream_stream_error chunk + [DONE]
+    dead_port = _free_loopback_port()
+    monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_URL", f"http://127.0.0.1:{dead_port}")
+    with _LiveBridgeProcess() as bridge:
+        async with AsyncClient(base_url=bridge.base_url) as client:
+            raw_res = await client.post(
+                "/v1/chat/completions",
+                headers={"X-AATM-Session-Id": "sess-up-dead", "X-AATM-Account-Id": "acct-up-err"},
+                json={"model": "arena-default", "stream": True, "messages": [{"role": "user", "content": "test"}]},
+            )
+            assert raw_res.status_code == 200
+            assert "data: [DONE]" in raw_res.text
+            assert '"upstream_stream_error"' in raw_res.text
+            assert up_secret not in raw_res.text
