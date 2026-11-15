@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { FolderCode, Laptop, Mail, Play, Plus, RefreshCw, ShieldAlert, Terminal, UserPlus, Wrench } from 'lucide-react'
 import { Badge, Button, Card, Input, Select } from '../components/ui'
+import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 
 export function EmployeeCreatorAndOrgPanel({
@@ -12,6 +13,7 @@ export function EmployeeCreatorAndOrgPanel({
   templates: any[]
   onReload: () => void
 }) {
+  const { t, formatNumber } = useI18n()
   const [name, setName] = useState('')
   const [templateId, setTemplateId] = useState('backend_developer')
   const [allocationMode, setAllocationMode] = useState('hybrid')
@@ -31,7 +33,7 @@ export function EmployeeCreatorAndOrgPanel({
         provider_id: 'arena-agent',
       }),
     })
-    setFeedback(`Created employee ${emp.name} (${emp.id}) with isolated workspace & session.`)
+    setFeedback(`${t.enterprise.employeeCreated} ${emp.name} (${emp.id}) — ${t.enterprise.isolatedWorkspaceSession}`)
     setName('')
     onReload()
   }
@@ -39,10 +41,12 @@ export function EmployeeCreatorAndOrgPanel({
   const replaceEmployee = async (agentId: string) => {
     try {
       const res = await apiFetch<any>(`/employees/${agentId}/replace`, { method: 'POST' })
-      setFeedback(`Replaced ${res.replaced_employee} -> ${res.replacement_employee} (${res.transferred_tasks.length} task(s) transferred).`)
+      setFeedback(
+        `${t.enterprise.replaced} ${res.replaced_employee} -> ${res.replacement_employee} (${formatNumber(res.transferred_tasks.length)} ${t.enterprise.tasksTransferred}).`
+      )
       onReload()
     } catch (err: any) {
-      setFeedback(err?.message || 'Replacement failed')
+      setFeedback(err?.message || t.enterprise.replacementFailed)
     }
   }
 
@@ -52,15 +56,17 @@ export function EmployeeCreatorAndOrgPanel({
         <div className="flex items-center justify-between">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
             <UserPlus className="h-4 w-4 text-sky-400" />
-            Dynamic AI Employee Creation (16+ Role Templates, 20+ Concurrent Scale)
+            {t.enterprise.employeeCreationTitle}
           </h3>
-          <Badge variant="info">{agents.length} Employees Registered</Badge>
+          <Badge variant="info">
+            {formatNumber(agents.length)} {t.enterprise.employeesRegistered}
+          </Badge>
         </div>
 
         {feedback && <div className="rounded border border-sky-500/30 bg-sky-950/30 p-2 text-xs text-sky-200">{feedback}</div>}
 
         <form onSubmit={createEmployee} className="grid gap-2 md:grid-cols-5">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Employee Name (e.g., API Specialist)" />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t.enterprise.employeeNamePlaceholder} />
           <Select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
             {templates.map((tpl) => (
               <option key={tpl.id} value={tpl.id}>
@@ -69,36 +75,36 @@ export function EmployeeCreatorAndOrgPanel({
             ))}
           </Select>
           <Select value={allocationMode} onChange={(e) => setAllocationMode(e.target.value)}>
-            <option value="hybrid">Hybrid Account</option>
-            <option value="one_per_employee">1 Account / Employee</option>
-            <option value="shared">Shared Account</option>
+            <option value="hybrid">{t.enterprise.allocationHybrid}</option>
+            <option value="one_per_employee">{t.enterprise.allocationOnePerEmployee}</option>
+            <option value="shared">{t.enterprise.allocationShared}</option>
           </Select>
           <Select value={autonomyMode} onChange={(e) => setAutonomyMode(e.target.value)}>
-            <option value="supervised">Supervised</option>
-            <option value="semi_autonomous">Semi-Autonomous</option>
-            <option value="highly_autonomous">Highly Autonomous</option>
+            <option value="supervised">{t.enterprise.autonomySupervised}</option>
+            <option value="semi_autonomous">{t.enterprise.autonomySemiAutonomous}</option>
+            <option value="highly_autonomous">{t.enterprise.autonomyHighlyAutonomous}</option>
           </Select>
           <Button type="submit">
-            <Plus className="h-4 w-4" /> Create Employee
+            <Plus className="h-4 w-4" /> {t.enterprise.createEmployee}
           </Button>
         </form>
       </Card>
 
       {/* Organization Structure + Smart Replacement trigger */}
       <Card className="space-y-2">
-        <h3 className="text-sm font-semibold text-slate-200">Organization Structure & Smart Replacement</h3>
+        <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.orgStructureTitle}</h3>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {agents.map((ag) => (
             <div key={ag.id} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
               <div className="min-w-0">
                 <div className="truncate font-semibold text-white">{ag.name}</div>
                 <div className="truncate text-slate-400">
-                  {ag.role_template || ag.role} • {ag.autonomy_mode} • Score {ag.performance_score}
+                  {ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}
                 </div>
               </div>
               {ag.role !== 'manager' && (
                 <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>
-                  Replace
+                  {t.enterprise.replace}
                 </Button>
               )}
             </div>
@@ -120,6 +126,7 @@ export function AgentMessagingPanel({
   projectId: string | null
   onReload: () => void
 }) {
+  const { t } = useI18n()
   const [recipientId, setRecipientId] = useState('worker-1')
   const [instructions, setInstructions] = useState('')
   const [deliverable, setDeliverable] = useState('task_output.md')
@@ -146,7 +153,7 @@ export function AgentMessagingPanel({
     <Card className="space-y-3">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
         <Mail className="h-4 w-4 text-emerald-400" />
-        AATM Agent Messaging System (Direct Delivery & Auto-Execution)
+        {t.enterprise.messagingTitle}
       </h3>
       <form onSubmit={sendMessage} className="grid gap-2 md:grid-cols-4">
         <Select value={recipientId} onChange={(e) => setRecipientId(e.target.value)}>
@@ -159,12 +166,12 @@ export function AgentMessagingPanel({
         <Input
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
-          placeholder="Task instructions to deliver & execute..."
+          placeholder={t.enterprise.messagingPlaceholder}
           className="md:col-span-2"
         />
         <div className="flex gap-2">
-          <Input value={deliverable} onChange={(e) => setDeliverable(e.target.value)} placeholder="deliverable.md" />
-          <Button type="submit">Dispatch</Button>
+          <Input value={deliverable} onChange={(e) => setDeliverable(e.target.value)} placeholder={t.enterprise.deliverablePlaceholder} />
+          <Button type="submit">{t.enterprise.dispatch}</Button>
         </div>
       </form>
       <div className="max-h-48 space-y-2 overflow-y-auto text-xs">
@@ -185,6 +192,7 @@ export function AgentMessagingPanel({
 }
 
 export function WorkspacesView({ agents }: { agents: any[] }) {
+  const { t } = useI18n()
   const [selectedAgent, setSelectedAgent] = useState(agents[0]?.id || 'worker-1')
   const [wsData, setWsData] = useState<any>(null)
   const [filePath, setFilePath] = useState('hello_aatm.py')
@@ -223,7 +231,7 @@ export function WorkspacesView({ agents }: { agents: any[] }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="flex items-center gap-2 text-xl font-semibold text-white">
           <FolderCode className="h-5 w-5 text-amber-400" />
-          Isolated Employee Workspaces & Real Tool Execution
+          {t.enterprise.workspacesTitle}
         </h2>
         <Select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
           {agents.map((a) => (
@@ -236,9 +244,9 @@ export function WorkspacesView({ agents }: { agents: any[] }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="space-y-3">
-          <h3 className="text-sm font-semibold text-slate-200">Create / Update Workspace File</h3>
+          <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.workspaceFileTitle}</h3>
           <form onSubmit={writeFile} className="space-y-2">
-            <Input value={filePath} onChange={(e) => setFilePath(e.target.value)} placeholder="Relative path (e.g., module.py)" />
+            <Input value={filePath} onChange={(e) => setFilePath(e.target.value)} placeholder={t.enterprise.filePathPlaceholder} />
             <textarea
               value={fileContent}
               onChange={(e) => setFileContent(e.target.value)}
@@ -246,9 +254,9 @@ export function WorkspacesView({ agents }: { agents: any[] }) {
               className="w-full rounded-lg border border-slate-700 bg-slate-950/70 p-3 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
             />
             <div className="flex gap-2">
-              <Button type="submit">Save File</Button>
+              <Button type="submit">{t.enterprise.saveFile}</Button>
               <Button type="button" variant="secondary" onClick={runPython}>
-                <Terminal className="h-4 w-4" /> Run with Python
+                <Terminal className="h-4 w-4" /> {t.enterprise.runWithPython}
               </Button>
             </div>
           </form>
@@ -256,7 +264,9 @@ export function WorkspacesView({ agents }: { agents: any[] }) {
         </Card>
 
         <Card className="space-y-2">
-          <h3 className="text-sm font-semibold text-slate-200">Files & Execution Artifacts ({selectedAgent})</h3>
+          <h3 className="text-sm font-semibold text-slate-200">
+            {t.enterprise.filesArtifacts} ({selectedAgent})
+          </h3>
           <div className="max-h-64 space-y-1.5 overflow-y-auto text-xs">
             {(wsData?.files || []).map((f: any) => (
               <div key={f.path} className="flex justify-between rounded border border-slate-800 bg-slate-950/60 p-2 font-mono">
@@ -264,7 +274,7 @@ export function WorkspacesView({ agents }: { agents: any[] }) {
                 <span className="text-slate-500">{f.size_bytes} B</span>
               </div>
             ))}
-            {(wsData?.files || []).length === 0 && <div className="text-slate-500">Workspace empty.</div>}
+            {(wsData?.files || []).length === 0 && <div className="text-slate-500">{t.enterprise.workspaceEmpty}</div>}
           </div>
         </Card>
       </div>
@@ -281,6 +291,7 @@ export function ArenaAccountsSessionsPanel({
   sessions: any[]
   onReload: () => void
 }) {
+  const { t } = useI18n()
   const [label, setLabel] = useState('')
   const [identifier, setIdentifier] = useState('')
   const [mode, setMode] = useState('hybrid')
@@ -305,16 +316,16 @@ export function ArenaAccountsSessionsPanel({
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Card className="space-y-3">
-        <h3 className="text-sm font-semibold text-white">Arena Accounts & Allocation Modes</h3>
+        <h3 className="text-sm font-semibold text-white">{t.enterprise.accountsTitle}</h3>
         <form onSubmit={createAccount} className="grid gap-2 sm:grid-cols-4">
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Account Label" />
-          <Input value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="account@arena.ai" />
+          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t.enterprise.accountLabelPlaceholder} />
+          <Input value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder={t.enterprise.accountIdentifierPlaceholder} />
           <Select value={mode} onChange={(e) => setMode(e.target.value)}>
-            <option value="one_per_employee">1 / Employee</option>
-            <option value="shared">Shared</option>
-            <option value="hybrid">Hybrid</option>
+            <option value="one_per_employee">{t.enterprise.allocationOnePerEmployee}</option>
+            <option value="shared">{t.enterprise.allocationShared}</option>
+            <option value="hybrid">{t.enterprise.allocationHybrid}</option>
           </Select>
-          <Button type="submit">Add Account</Button>
+          <Button type="submit">{t.enterprise.addAccount}</Button>
         </form>
         <div className="max-h-40 space-y-1.5 overflow-y-auto text-xs">
           {accounts.map((a) => (
@@ -322,7 +333,7 @@ export function ArenaAccountsSessionsPanel({
               <div>
                 <div className="font-semibold text-white">{a.label}</div>
                 <div className="text-slate-400">
-                  {a.account_identifier} • {a.allocation_mode} (max {a.max_employees})
+                  {a.account_identifier} • {a.allocation_mode} ({t.enterprise.max} {a.max_employees})
                 </div>
               </div>
               <Badge variant="success">{a.status}</Badge>
@@ -332,16 +343,18 @@ export function ArenaAccountsSessionsPanel({
       </Card>
 
       <Card className="space-y-3">
-        <h3 className="text-sm font-semibold text-white">Independent Agent Provider Sessions</h3>
+        <h3 className="text-sm font-semibold text-white">{t.enterprise.sessionsTitle}</h3>
         <div className="max-h-52 space-y-1.5 overflow-y-auto text-xs">
           {sessions.map((s) => (
             <div key={s.id} className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/60 p-2">
               <div>
                 <div className="font-mono text-sky-400">{s.agent_id} → {s.conversation_id}</div>
-                <div className="text-slate-400">Account: {s.account_id} • Health: {s.health_score}%</div>
+                <div className="text-slate-400">
+                  {t.enterprise.account}: {s.account_id} • {t.enterprise.health}: {s.health_score}%
+                </div>
               </div>
               <Button size="sm" variant="secondary" onClick={() => recoverSession(s.id)}>
-                <RefreshCw className="h-3 w-3" /> Recover
+                <RefreshCw className="h-3 w-3" /> {t.enterprise.recover}
               </Button>
             </div>
           ))}
@@ -360,8 +373,9 @@ export function UserscriptsEnginesPanel({
   userscripts: any[]
   onReload: () => void
 }) {
+  const { t } = useI18n()
   const [name, setName] = useState('')
-  const [pattern, setPattern] = useState('http://localhost:5173/*')
+  const [pattern, setPattern] = useState('https://example.com/*')
   const [code, setCode] = useState("console.info('AATM userscript active');")
   const [err, setErr] = useState<string | null>(null)
 
@@ -377,7 +391,7 @@ export function UserscriptsEnginesPanel({
       setErr(null)
       onReload()
     } catch (e: any) {
-      setErr(e?.message || 'Userscript policy error')
+      setErr(e?.message || t.enterprise.userscriptPolicyError)
     }
   }
 
@@ -386,7 +400,7 @@ export function UserscriptsEnginesPanel({
       <Card className="space-y-3">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
           <Wrench className="h-4 w-4 text-cyan-400" />
-          Modular Browser Automation Engines
+          {t.enterprise.enginesTitle}
         </h3>
         <div className="grid gap-2 sm:grid-cols-2">
           {engines &&
@@ -402,16 +416,16 @@ export function UserscriptsEnginesPanel({
       </Card>
 
       <Card className="space-y-3">
-        <h3 className="text-sm font-semibold text-white">Tampermonkey Userscripts (Policy Audited)</h3>
+        <h3 className="text-sm font-semibold text-white">{t.enterprise.userscriptsTitle}</h3>
         {err && <div className="rounded border border-rose-500/40 bg-rose-950/30 p-2 text-xs text-rose-200">{err}</div>}
         <form onSubmit={createScript} className="space-y-2">
           <div className="grid gap-2 sm:grid-cols-2">
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Userscript Name" />
-            <Input value={pattern} onChange={(e) => setPattern(e.target.value)} placeholder="@match pattern" />
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t.enterprise.userscriptNamePlaceholder} />
+            <Input value={pattern} onChange={(e) => setPattern(e.target.value)} placeholder={t.enterprise.matchPatternPlaceholder} />
           </div>
           <div className="flex gap-2">
-            <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="// JavaScript userscript..." />
-            <Button type="submit">Register</Button>
+            <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder={t.enterprise.userscriptCodePlaceholder} />
+            <Button type="submit">{t.enterprise.register}</Button>
           </div>
         </form>
         <div className="space-y-1.5 text-xs">
@@ -426,7 +440,7 @@ export function UserscriptsEnginesPanel({
                 variant="secondary"
                 onClick={() => apiFetch(`/userscripts/${u.id}/toggle`, { method: 'PATCH' }).then(onReload)}
               >
-                {u.is_enabled ? 'Enabled' : 'Disabled'}
+                {u.is_enabled ? t.enterprise.enabled : t.enterprise.disabled}
               </Button>
             </div>
           ))}
@@ -437,6 +451,7 @@ export function UserscriptsEnginesPanel({
 }
 
 export function SDLCIdeaExecutorPanel({ onReload }: { onReload: () => void }) {
+  const { t } = useI18n()
   const [projectName, setProjectName] = useState('')
   const [idea, setIdea] = useState('')
   const [result, setResult] = useState<any>(null)
@@ -464,24 +479,24 @@ export function SDLCIdeaExecutorPanel({ onReload }: { onReload: () => void }) {
     <Card className="space-y-3 border-sky-500/30">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
         <Play className="h-4 w-4 text-emerald-400" />
-        Virtual AI Software Company — Idea-to-Delivery SDLC Pipeline
+        {t.enterprise.sdlcTitle}
       </h3>
       <form onSubmit={runSdlc} className="grid gap-2 md:grid-cols-4">
-        <Input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Project Name" />
+        <Input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder={t.enterprise.sdlcProjectPlaceholder} />
         <Input
           value={idea}
           onChange={(e) => setIdea(e.target.value)}
-          placeholder="Describe your software idea (creates team, code & runs pytest)..."
+          placeholder={t.enterprise.sdlcIdeaPlaceholder}
           className="md:col-span-2"
         />
         <Button type="submit" disabled={running}>
-          {running ? 'Executing SDLC...' : 'Launch SDLC Build'}
+          {running ? t.enterprise.sdlcExecuting : t.enterprise.sdlcLaunch}
         </Button>
       </form>
       {result && (
         <div className="rounded border border-emerald-500/30 bg-emerald-950/30 p-2.5 text-xs text-emerald-200">
-          Delivered <strong>{result.project_name}</strong> • Team: {result.team_created.join(', ')} • Pytest exit code:{' '}
-          {result.pytest_result.exit_code}
+          {t.enterprise.delivered} <strong>{result.project_name}</strong> • {t.enterprise.team}: {result.team_created.join(', ')} •{' '}
+          {t.enterprise.pytestExitCode}: {result.pytest_result.exit_code}
         </div>
       )}
     </Card>
@@ -489,9 +504,11 @@ export function SDLCIdeaExecutorPanel({ onReload }: { onReload: () => void }) {
 }
 
 export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; onReload: () => void }) {
+  const { t } = useI18n()
   const [name, setName] = useState('')
   const [host, setHost] = useState('10.0.0.20')
   const [osName, setOsName] = useState('Ubuntu 24.04')
+  const [pinged, setPinged] = useState<string | null>(null)
 
   const registerDevice = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -510,17 +527,28 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
     onReload()
   }
 
+  // Authenticated heartbeat (Worker 4 hardening: endpoint now requires a JWT, so it must
+  // travel through apiFetch rather than a raw fetch call).
+  const sendHeartbeat = async (deviceId: string) => {
+    await apiFetch(`/devices/${deviceId}/heartbeat`, {
+      method: 'POST',
+      body: JSON.stringify({ cpu_percent: 21, ram_percent: 34 }),
+    })
+    setPinged(deviceId)
+    onReload()
+  }
+
   return (
     <Card className="space-y-3">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
         <Laptop className="h-4 w-4 text-sky-400" />
-        Central Server & Multi-Device Execution Nodes
+        {t.enterprise.devicesTitle}
       </h3>
       <form onSubmit={registerDevice} className="grid gap-2 sm:grid-cols-4">
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Node Name" />
-        <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="Host IP / DNS" />
-        <Input value={osName} onChange={(e) => setOsName(e.target.value)} placeholder="OS" />
-        <Button type="submit">Register Node</Button>
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t.enterprise.nodeNamePlaceholder} />
+        <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder={t.enterprise.hostPlaceholder} />
+        <Input value={osName} onChange={(e) => setOsName(e.target.value)} placeholder={t.enterprise.osPlaceholder} />
+        <Button type="submit">{t.enterprise.registerNode}</Button>
       </form>
       <div className="grid gap-2 sm:grid-cols-2">
         {devices.map((d) => (
@@ -531,7 +559,13 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
                 {d.host_address} • {d.os_name} • {d.cpu_cores} vCPU
               </div>
             </div>
-            <Badge variant={d.status === 'online' ? 'success' : 'warning'}>{d.status}</Badge>
+            <div className="flex items-center gap-2">
+              {pinged === d.id && <Badge variant="info">{t.enterprise.heartbeatSent}</Badge>}
+              <Badge variant={d.status === 'online' ? 'success' : 'warning'}>{d.status}</Badge>
+              <Button size="sm" variant="secondary" onClick={() => sendHeartbeat(d.id)}>
+                {t.enterprise.heartbeat}
+              </Button>
+            </div>
           </div>
         ))}
       </div>
@@ -540,6 +574,7 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
 }
 
 export function PromptInjectionGuardPanel() {
+  const { t } = useI18n()
   const [text, setText] = useState('')
   const [res, setRes] = useState<any>(null)
 
@@ -556,24 +591,24 @@ export function PromptInjectionGuardPanel() {
     <Card className="space-y-3">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
         <ShieldAlert className="h-4 w-4 text-amber-400" />
-        Prompt-Injection Defense & Untrusted Content Quarantine
+        {t.enterprise.guardTitle}
       </h3>
       <form onSubmit={testSanitize} className="flex gap-2">
         <Input
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Test untrusted external text (e.g., 'Ignore all previous instructions...')..."
+          placeholder={t.enterprise.guardPlaceholder}
         />
         <Button type="submit" variant="secondary">
-          Sanitize
+          {t.enterprise.sanitize}
         </Button>
       </form>
       {res && (
         <div className="rounded border border-slate-800 bg-slate-950/70 p-2 text-xs">
           <div>
-            Injection Detected:{' '}
+            {t.enterprise.injectionDetected}{' '}
             <Badge variant={res.injection_detected ? 'danger' : 'success'}>
-              {res.injection_detected ? 'QUARANTINED' : 'CLEAN'}
+              {res.injection_detected ? t.enterprise.quarantined : t.enterprise.clean}
             </Badge>
           </div>
           <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-slate-300">{res.quarantined_text}</pre>

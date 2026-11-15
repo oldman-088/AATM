@@ -1,0 +1,195 @@
+import { act } from '@testing-library/react'
+import { vi } from 'vitest'
+
+export interface RecordedCall {
+  path: string
+  method: string
+  body?: any
+  authorization?: string
+}
+
+export type RouteValue = any | ((path: string, init: RequestInit) => any)
+
+/**
+ * Minimal API-ish fixtures that mirror the FastAPI payload shapes consumed by App.tsx / views.
+ * Any endpoint not listed still resolves to `{}` so the shell never crashes on unmounted panels.
+ */
+export const fixtures: Record<string, RouteValue> = {
+  '/api/v1/dashboard/overview': {
+    kpis: {
+      active_workers: 2,
+      idle_workers: 1,
+      completion_rate: 87,
+      healthy_providers: 2,
+      total_providers: 2,
+      running_browsers: 1,
+      total_browsers: 2,
+      pending_approvals: 1,
+    },
+    divisions: [{ code: 'D03', name: 'Frontend', progress_percent: 42, completed_tasks: 4, total_tasks: 10 }],
+    resources: {
+      cpu_count: 8,
+      cpu_percent: 21,
+      ram_used_gb: 4,
+      ram_total_gb: 16,
+      ram_percent: 25,
+      disk_free_gb: 120,
+      disk_percent: 40,
+    },
+    recommendations: ['Scale workers before the merge window'],
+    recent_events: [],
+  },
+  '/api/v1/agents': [
+    {
+      id: 'manager-0',
+      name: 'Chief AI Engineering Manager',
+      role: 'manager',
+      specialty: 'Orchestration',
+      status: 'working',
+      divisions: ['D00'],
+      model_name: 'arena-agent',
+      git_branch: 'main',
+      tasks_completed: 12,
+      autonomy_mode: 'highly_autonomous',
+      performance_score: 96,
+      is_emergency_stopped: false,
+    },
+    {
+      id: 'worker-1',
+      name: 'Frontend Engineer',
+      role: 'worker',
+      role_template: 'frontend_developer',
+      specialty: 'React + RTL',
+      status: 'idle',
+      divisions: ['D03'],
+      model_name: 'arena-agent',
+      git_branch: 'arena/51325356-aatm',
+      tasks_completed: 7,
+      autonomy_mode: 'semi_autonomous',
+      performance_score: 88,
+      is_emergency_stopped: false,
+    },
+  ],
+  '/api/v1/employees/templates': [
+    { id: 'backend_developer', title: 'Backend Developer' },
+    { id: 'frontend_developer', title: 'Frontend Developer' },
+  ],
+  '/api/v1/employees': (path: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body || '{}'))
+    return { id: 'worker-9', name: body.name, role_template_id: body.role_template_id, workspace_path: 'workspaces/worker-9' }
+  },
+  '/api/v1/tasks': [],
+  '/api/v1/messages': [],
+  '/api/v1/projects': [{ id: 'proj-1', name: 'AATM v2.1', description: 'Enterprise AI OS', status: 'active' }],
+  '/api/v1/chat': [],
+  '/api/v1/browsers': [],
+  '/api/v1/browsers/capabilities': { chromium_installed: true, engine_mode: 'playwright' },
+  '/api/v1/browsers/engines': { playwright: { status: 'ready' }, chromium_cdp: { status: 'ready' } },
+  '/api/v1/userscripts': [],
+  '/api/v1/providers': [],
+  '/api/v1/providers/usage': {
+    summary: { total_input_tokens: 1200, total_output_tokens: 800, total_estimated_cost_usd: 0.02 },
+  },
+  '/api/v1/accounts': [],
+  '/api/v1/sessions': [],
+  '/api/v1/devices': [],
+  '/api/v1/devices/heartbeat': { status: 'online' },
+  '/api/v1/git/status': {
+    repository: { current_branch: 'arena/51325356-aatm', recent_commits: ['83c14f4 chore: snapshot'] },
+    workflows: [],
+  },
+  '/api/v1/qa/summary': {
+    security_scan: { status: 'passed', files_scanned: 42, findings: [] },
+    intelligence: { recommendations: ['No blocking findings'] },
+  },
+  '/api/v1/approvals': [],
+  '/api/v1/audit': [],
+  '/api/v1/notifications': [],
+  '/api/v1/memory': [],
+  '/api/v1/auth/me': {
+    id: 'director-1',
+    email: 'director@aatm.ai',
+    full_name: 'Chief Engineering Director',
+    role: 'director',
+    language: 'en',
+    theme: 'dark',
+  },
+  '/api/v1/emergency-stop': { scope: 'global', active: true },
+  '/api/v1/emergency-stop/clear': { scope: 'global', active: false },
+  '/api/v1/sdlc/execute': (path: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body || '{}'))
+    return {
+      project_name: body.project_name,
+      team_created: ['worker-1', 'worker-2'],
+      pytest_result: { exit_code: 0 },
+    }
+  },
+  '/api/v1/security/sanitize': { injection_detected: true, quarantined_text: '[QUARANTINED]' },
+  '/api/v1/workspaces/worker-1/files': { files: [{ path: 'hello_aatm.py', size_bytes: 44 }] },
+  '/api/v1/workspaces/worker-1/exec': { exit_code: 0, stdout: 'AATM isolated workspace verified' },
+}
+
+function jsonResponse(data: any, ok = true, status = 200) {
+  return { ok, status, json: async () => data }
+}
+
+/**
+ * Installs a URL-routing fetch mock. Returns every call recorded so tests can assert on
+ * endpoint + method + JWT header (used to prove mutations go through `apiFetch`).
+ */
+export function installFetchMock(overrides: Record<string, RouteValue> = {}) {
+  const calls: RecordedCall[] = []
+  const routes = { ...fixtures, ...overrides }
+  const keys = Object.keys(routes).sort((a, b) => b.length - a.length)
+
+  const mock = vi.fn(async (input: any, init: RequestInit = {}) => {
+    const path = String(input)
+    const method = (init.method || 'GET').toUpperCase()
+    const headers = (init.headers || {}) as Record<string, string>
+    let body: any
+    try {
+      body = init.body ? JSON.parse(String(init.body)) : undefined
+    } catch {
+      body = init.body
+    }
+    calls.push({ path, method, body, authorization: headers.Authorization })
+
+    const key = keys.find((k) => path === k || path.startsWith(`${k}?`) || path.startsWith(`${k}/`))
+    if (!key) return jsonResponse({})
+    const value = routes[key]
+    const data = typeof value === 'function' ? value(path, init) : value
+    return jsonResponse(data)
+  })
+
+  ;(globalThis as any).fetch = mock
+  return { calls, mock, callsTo: (suffix: string) => calls.filter((c) => c.path.endsWith(suffix)) }
+}
+
+export class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  url: string
+  onmessage: ((ev: any) => void) | null = null
+  constructor(url: string) {
+    this.url = url
+    MockWebSocket.instances.push(this)
+  }
+  close() {}
+}
+
+/**
+ * Flushes pending promise chains (telemetry loaders, WS refreshes) inside `act` so React
+ * does not warn about state updates that land after a test's assertions complete.
+ */
+export async function settle() {
+  await act(async () => {
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await Promise.resolve()
+  })
+}
+
+export function installWebSocketMock() {
+  MockWebSocket.instances = []
+  ;(globalThis as any).WebSocket = MockWebSocket
+  return MockWebSocket
+}
