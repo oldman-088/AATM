@@ -19,6 +19,45 @@ export function EmployeeCreatorAndOrgPanel({
   const [allocationMode, setAllocationMode] = useState('hybrid')
   const [autonomyMode, setAutonomyMode] = useState('semi_autonomous')
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [traces, setTraces] = useState<any[] | null>(null)
+  const [traceUnavailable, setTraceUnavailable] = useState(false)
+  const [traceAgent, setTraceAgent] = useState('')
+  useEffect(() => {
+    let active = true
+    setTraces(null)
+    setTraceUnavailable(false)
+    const path = traceAgent ? `/traces?agent_id=${encodeURIComponent(traceAgent)}` : '/traces'
+    apiFetch<any>(path).then((result) => {
+      if (active) setTraces(Array.isArray(result) ? result : Array.isArray(result?.traces) ? result.traces : [])
+    }).catch(() => { if (active) setTraceUnavailable(true) })
+    return () => { active = false }
+  }, [traceAgent])
+  const byId = new Map(agents.map((agent) => [agent.id, agent]))
+  // Ignore missing, self-referential and cyclic links rather than inventing a hierarchy.
+  const parentOf = (agent: any): string | undefined => {
+    const seen = new Set([agent.id])
+    let current = agent
+    while (current?.reports_to) {
+      if (seen.has(current.reports_to) || !byId.has(current.reports_to)) return undefined
+      seen.add(current.reports_to)
+      current = byId.get(current.reports_to)
+    }
+    return agent.reports_to || undefined
+  }
+  const children = new Map<string, any[]>()
+  const roots: any[] = []
+  for (const agent of agents) {
+    const parent = parentOf(agent)
+    if (parent) children.set(parent, [...(children.get(parent) || []), agent])
+    else roots.push(agent)
+  }
+  const managers = roots.filter((agent) => agent.id === 'manager-0' || agent.role === 'manager')
+  const groups = new Map<string, any[]>()
+  for (const agent of roots.filter((item) => !managers.includes(item))) {
+    const divisions = Array.isArray(agent.divisions) && agent.divisions.length ? agent.divisions : [t.enterprise.unassignedDivision]
+    for (const division of divisions) groups.set(division, [...(groups.get(division) || []), agent])
+  }
+
 
   const createEmployee = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -49,6 +88,18 @@ export function EmployeeCreatorAndOrgPanel({
       setFeedback(err?.message || t.enterprise.replacementFailed)
     }
   }
+
+  const renderAgent = (ag: any): React.ReactNode => (
+    <div key={ag.id} className="space-y-2">
+      <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
+        <div className="min-w-0"><div className="truncate font-semibold text-white">{ag.name}</div>
+          <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}</div>
+        </div>
+        {ag.role !== 'manager' && <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>}
+      </div>
+      {(children.get(ag.id) || []).length > 0 && <div className="space-y-2 border-s border-sky-800 ps-3">{children.get(ag.id)?.map(renderAgent)}</div>}
+    </div>
+  )
 
   return (
     <div className="space-y-4">
@@ -93,23 +144,23 @@ export function EmployeeCreatorAndOrgPanel({
       {/* Organization Structure + Smart Replacement trigger */}
       <Card className="space-y-2">
         <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.orgStructureTitle}</h3>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {agents.map((ag) => (
-            <div key={ag.id} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
-              <div className="min-w-0">
-                <div className="truncate font-semibold text-white">{ag.name}</div>
-                <div className="truncate text-slate-400">
-                  {ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}
-                </div>
-              </div>
-              {ag.role !== 'manager' && (
-                <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>
-                  {t.enterprise.replace}
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
+        <p className="text-xs text-slate-400">{t.enterprise.reportingHierarchy}</p>
+        {managers.map(renderAgent)}
+        {groups.size > 0 && <p className="text-xs text-slate-400">{t.enterprise.divisionGroups}</p>}
+        {[...groups.entries()].map(([division, members]) => (
+          <section key={division} className="space-y-2 border-s border-slate-700 ps-3">
+            <h4 className="text-xs font-semibold text-sky-300">{division}</h4>
+            <div className="space-y-2">{members.map(renderAgent)}</div>
+          </section>
+        ))}
+      </Card>
+      <Card className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.executionTraces}</h3>
+        <Select aria-label={t.enterprise.traceAgentFilter} value={traceAgent} onChange={(e) => setTraceAgent(e.target.value)}>
+          <option value="">{t.enterprise.noSelection}</option>
+          {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+        </Select>
+        {traceUnavailable ? <p className="text-xs text-slate-400">{t.enterprise.tracesUnavailable}</p> : traces && traces.length === 0 ? <p className="text-xs text-slate-400">{t.enterprise.noTraces}</p> : traces?.map((trace, i) => <div key={trace.id || i} className="break-all rounded border border-slate-800 p-2 text-xs text-slate-300">{[trace.name || trace.action || trace.model_name || trace.channel_type || trace.source || trace.id, trace.severity || trace.delivery_status || trace.status || (trace.success === false ? 'failed' : undefined), trace.agent_id, trace.timestamp || trace.created_at].filter(Boolean).join(' • ')}</div>)}
       </Card>
     </div>
   )
@@ -509,11 +560,14 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
   const [host, setHost] = useState('10.0.0.20')
   const [osName, setOsName] = useState('Ubuntu 24.04')
   const [pinged, setPinged] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
+  const [rotated, setRotated] = useState<{ deviceId: string; deviceName: string; token: string; registration?: boolean } | null>(null)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const registerDevice = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
-    await apiFetch('/devices', {
+    const result = await apiFetch<any>('/devices', {
       method: 'POST',
       body: JSON.stringify({
         id: `node-${Date.now().toString(36)}`,
@@ -523,6 +577,7 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
         os_name: osName,
       }),
     })
+    if (result?.device_token) setRotated({ deviceId: result.device?.id || result.id, deviceName: name, token: result.device_token, registration: true })
     setName('')
     onReload()
   }
@@ -538,12 +593,58 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
     onReload()
   }
 
+  /**
+   * Revokes the device credential and surfaces the rotated token exactly once
+   * (the backend never returns it again, so it is kept only in transient state).
+   */
+  const revokeToken = async (device: any) => {
+    setConfirmRevoke(null)
+    setRevokeError(null)
+    try {
+      const res = await apiFetch<any>(`/devices/${device.id}/revoke`, { method: 'POST' })
+      const token = res?.new_token || res?.token || res?.device_token || res?.rotated_token
+      setRotated({ deviceId: device.id, deviceName: device.name, token: token || '' })
+      onReload()
+    } catch (err: any) {
+      setRevokeError(err?.message || t.enterprise.revokeFailed)
+    }
+  }
+
   return (
     <Card className="space-y-3">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
         <Laptop className="h-4 w-4 text-sky-400" />
         {t.enterprise.devicesTitle}
       </h3>
+      {revokeError && (
+        <div className="rounded border border-rose-500/40 bg-rose-950/30 p-2 text-xs text-rose-200">{revokeError}</div>
+      )}
+
+      {rotated && (
+        <div className="space-y-1 rounded-lg border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs text-amber-100">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold">
+              {rotated.registration ? t.enterprise.deviceRegistered : t.enterprise.revokeSuccess} {rotated.deviceName}
+            </span>
+            <Button size="sm" variant="secondary" onClick={() => setRotated(null)}>
+              {t.common.cancel}
+            </Button>
+          </div>
+          {rotated.token ? (
+            <>
+              <div className="font-semibold">{rotated.registration ? t.enterprise.deviceToken : t.enterprise.rotatedToken}</div>
+              <code
+                data-testid="rotated-device-token"
+                className="block break-all rounded bg-slate-950/70 p-2 font-mono text-[11px] text-emerald-200"
+              >
+                {rotated.token}
+              </code>
+              <div className="text-[11px] text-amber-200/80">{t.enterprise.rotatedTokenHint}</div>
+            </>
+          ) : null}
+        </div>
+      )}
+
       <form onSubmit={registerDevice} className="grid gap-2 sm:grid-cols-4">
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t.enterprise.nodeNamePlaceholder} />
         <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder={t.enterprise.hostPlaceholder} />
@@ -559,12 +660,26 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
                 {d.host_address} • {d.os_name} • {d.cpu_cores} vCPU
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               {pinged === d.id && <Badge variant="info">{t.enterprise.heartbeatSent}</Badge>}
               <Badge variant={d.status === 'online' ? 'success' : 'warning'}>{d.status}</Badge>
               <Button size="sm" variant="secondary" onClick={() => sendHeartbeat(d.id)}>
                 {t.enterprise.heartbeat}
               </Button>
+              {confirmRevoke === d.id ? (
+                <>
+                  <Button size="sm" variant="danger" onClick={() => revokeToken(d)}>
+                    {t.enterprise.revokeConfirm}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirmRevoke(null)}>
+                    {t.common.cancel}
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" variant="danger" onClick={() => setConfirmRevoke(d.id)}>
+                  {t.enterprise.revokeToken}
+                </Button>
+              )}
             </div>
           </div>
         ))}

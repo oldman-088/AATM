@@ -66,7 +66,7 @@ SCAN_EXTENSIONS: tuple[str, ...] = (
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
     ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
     ".env", ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".conf", ".properties",
-    ".txt", ".sql", ".html", ".xml",
+    ".txt", ".md", ".sql", ".html", ".xml",
 )
 
 # Directories that hold generated/local state and must never be scanned or committed.
@@ -75,7 +75,7 @@ EXCLUDED_SCAN_DIRS: frozenset[str] = frozenset(
         ".venv", "venv", "env", "node_modules", ".git", ".hg", ".svn", "dist", "build",
         "out", "coverage", ".next", ".nuxt", ".cache", ".pytest_cache", ".ruff_cache",
         ".mypy_cache", "__pycache__", ".tox", ".idea", ".vscode",
-        "data", "backups", "logs",
+        "data", "worktrees", "backups", "logs",
     }
 )
 
@@ -170,14 +170,14 @@ class QAAndIntelligenceEngine:
         }
 
     # ---------------------------------------------------------------- secret scanning
-    def run_security_scan(self) -> dict[str, Any]:
+    def run_security_scan(self, repo_root: Path | str | None = None) -> dict[str, Any]:
         """Scan the working tree and the git index for committed secrets and forbidden artifacts.
 
         Findings never contain the matched secret value - only the file, line and rule id -
         so that the scan output is safe to store in the audit trail.
         """
         settings = get_settings()
-        root = settings.REPO_ROOT
+        root = Path(repo_root).resolve() if repo_root else settings.REPO_ROOT
         findings: list[dict[str, Any]] = []
         suppressed: list[dict[str, Any]] = []
         files_scanned = 0
@@ -196,7 +196,12 @@ class QAAndIntelligenceEngine:
         for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
-            if any(part in EXCLUDED_SCAN_DIRS for part in path.parts):
+            try:
+                rel_path = path.relative_to(root)
+                rel = str(rel_path)
+            except ValueError:
+                continue
+            if any(part in EXCLUDED_SCAN_DIRS for part in rel_path.parts):
                 continue
             name = path.name.lower()
             # Dotfiles such as ".env" / ".env.production" have no extension suffix.
@@ -204,10 +209,6 @@ class QAAndIntelligenceEngine:
             if not is_env_file and not any(name.endswith(ext) for ext in SCAN_EXTENSIONS):
                 continue
 
-            try:
-                rel = str(path.relative_to(root))
-            except ValueError:
-                continue
             files_scanned += 1
             scanned_paths.add(rel)
 
@@ -318,13 +319,20 @@ class QAAndIntelligenceEngine:
         }
 
     # ---------------------------------------------------------------- self healing
-    async def run_self_healing(self, db: AsyncSession) -> dict[str, Any]:
+    async def run_self_healing(
+        self,
+        db: AsyncSession,
+        *,
+        repo_path: Path | str | None = None,
+        worktrees_root: Path | str | None = None,
+    ) -> dict[str, Any]:
         stalled = await task_scheduler.detect_and_recover_stalled_tasks(db)
 
         # Recover tasks that were blocked by an Emergency Stop. Without this they stay
         # stranded forever: the scheduler only dispatches "queued" tasks and the stalled
         # sweep only inspects "in_progress" tasks.
         from app.api.routes.devices import sweep_offline_devices
+        from app.git_workflows.manager import git_workflow_manager
         from app.orchestration.replacement import replacement_service
 
         requeued = await replacement_service.resume_emergency_stopped_tasks(db, actor="self_healing")
@@ -347,6 +355,48 @@ class QAAndIntelligenceEngine:
             ag.current_task_id = None
             recovered_workers.append(ag.id)
 
+        # Prune orphaned git worktrees belonging to missing, offline, replaced, or disabled agents.
+        settings = get_settings()
+        effective_repo = Path(repo_path).resolve() if repo_path else settings.REPO_ROOT
+        wt_dir = (
+            Path(worktrees_root).resolve()
+            if worktrees_root
+            else (
+                (effective_repo / "data" / "worktrees").resolve()
+                if repo_path
+                else (settings.DATA_DIR / "worktrees").resolve()
+            )
+        )
+        all_agents = {
+            ag.id: ag for ag in (await db.execute(select(Agent))).scalars().all()
+        }
+        pruned_worktrees: list[str] = []
+        if wt_dir.is_dir():
+            for child in sorted(wt_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                candidate_id = child.name
+                ag = all_agents.get(candidate_id)
+                is_orphaned = (
+                    ag is None
+                    or not ag.is_enabled
+                    or ag.status in ("offline", "replaced", "disabled")
+                )
+                if not is_orphaned:
+                    continue
+                try:
+                    rm_res = await git_workflow_manager.remove_agent_worktree(
+                        candidate_id,
+                        db=db,
+                        repo_path=effective_repo,
+                        worktrees_root=wt_dir,
+                        actor="self_healing",
+                    )
+                    if rm_res.get("ok") or not child.exists():
+                        pruned_worktrees.append(candidate_id)
+                except Exception:
+                    continue
+
         db.add(
             AuditLog(
                 actor="self_healing",
@@ -359,10 +409,18 @@ class QAAndIntelligenceEngine:
                     "device_tasks_requeued": device_sweep["requeued_tasks"],
                     "browsers_recovered": recovered_browsers,
                     "workers_recovered": recovered_workers,
+                    "pruned_worktrees": pruned_worktrees,
                 },
             )
         )
-        if stalled or requeued or device_sweep["requeued_tasks"] or recovered_browsers or recovered_workers:
+        if (
+            stalled
+            or requeued
+            or device_sweep["requeued_tasks"]
+            or recovered_browsers
+            or recovered_workers
+            or pruned_worktrees
+        ):
             db.add(
                 Notification(
                     category="recovery",
@@ -372,7 +430,7 @@ class QAAndIntelligenceEngine:
                         f"Recovered {len(stalled)} stalled task(s), requeued {len(requeued)} "
                         f"emergency-stopped task(s), {len(device_sweep['requeued_tasks'])} "
                         f"offline-device task(s), {len(recovered_browsers)} browser(s), "
-                        f"{len(recovered_workers)} worker(s)."
+                        f"{len(recovered_workers)} worker(s), pruned {len(pruned_worktrees)} worktree(s)."
                     ),
                     link="/qa",
                 )
@@ -386,6 +444,7 @@ class QAAndIntelligenceEngine:
             "device_tasks_requeued": device_sweep["requeued_tasks"],
             "browsers_recovered": recovered_browsers,
             "workers_recovered": recovered_workers,
+            "pruned_worktrees": pruned_worktrees,
         }
 
 

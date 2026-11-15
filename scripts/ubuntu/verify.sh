@@ -4,8 +4,8 @@
 # Runs every gate that must pass before a release is considered deliverable:
 #   1. Prerequisites
 #   2. Database migrations (alembic upgrade head)
-#   3. Backend lint        (ruff)
-#   4. Backend tests       (pytest, including the E2E verification suite)
+#   3. Backend & Bridge lint (ruff)
+#   4. Backend & Bridge tests (pytest, including E2E verification & Arena Local Bridge suites)
 #   5. Static secret scan  (no secrets / .env / browser profiles committed)
 #   6. Frontend typecheck, unit tests and production build (skipped when node_modules is absent)
 #
@@ -67,14 +67,20 @@ else
   fail "alembic upgrade head"
 fi
 
-step "3/6 Backend lint"
-run_gate "ruff check" "$ROOT_DIR/.venv/bin/ruff" check backend
+step "3/6 Backend & Bridge lint"
+run_gate "ruff check backend" "$ROOT_DIR/.venv/bin/ruff" check backend
+run_gate "ruff check bridge" "$ROOT_DIR/.venv/bin/ruff" check --config backend/pyproject.toml bridge
 
-step "4/6 Backend tests"
+step "4/6 Backend & Bridge tests"
 if (cd backend && "$PY" -m pytest -q); then
-  ok "pytest (unit + E2E verification suite)"
+  ok "pytest (backend + E2E verification suite)"
 else
-  fail "pytest"
+  fail "pytest (backend)"
+fi
+if "$PY" -m pytest -v bridge/tests/test_bridge.py; then
+  ok "pytest (bridge suite)"
+else
+  fail "pytest (bridge suite)"
 fi
 
 step "5/6 Static secret scan"

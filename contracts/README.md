@@ -1,6 +1,6 @@
 # AATM Shared Architecture & API Contracts
 
-The canonical machine-readable contract is [`schemas.json`](schemas.json), currently **v2.0.0**. Workers and integrations should keep their request validation, responses, and generated API documentation aligned with it.
+The canonical machine-readable contract is [`schemas.json`](schemas.json), currently **v2.2.0**. Workers and integrations should keep their request validation, responses, and generated API documentation aligned with it.
 
 ## Shared envelopes and routing
 
@@ -31,7 +31,7 @@ The canonical machine-readable contract is [`schemas.json`](schemas.json), curre
 - **Agent Status**: `idle | working | paused | error | offline`
 - **Task Status**: `backlog | queued | assigned | in_progress | review | blocked | completed | failed | cancelled`
 - **Task Priority**: `critical | high | medium | low`
-- **Approval Types**: `spend | deploy | merge | delete | credential | security | irreversible`
+- **Approval Types**: `branch | spend | deploy | merge | delete | credential | security | irreversible`
 - **Memory Scopes**: `employee | team | organization | global | project | agent | task | decision`
 - **Browser Modes**: `visible | background`
 - **Provider Types**: `arena_local_bridge | arena_agent | anthropic_claude`
@@ -43,7 +43,20 @@ The canonical machine-readable contract is [`schemas.json`](schemas.json), curre
 - **Message Types**: `task_assignment | handoff | status_update | direct | group`
 - **Languages**: `en | ar | fa`
 
+## Device token revocation and provider usage
+
+- `POST /api/v1/devices/{device_id}/revoke` requires an authenticated user with role `admin` or `operator`. Its response is exactly `{ "id": string, "token_version": integer, "device_token": string }`; the token is version-bound and must be handled as a secret.
+- `GET /api/v1/providers/usage` includes `budget_summary` with the six global spend/limit/headroom numbers listed in `schemas.json`, alongside token totals and recent logs.
+- `POST /api/v1/providers/{provider_id}/test` accepts optional `agent_id` and `session_id` fields; both may be omitted or null.
+
+## Supervisor relationships and Git worktrees
+
+- `Agent.reports_to` is a nullable supervisor agent ID. New non-manager employees default to `manager-0` unless `reports_to` is supplied; PATCH requests may set it to `null` to clear the relationship.
+- `POST /api/v1/git/worktrees` creates a per-agent worktree and `DELETE /api/v1/git/worktrees/{agent_id}` removes it. Both require an authenticated `admin` or `operator`. Creation accepts `agent_id`, `branch_name`, optional `base_ref` (default `HEAD`), and optional `approval_id`; invalid paths, branches, or base refs return 400, while role and approval failures return 403.
+
 ## Credential references and approved GitHub writes
 
 - Credential fields accept environment-variable references matching `env:[A-Z_][A-Z0-9_]*`; do not submit literal tokens, API keys, or passwords. Validation errors must not echo submitted credentials.
-- `GitHubPRCreateRequest` and `GitHubIssueCreateRequest` include an `approval_id`. Before performing a write, an integration must verify that the referenced governance approval exists and is approved.
+- GitHub branch, pull-request, and issue write requests include an `approval_id`. Branch creation uses an approved `branch` request; PRs and issues must reference an approved governance request. The backend also enforces the repository allowlist and protected-branch policy before a write.
+- `POST /api/v1/github/branches` accepts `approval_id`, `repo`, `branch_name`, and `from_branch`. PR and issue request fields and defaults are defined in the canonical operations schemas.
+- `GET /api/v1/traces` is a read-only timeline of persisted audit, provider-usage, workspace-artifact, and agent-message records. Optional `agent_id` and `project_id` filters are supported. It omits free-form instructions, error text, artifact summaries, and audit details to avoid exposing credentials.

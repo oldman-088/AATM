@@ -95,6 +95,7 @@ class ExecutionDevice(Base):
     ram_gb: Mapped[float] = mapped_column(Float, default=4.0, nullable=False)
     capabilities: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="online", nullable=False)  # online|offline|disconnected|degraded
+    token_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     max_concurrent_tasks: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     active_tasks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

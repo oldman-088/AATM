@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import html
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,56 @@ SAFE_CHROMIUM_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
 ]
+
+MAX_SELECTOR_LENGTH = 512
+MAX_FILL_VALUE_LENGTH = 50_000
+MAX_EXTRACT_CHARS = 20_000
+PROHIBITED_SELECTOR_RE = re.compile(
+    r"(captcha|recaptcha|hcaptcha|turnstile|arkose|funcaptcha|geetest|cf-turnstile|g-recaptcha|h-captcha|px-captcha|datadome|challenge-form|javascript:|<script)",
+    re.IGNORECASE,
+)
+
+SENSITIVE_TEXT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE), "Bearer <redacted>"),
+    (re.compile(r"\bAuthorization\s*:\s*[^\s,;\"']+(?:\s+[^\s,;\"']+)?", re.IGNORECASE), "Authorization: <redacted>"),
+    (
+        re.compile(
+            r"\b((?:cookie|set-cookie|sessionid|session_id|csrftoken|cf_clearance|access_token|refresh_token|id_token|api_key|apikey|jwt|auth_token|password|passwd|secret)\s*[=:]\s*)([^\s;,&\"']+)",
+            re.IGNORECASE,
+        ),
+        r"\1<redacted>",
+    ),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "<redacted>"),
+    (re.compile(r"\b(?:sk-(?:ant-|proj-)?|ghp_|gho_|github_pat_|xox[baprs]-|AIza|AKIA)[A-Za-z0-9_-]{12,}\b"), "<redacted>"),
+]
+
+
+def redact_extracted_text(text: str) -> tuple[str, int]:
+    """Mask sensitive token, cookie, JWT, and credential patterns in extracted DOM text."""
+    if not text:
+        return "", 0
+    redacted = text
+    total_hits = 0
+    for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
+        redacted, count = pattern.subn(replacement, redacted)
+        total_hits += count
+    return redacted, total_hits
+
+
+def validate_selector(selector: str) -> str:
+    """Validate DOM selectors for safe page interaction; block CAPTCHA/anti-bot challenge targets."""
+    if not isinstance(selector, str):
+        raise ValueError("Selector must be a non-empty string.")
+    cleaned = selector.strip()
+    if not cleaned:
+        raise ValueError("Selector cannot be empty.")
+    if len(cleaned) > MAX_SELECTOR_LENGTH:
+        raise ValueError(f"Selector exceeds maximum allowed length ({MAX_SELECTOR_LENGTH} chars).")
+    if PROHIBITED_SELECTOR_RE.search(cleaned):
+        raise ValueError(
+            "Policy violation: selector targets a prohibited CAPTCHA/anti-bot challenge or script pattern."
+        )
+    return cleaned
 
 
 def validate_navigation_url(url: str) -> str:
@@ -449,6 +501,697 @@ class BrowserManager:
             await db.refresh(profile)
             await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "url": safe_url})
             return profile
+
+    async def click_element(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        selector: str,
+        *,
+        actor: str = "system",
+        timeout_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        """Policy-checked element click: runs via Playwright when live, or returns structured headless_fallback diagnostics."""
+        safe_selector = validate_selector(selector)
+        async with self._get_profile_lock(profile.id):
+            if profile.status != "running":
+                raise ValueError(f"Browser profile '{profile.id}' must be running before clicking elements (status='{profile.status}').")
+
+            profile.last_heartbeat = utcnow()
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    await page.click(safe_selector, timeout=timeout_ms)
+                    live_url = getattr(page, "url", None)
+                    if isinstance(live_url, str) and live_url:
+                        try:
+                            profile.current_url = validate_navigation_url(live_url)
+                        except ValueError:
+                            pass
+                    title = await page.title()
+                    if title:
+                        profile.page_title = title
+                    note = f"Live Playwright click succeeded on '{safe_selector[:48]}'."
+                    profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.click",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={"selector": safe_selector, "engine_mode": "playwright", "executed_live": True},
+                        )
+                    )
+                    await db.commit()
+                    await db.refresh(profile)
+                    await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "click_element"})
+                    return {
+                        "ok": True,
+                        "action": "click_element",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "detail": note,
+                    }
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    profile.last_snapshot_svg = render_browser_wall_svg(
+                        profile, note=f"Playwright click error: {type(exc).__name__}"
+                    )
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.click",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={"selector": safe_selector, "engine_mode": "playwright", "error": err_msg},
+                            severity="warning",
+                        )
+                    )
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "action": "click_element",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "error": err_msg,
+                    }
+
+            caps = detect_playwright_capabilities()
+            fallback_reason = (
+                "Chromium binary not installed on host; operating in headless_fallback diagnostic mode."
+                if not caps["chromium_installed"]
+                else "No live Playwright context attached to this profile; operating in headless_fallback diagnostic mode."
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note=f"[headless_fallback] Click diagnostic validated for '{safe_selector[:44]}'.",
+            )
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="browser.click",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={"selector": safe_selector, "engine_mode": "headless_fallback", "executed_live": False},
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "click_element"})
+            return {
+                "ok": True,
+                "action": "click_element",
+                "profile_id": profile.id,
+                "selector": safe_selector,
+                "engine_mode": "headless_fallback",
+                "executed_live": False,
+                "fallback_reason": fallback_reason,
+                "current_url": profile.current_url,
+                "page_title": profile.page_title,
+                "capabilities": caps,
+            }
+
+    async def fill_input(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        selector: str,
+        value: str,
+        *,
+        actor: str = "system",
+        timeout_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        """Policy-checked input fill: runs via Playwright when live, never logs raw input text, or returns headless_fallback diagnostics."""
+        safe_selector = validate_selector(selector)
+        if not isinstance(value, str):
+            raise ValueError("Input value must be a string.")
+        if len(value) > MAX_FILL_VALUE_LENGTH:
+            raise ValueError(f"Input value exceeds maximum allowed length ({MAX_FILL_VALUE_LENGTH} chars).")
+
+        async with self._get_profile_lock(profile.id):
+            if profile.status != "running":
+                raise ValueError(f"Browser profile '{profile.id}' must be running before filling inputs (status='{profile.status}').")
+
+            profile.last_heartbeat = utcnow()
+            value_length = len(value)
+
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    await page.fill(safe_selector, value, timeout=timeout_ms)
+                    title = await page.title()
+                    if title:
+                        profile.page_title = title
+                    note = f"Live Playwright fill succeeded on '{safe_selector[:42]}' ({value_length} chars, redacted)."
+                    profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.fill",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "selector": safe_selector,
+                                "value_length": value_length,
+                                "redacted": True,
+                                "engine_mode": "playwright",
+                                "executed_live": True,
+                            },
+                        )
+                    )
+                    await db.commit()
+                    await db.refresh(profile)
+                    await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "fill_input"})
+                    return {
+                        "ok": True,
+                        "action": "fill_input",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "value_length": value_length,
+                        "redacted": True,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "detail": note,
+                    }
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    profile.last_snapshot_svg = render_browser_wall_svg(
+                        profile, note=f"Playwright fill error: {type(exc).__name__}"
+                    )
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.fill",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "selector": safe_selector,
+                                "value_length": value_length,
+                                "redacted": True,
+                                "engine_mode": "playwright",
+                                "error": err_msg,
+                            },
+                            severity="warning",
+                        )
+                    )
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "action": "fill_input",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "value_length": value_length,
+                        "redacted": True,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "error": err_msg,
+                    }
+
+            caps = detect_playwright_capabilities()
+            fallback_reason = (
+                "Chromium binary not installed on host; operating in headless_fallback diagnostic mode."
+                if not caps["chromium_installed"]
+                else "No live Playwright context attached to this profile; operating in headless_fallback diagnostic mode."
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note=f"[headless_fallback] Fill diagnostic validated for '{safe_selector[:40]}' ({value_length} chars).",
+            )
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="browser.fill",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "selector": safe_selector,
+                        "value_length": value_length,
+                        "redacted": True,
+                        "engine_mode": "headless_fallback",
+                        "executed_live": False,
+                    },
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "fill_input"})
+            return {
+                "ok": True,
+                "action": "fill_input",
+                "profile_id": profile.id,
+                "selector": safe_selector,
+                "value_length": value_length,
+                "redacted": True,
+                "engine_mode": "headless_fallback",
+                "executed_live": False,
+                "fallback_reason": fallback_reason,
+                "current_url": profile.current_url,
+                "page_title": profile.page_title,
+                "capabilities": caps,
+            }
+
+    async def capture_snapshot(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        *,
+        actor: str = "system",
+        full_page: bool = False,
+    ) -> dict[str, Any]:
+        """Capture live Playwright PNG + SVG snapshot when available, or deterministic SVG headless_fallback diagnostics."""
+        async with self._get_profile_lock(profile.id):
+            profile.last_heartbeat = utcnow()
+            screenshot_b64: str | None = None
+            screenshot_bytes = 0
+            executed_live = False
+            fallback_reason: str | None = None
+            engine_mode = "headless_fallback"
+
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    png_bytes = await page.screenshot(full_page=full_page, type="png")
+                    screenshot_bytes = len(png_bytes)
+                    screenshot_b64 = base64.b64encode(png_bytes).decode("ascii")
+                    title = await page.title()
+                    if title:
+                        profile.page_title = title
+                    executed_live = True
+                    engine_mode = "playwright"
+                except Exception as exc:
+                    fallback_reason = f"Playwright screenshot fallback: {type(exc).__name__}"
+
+            caps = detect_playwright_capabilities()
+            if not executed_live and fallback_reason is None:
+                fallback_reason = (
+                    "Chromium binary not installed on host; returning deterministic SVG Browser Wall snapshot."
+                    if not caps["chromium_installed"]
+                    else "No live Playwright context attached to this profile; returning deterministic SVG snapshot."
+                )
+
+            note = (
+                f"Live Playwright PNG snapshot captured ({screenshot_bytes} bytes)."
+                if executed_live
+                else f"[headless_fallback] {fallback_reason}"
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="browser.snapshot",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "engine_mode": engine_mode,
+                        "executed_live": executed_live,
+                        "full_page": full_page,
+                        "screenshot_bytes": screenshot_bytes,
+                    },
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "capture_snapshot"})
+
+            return {
+                "ok": True,
+                "action": "capture_snapshot",
+                "profile_id": profile.id,
+                "engine_mode": engine_mode,
+                "executed_live": executed_live,
+                "format": "png+svg" if executed_live else "svg",
+                "screenshot_base64": screenshot_b64,
+                "screenshot_bytes": screenshot_bytes,
+                "svg": profile.last_snapshot_svg,
+                "current_url": profile.current_url,
+                "page_title": profile.page_title,
+                "viewport": {"width": profile.viewport_width, "height": profile.viewport_height},
+                "lock_status": self.get_lock_status(profile),
+                "capabilities": caps,
+                "fallback_reason": fallback_reason,
+            }
+
+    async def extract_text(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        selector: str,
+        max_chars: int = 2000,
+        *,
+        actor: str = "system",
+        timeout_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        """Policy-checked DOM text extraction with sensitive token/cookie redaction and headless_fallback support."""
+        safe_selector = validate_selector(selector)
+        bounded_max = max(1, min(int(max_chars), MAX_EXTRACT_CHARS))
+
+        async with self._get_profile_lock(profile.id):
+            if profile.status != "running":
+                raise ValueError(
+                    f"Browser profile '{profile.id}' must be running before extracting text (status='{profile.status}')."
+                )
+
+            profile.last_heartbeat = utcnow()
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    if hasattr(page, "text_content"):
+                        raw_text = await page.text_content(safe_selector, timeout=timeout_ms)
+                    elif hasattr(page, "inner_text"):
+                        raw_text = await page.inner_text(safe_selector, timeout=timeout_ms)
+                    else:
+                        raw_text = await page.locator(safe_selector).first.inner_text(timeout=timeout_ms)
+                    text_str = str(raw_text or "")
+                    masked_text, redacted_count = redact_extracted_text(text_str)
+                    truncated = len(masked_text) > bounded_max
+                    final_text = masked_text[:bounded_max]
+                    note = (
+                        f"Live Playwright extract_text on '{safe_selector[:40]}' "
+                        f"({len(final_text)} chars, {redacted_count} redacted)."
+                    )
+                    profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.extract_text",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "selector": safe_selector,
+                                "char_count": len(final_text),
+                                "max_chars": bounded_max,
+                                "truncated": truncated,
+                                "redacted_count": redacted_count,
+                                "engine_mode": "playwright",
+                                "executed_live": True,
+                            },
+                        )
+                    )
+                    await db.commit()
+                    await db.refresh(profile)
+                    await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "extract_text"})
+                    return {
+                        "ok": True,
+                        "action": "extract_text",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "text": final_text,
+                        "char_count": len(final_text),
+                        "truncated": truncated,
+                        "redacted_count": redacted_count,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "detail": note,
+                    }
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    profile.last_snapshot_svg = render_browser_wall_svg(
+                        profile, note=f"Playwright extract_text error: {type(exc).__name__}"
+                    )
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.extract_text",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "selector": safe_selector,
+                                "engine_mode": "playwright",
+                                "error": err_msg,
+                            },
+                            severity="warning",
+                        )
+                    )
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "action": "extract_text",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "text": "",
+                        "char_count": 0,
+                        "truncated": False,
+                        "redacted_count": 0,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "error": err_msg,
+                    }
+
+            caps = detect_playwright_capabilities()
+            fallback_reason = (
+                "Chromium binary not installed on host; operating in headless_fallback diagnostic mode."
+                if not caps["chromium_installed"]
+                else "No live Playwright context attached to this profile; operating in headless_fallback diagnostic mode."
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note=f"[headless_fallback] extract_text validated for '{safe_selector[:42]}'.",
+            )
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="browser.extract_text",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "selector": safe_selector,
+                        "max_chars": bounded_max,
+                        "engine_mode": "headless_fallback",
+                        "executed_live": False,
+                    },
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "extract_text"})
+            return {
+                "ok": True,
+                "action": "extract_text",
+                "profile_id": profile.id,
+                "selector": safe_selector,
+                "text": "",
+                "char_count": 0,
+                "truncated": False,
+                "redacted_count": 0,
+                "engine_mode": "headless_fallback",
+                "executed_live": False,
+                "fallback_reason": fallback_reason,
+                "current_url": profile.current_url,
+                "page_title": profile.page_title,
+                "capabilities": caps,
+            }
+
+    async def run_userscript(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        userscript: Any,
+        agent_id: str,
+        agent_role: str,
+        *,
+        target_url: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Policy-gated userscript runner: enforces authorize_userscript_execution fail-closed, runs via Playwright or headless_fallback."""
+        from app.browser.engines import authorize_userscript_execution
+
+        audit_actor = actor or agent_id or "system"
+        if isinstance(userscript, dict):
+            script_dict = dict(userscript)
+            userscript_id = str(script_dict.get("id") or script_dict.get("name") or "inline-userscript")
+        else:
+            userscript_id = str(getattr(userscript, "id", None) or getattr(userscript, "name", "userscript"))
+            script_dict = {
+                "id": userscript_id,
+                "name": getattr(userscript, "name", userscript_id),
+                "is_enabled": getattr(userscript, "is_enabled", False),
+                "audit_status": getattr(userscript, "audit_status", "pending"),
+                "code": getattr(userscript, "code", ""),
+                "match_patterns": list(getattr(userscript, "match_patterns", []) or []),
+                "allowed_roles": list(getattr(userscript, "allowed_roles", []) or []),
+                "allowed_agent_ids": list(getattr(userscript, "allowed_agent_ids", []) or []),
+            }
+
+        effective_url = validate_navigation_url(target_url or profile.current_url or "about:blank")
+        authorized, reason = authorize_userscript_execution(
+            script_dict,
+            agent_id=agent_id,
+            agent_role=agent_role,
+            target_url=effective_url,
+        )
+        if not authorized:
+            db.add(
+                AuditLog(
+                    actor=audit_actor,
+                    action="browser.userscript.denied",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "reason": reason,
+                    },
+                    severity="warning",
+                )
+            )
+            await db.commit()
+            raise ValueError(f"Userscript authorization denied: {reason}")
+
+        async with self._get_profile_lock(profile.id):
+            if profile.status != "running":
+                raise ValueError(
+                    f"Browser profile '{profile.id}' must be running before executing userscripts (status='{profile.status}')."
+                )
+
+            profile.last_heartbeat = utcnow()
+            code = str(script_dict.get("code") or "")
+
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    eval_result = await page.evaluate(f"() => {{\n{code}\n}}")
+                    result_preview = None if eval_result is None else str(eval_result)[:500]
+                    note = f"Live Playwright userscript '{userscript_id[:36]}' executed for {agent_id}."
+                    profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+                    db.add(
+                        AuditLog(
+                            actor=audit_actor,
+                            action="browser.userscript.executed",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "userscript_id": userscript_id,
+                                "agent_id": agent_id,
+                                "agent_role": agent_role,
+                                "target_url": effective_url,
+                                "engine_mode": "playwright",
+                                "executed_live": True,
+                            },
+                        )
+                    )
+                    await db.commit()
+                    await db.refresh(profile)
+                    await event_bus.emit(
+                        "browser.snapshot",
+                        {"profile_id": profile.id, "action": "run_userscript", "userscript_id": userscript_id},
+                    )
+                    return {
+                        "ok": True,
+                        "action": "run_userscript",
+                        "profile_id": profile.id,
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "result": result_preview,
+                        "detail": note,
+                    }
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    profile.last_snapshot_svg = render_browser_wall_svg(
+                        profile, note=f"Playwright userscript error: {type(exc).__name__}"
+                    )
+                    db.add(
+                        AuditLog(
+                            actor=audit_actor,
+                            action="browser.userscript.error",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "userscript_id": userscript_id,
+                                "agent_id": agent_id,
+                                "agent_role": agent_role,
+                                "target_url": effective_url,
+                                "engine_mode": "playwright",
+                                "error": err_msg,
+                            },
+                            severity="warning",
+                        )
+                    )
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "action": "run_userscript",
+                        "profile_id": profile.id,
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "error": err_msg,
+                    }
+
+            caps = detect_playwright_capabilities()
+            fallback_reason = (
+                "Chromium binary not installed on host; authorized userscript verified in headless_fallback mode."
+                if not caps["chromium_installed"]
+                else "No live Playwright context attached to this profile; authorized userscript verified in headless_fallback mode."
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note=f"[headless_fallback] Authorized userscript '{userscript_id[:36]}' validated for {agent_id}.",
+            )
+            db.add(
+                AuditLog(
+                    actor=audit_actor,
+                    action="browser.userscript.executed",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "engine_mode": "headless_fallback",
+                        "executed_live": False,
+                    },
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit(
+                "browser.snapshot",
+                {"profile_id": profile.id, "action": "run_userscript", "userscript_id": userscript_id},
+            )
+            return {
+                "ok": True,
+                "action": "run_userscript",
+                "profile_id": profile.id,
+                "userscript_id": userscript_id,
+                "agent_id": agent_id,
+                "agent_role": agent_role,
+                "target_url": effective_url,
+                "engine_mode": "headless_fallback",
+                "executed_live": False,
+                "fallback_reason": fallback_reason,
+                "capabilities": caps,
+            }
 
     async def stop_profile(self, db: AsyncSession, profile: BrowserProfile, actor: str = "system") -> BrowserProfile:
         async with self._get_profile_lock(profile.id):

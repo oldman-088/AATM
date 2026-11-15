@@ -16,6 +16,7 @@ from app.schemas.common import (
     BrowserNavigateRequest,
     ProviderCreateOrUpdate,
     ProviderTestRequest,
+    ProviderUsageResponse,
     validate_credential_ref,
 )
 
@@ -139,9 +140,16 @@ async def test_provider(
     p = await db.get(AIProvider, provider_id)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
+    request_metadata = {"session_id": body.session_id} if body.session_id is not None else {}
     resp = await provider_router.route_and_execute(
         db,
-        ProviderRequest(prompt=body.prompt, model=body.model, dry_run=body.dry_run, agent_id="manager-0"),
+        ProviderRequest(
+            prompt=body.prompt,
+            model=body.model,
+            dry_run=body.dry_run,
+            agent_id=body.agent_id or "manager-0",
+            metadata=request_metadata,
+        ),
         preferred_provider_id=provider_id,
     )
     return {
@@ -157,7 +165,7 @@ async def test_provider(
     }
 
 
-@router.get("/providers/usage")
+@router.get("/providers/usage", response_model=ProviderUsageResponse)
 async def get_provider_usage(db: AsyncSession = Depends(get_db)):
     logs = list((await db.execute(select(ProviderUsageLog).order_by(ProviderUsageLog.created_at.desc()).limit(50))).scalars().all())
     tot_res = await db.execute(
@@ -168,7 +176,11 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
         )
     )
     in_tok, out_tok, total_cost = tot_res.one()
+
+    budget_summary = await provider_router.get_spend_summary(db)
+
     return {
+        "budget_summary": budget_summary,
         "summary": {
             "total_input_tokens": int(in_tok or 0),
             "total_output_tokens": int(out_tok or 0),

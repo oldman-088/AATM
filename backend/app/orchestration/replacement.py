@@ -1,14 +1,30 @@
+import inspect
+import logging
 import shutil
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.manager import browser_manager
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.employees.catalog import ensure_employee_workspace
-from app.models import Agent, AgentMessage, AuditLog, BrowserProfile, Notification, Task
+from app.employees.catalog import allocate_account_and_session, ensure_employee_workspace
+from app.git_workflows.manager import git_workflow_manager
+from app.models import (
+    Agent,
+    AgentMessage,
+    AIProvider,
+    AuditLog,
+    BrowserProfile,
+    Notification,
+    ProviderAccount,
+    ProviderSession,
+    Task,
+)
+from app.providers.adapters import ArenaLocalBridgeAdapter
+
+logger = logging.getLogger(__name__)
 
 # Marker written into `Task.error_message` so tasks halted by an Emergency Stop can be
 # identified later and resumed. Without it a globally stopped task stays "blocked"
@@ -103,11 +119,22 @@ class ReplacementAndEmergencyService:
                 )
             )
 
+        failing_name = failing.name
+        replacement_id = replacement.id
+        replacement_name = replacement.name
+
         failing.status = "offline"
         failing.current_task_id = None
         replacement.last_heartbeat = utcnow()
         if transferred_tasks:
             replacement.current_task_id = transferred_tasks[0]
+
+        replacement_session_allocated = await self._ensure_replacement_session(db, replacement)
+        replacement_session_id = replacement.provider_session_id
+
+        bridge_cleanup = await self._cleanup_bridge_session(db, failing)
+        stopped_browsers = await self._stop_employee_browsers(db, failing, actor=actor)
+        worktree_cleanup = await self._cleanup_employee_worktree(failing_agent_id)
 
         db.add(
             AuditLog(
@@ -116,31 +143,207 @@ class ReplacementAndEmergencyService:
                 resource_type="agent",
                 resource_id=failing_agent_id,
                 details={
-                    "replacement_id": replacement.id,
+                    "replacement_id": replacement_id,
+                    "replacement_session_id": replacement_session_id,
+                    "replacement_session_allocated": replacement_session_allocated,
                     "transferred_tasks": transferred_tasks,
                     "transferred_files": transferred_files,
                     "reason": reason,
+                    "bridge_session_cleanup": bridge_cleanup,
+                    "stopped_browsers": stopped_browsers,
+                    "worktree_cleanup": worktree_cleanup,
                 },
                 severity="warning",
             )
         )
+        browser_note = f" Stopped {len(stopped_browsers)} browser profile(s)." if stopped_browsers else ""
         db.add(
             Notification(
                 category="replacement",
                 severity="warning",
-                title=f"Smart Replacement: {failing.name} -> {replacement.name}",
-                message=f"Transferred {len(transferred_tasks)} task(s) and {len(transferred_files)} workspace file(s).",
+                title=f"Smart Replacement: {failing_name} -> {replacement_name}",
+                message=(
+                    f"Transferred {len(transferred_tasks)} task(s) and {len(transferred_files)} workspace file(s)."
+                    + browser_note
+                ),
                 link="/agents",
             )
         )
         await db.commit()
-        await event_bus.emit("employee.replaced", {"from": failing_agent_id, "to": replacement.id, "tasks": transferred_tasks})
+        await event_bus.emit(
+            "employee.replaced",
+            {
+                "from": failing_agent_id,
+                "to": replacement_id,
+                "replacement_session_id": replacement_session_id,
+                "tasks": transferred_tasks,
+                "bridge_session_cleanup": bridge_cleanup,
+                "stopped_browsers": stopped_browsers,
+                "worktree_cleanup": worktree_cleanup,
+            },
+        )
         return {
             "replaced_employee": failing_agent_id,
-            "replacement_employee": replacement.id,
+            "replacement_employee": replacement_id,
+            "replacement_session_id": replacement_session_id,
+            "replacement_session_allocated": replacement_session_allocated,
             "transferred_tasks": transferred_tasks,
             "transferred_files": transferred_files,
+            "bridge_session_cleanup": bridge_cleanup,
+            "stopped_browsers": stopped_browsers,
+            "worktree_cleanup": worktree_cleanup,
         }
+
+    async def _ensure_replacement_session(
+        self,
+        db: AsyncSession,
+        replacement: Agent,
+    ) -> dict[str, Any] | None:
+        """Ensure the replacement employee has an active ProviderSession, allocating one if missing or closed."""
+        existing_sess: ProviderSession | None = None
+        if replacement.provider_session_id:
+            existing_sess = await db.get(ProviderSession, replacement.provider_session_id)
+        if existing_sess is not None and existing_sess.status != "closed":
+            return None
+
+        provider_id = replacement.provider_id or "arena-agent"
+        acct_id, sess_id = await allocate_account_and_session(
+            db,
+            agent_id=replacement.id,
+            provider_id=provider_id,
+            preferred_account_id=replacement.provider_account_id,
+            browser_profile_id=replacement.browser_profile_id,
+        )
+        replacement.provider_account_id = acct_id
+        replacement.provider_session_id = sess_id
+        return {"account_id": acct_id, "session_id": sess_id, "provider_id": provider_id}
+
+    @staticmethod
+    async def _cleanup_employee_worktree(failing_agent_id: str) -> dict[str, Any]:
+        """Best-effort cleanup of any stale git worktree belonging to the replaced employee."""
+        try:
+            res = git_workflow_manager.remove_agent_worktree(failing_agent_id)
+            if inspect.isawaitable(res):
+                res = await res
+            return dict(res) if isinstance(res, dict) else {"ok": True, "removed": True, "agent_id": failing_agent_id}
+        except Exception as exc:  # noqa: BLE001 - best-effort worktree hygiene must never abort replacement
+            logger.warning(
+                "Best-effort worktree cleanup failed for agent=%s: %s",
+                failing_agent_id,
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "removed": False,
+                "agent_id": failing_agent_id,
+                "error": f"Worktree cleanup error: {type(exc).__name__}",
+            }
+
+    async def _stop_employee_browsers(
+        self,
+        db: AsyncSession,
+        failing: Agent,
+        *,
+        actor: str,
+    ) -> list[str]:
+        """Stop any running BrowserProfile owned or locked by the replaced employee to release .aatm.lock and contexts."""
+        ownership_filters = [
+            BrowserProfile.agent_id == failing.id,
+            BrowserProfile.lock_owner == failing.id,
+        ]
+        if failing.browser_profile_id:
+            ownership_filters.append(BrowserProfile.id == failing.browser_profile_id)
+
+        bp_res = await db.execute(
+            select(BrowserProfile).where(
+                BrowserProfile.status == "running",
+                or_(*ownership_filters),
+            )
+        )
+        running_profiles = list(bp_res.scalars().all())
+        stopped_ids: list[str] = []
+        for bp in running_profiles:
+            bp_id = bp.id
+            try:
+                await browser_manager.stop_profile(db, bp, actor=actor)
+                stopped_ids.append(bp_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort browser lock cleanup must never abort replacement
+                logger.warning(
+                    "Best-effort browser stop failed for agent=%s profile=%s: %s",
+                    failing.id,
+                    bp_id,
+                    type(exc).__name__,
+                )
+        return stopped_ids
+
+    async def _cleanup_bridge_session(
+        self,
+        db: AsyncSession,
+        failing: Agent,
+    ) -> dict[str, Any] | None:
+        """Best-effort DELETE /v1/sessions/{old_session_id} if the replaced employee used arena_local_bridge."""
+        old_session_id = failing.provider_session_id
+        old_account_id = failing.provider_account_id
+        sess_row: ProviderSession | None = None
+
+        if old_session_id:
+            sess_row = await db.get(ProviderSession, old_session_id)
+        else:
+            sess_res = await db.execute(
+                select(ProviderSession)
+                .where(ProviderSession.agent_id == failing.id, ProviderSession.status == "active")
+                .order_by(ProviderSession.created_at.desc())
+                .limit(1)
+            )
+            sess_row = sess_res.scalar_one_or_none()
+            if sess_row:
+                old_session_id = sess_row.id
+
+        if sess_row and not old_account_id:
+            old_account_id = sess_row.account_id
+
+        bridge_provider: AIProvider | None = None
+        if failing.provider_id:
+            cand = await db.get(AIProvider, failing.provider_id)
+            if cand and cand.provider_type == "arena_local_bridge":
+                bridge_provider = cand
+
+        if bridge_provider is None and old_account_id:
+            acct = await db.get(ProviderAccount, old_account_id)
+            if acct and acct.provider_id:
+                cand = await db.get(AIProvider, acct.provider_id)
+                if cand and cand.provider_type == "arena_local_bridge":
+                    bridge_provider = cand
+
+        if bridge_provider is None or not old_session_id:
+            return None
+
+        if sess_row:
+            sess_row.status = "closed"
+
+        adapter = ArenaLocalBridgeAdapter(
+            provider_id=bridge_provider.id,
+            endpoint_url=bridge_provider.endpoint_url,
+            credential_ref=bridge_provider.credential_ref,
+            default_model=bridge_provider.default_model,
+        )
+        try:
+            return await adapter.delete_session(old_session_id, account_id=old_account_id)
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup must never abort replacement
+            logger.warning(
+                "Best-effort bridge session cleanup failed for agent=%s session=%s: %s",
+                failing.id,
+                old_session_id,
+                type(exc).__name__,
+            )
+            return {
+                "deleted": False,
+                "session_id": old_session_id,
+                "account_id": old_account_id,
+                "status": "error",
+                "bridge_reachable": False,
+                "error": f"Bridge cleanup error: {type(exc).__name__}",
+            }
 
     async def emergency_stop(
         self,

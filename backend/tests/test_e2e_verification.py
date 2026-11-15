@@ -33,14 +33,25 @@ from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
 @pytest.fixture(scope="session", autouse=True)
 async def _preserve_alembic_version_stamp():
     yield
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
     from sqlalchemy import text
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    alembic_cfg = Config(str(backend_dir / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+    head_rev = ScriptDirectory.from_config(alembic_cfg).get_current_head()
 
     async with engine.begin() as conn:
         await conn.execute(
             text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
         )
         await conn.execute(text("DELETE FROM alembic_version"))
-        await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('ee92483cefa3')"))
+        if head_rev:
+            await conn.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:rev)"),
+                {"rev": head_rev},
+            )
 
 
 @pytest.fixture(scope="module")
@@ -978,4 +989,671 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
     assert ant_secret not in err_res["error"]
     assert "[REDACTED]" in err_res["error"]
     assert gh_secret not in sanitize_cli_output(f"Authorization: Bearer {gh_secret}")
+
+
+# --------------------------------------------------------------------------------------
+# 8. Increment 5: CI/Templates, Security Policy, Device Revocation & Bridge Cleanup
+# --------------------------------------------------------------------------------------
+async def test_e2e_github_ci_templates_and_security_policy_scan_clean():
+    settings = get_settings()
+    root = Path(settings.REPO_ROOT)
+
+    ci_workflow = root / ".github" / "workflows" / "ci.yml"
+    pr_template = root / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    issue_template = root / ".github" / "ISSUE_TEMPLATE" / "task.md"
+    security_policy = root / "docs" / "SECURITY_POLICY.md"
+
+    for artifact in (ci_workflow, pr_template, issue_template, security_policy):
+        assert artifact.is_file(), f"Required governance artifact missing: {artifact}"
+        assert artifact.stat().st_size > 100, f"Governance artifact unexpectedly empty: {artifact}"
+
+    ci_text = ci_workflow.read_text(encoding="utf-8")
+    for required_gate in (
+        "alembic upgrade head",
+        "ruff check backend",
+        "ruff check --config backend/pyproject.toml bridge",
+        "pytest -v",
+        "bridge/tests/test_bridge.py",
+        "app.qa.engine",
+        "npm run lint",
+        "npm test",
+        "npm run build",
+    ):
+        assert required_gate in ci_text, f"CI workflow missing gate: {required_gate}"
+
+    pr_text = pr_template.read_text(encoding="utf-8")
+    issue_text = issue_template.read_text(encoding="utf-8")
+    assert "AATM_MASTER_SPECIFICATION.md" in pr_text
+    assert "AGENTS.md" in pr_text
+    assert "AATM_MASTER_SPECIFICATION.md" in issue_text
+    assert "AGENTS.md" in issue_text
+
+    sec_text = security_policy.read_text(encoding="utf-8")
+    for topic in (
+        "Workspace Isolation",
+        "validate_credential_ref",
+        "sanitize_untrusted_content",
+        "ApprovalRequest",
+        "token_version",
+        "Emergency Stop",
+    ):
+        assert topic in sec_text, f"SECURITY_POLICY.md missing section/topic: {topic}"
+
+    scan = qa_engine.run_security_scan()
+    assert scan["status"] == "passed", f"Secret scanner reported findings: {scan['findings']}"
+    assert scan["findings"] == []
+
+
+async def test_e2e_device_token_revocation_halts_worker_daemon_on_401(
+    client, auth_headers, project_id, tmp_path
+):
+    await _cancel_all_queued(client, auth_headers)
+
+    reg = await client.post(
+        "/api/v1/devices",
+        headers=auth_headers,
+        json={
+            "id": "e2e-node-revoke-01",
+            "name": "E2E Revocation Node",
+            "device_type": "remote_server",
+            "host_address": "10.0.0.201",
+            "os_name": "Ubuntu 24.04",
+        },
+    )
+    assert reg.status_code == 201
+    token_v1 = reg.json()["device_token"]
+
+    daemon_transport = ASGITransport(app=app)
+    async with AsyncClient(transport=daemon_transport, base_url="http://e2e-node") as daemon_client:
+        daemon = WorkerDaemon(
+            WorkerConfig(
+                device_id="e2e-node-revoke-01",
+                device_name="E2E Revocation Node",
+                token=token_v1,
+                workspace_root=tmp_path / "e2e-node-revoke-01",
+                poll_seconds=0.001,
+            ),
+            client=daemon_client,
+        )
+        await daemon.register()
+        hb_ok = await daemon.heartbeat()
+        assert hb_ok["status"] == "online"
+        assert daemon.token_revoked is False
+
+        # Operator revokes the device token; token_version increments and v1 becomes invalid.
+        rev = await client.post("/api/v1/devices/e2e-node-revoke-01/revoke", headers=auth_headers)
+        assert rev.status_code == 200
+        token_v2 = rev.json()["device_token"]
+        assert token_v2 != token_v1
+        assert rev.json()["token_version"] >= 2
+
+        # Daemon with revoked v1 token must detect HTTP 401 on heartbeat/poll and stop polling cleanly.
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await daemon.run_once()
+        assert exc_info.value.response.status_code == 401
+        assert daemon.token_revoked is True
+        assert daemon.stop_reason is not None and "401" in daemon.stop_reason
+
+        # Starting run_forever with a revoked token also halts immediately without spinning 5 cycles.
+        daemon_loop = WorkerDaemon(
+            WorkerConfig(
+                device_id="e2e-node-revoke-01",
+                device_name="E2E Revocation Node",
+                token=token_v1,
+                workspace_root=tmp_path / "e2e-node-revoke-01",
+                poll_seconds=0.001,
+            ),
+            client=daemon_client,
+        )
+        await daemon_loop.run_forever(max_cycles=5)
+        assert daemon_loop.token_revoked is True
+        assert daemon_loop.stop_reason is not None and "401" in daemon_loop.stop_reason
+        assert daemon_loop.cycles_completed <= 1
+
+    # A fresh daemon configured with the rotated v2 token is accepted again.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://e2e-node") as daemon_client_v2:
+        daemon_v2 = WorkerDaemon(
+            WorkerConfig(
+                device_id="e2e-node-revoke-01",
+                device_name="E2E Revocation Node",
+                token=token_v2,
+                workspace_root=tmp_path / "e2e-node-revoke-01",
+                poll_seconds=0.001,
+            ),
+            client=daemon_client_v2,
+        )
+        hb_v2 = await daemon_v2.heartbeat()
+        assert hb_v2["status"] == "online"
+        assert daemon_v2.token_revoked is False
+
+
+async def test_e2e_smart_replacement_bridge_session_cleanup(
+    client, auth_headers, project_id, monkeypatch
+):
+    from app.models import ProviderSession
+    from app.providers.adapters import ArenaLocalBridgeAdapter
+
+    deleted_calls: list[tuple[str, str | None]] = []
+
+    async def _mock_delete_session_ok(self, session_id: str, account_id: str | None = None):
+        deleted_calls.append((session_id, account_id))
+        return {
+            "deleted": True,
+            "session_id": session_id,
+            "account_id": account_id,
+            "status": "deleted",
+            "bridge_reachable": True,
+        }
+
+    monkeypatch.setattr(ArenaLocalBridgeAdapter, "delete_session", _mock_delete_session_ok)
+
+    emp_bridge = (
+        await client.post(
+            "/api/v1/employees",
+            headers=auth_headers,
+            json={
+                "name": "E2E Bridge Employee",
+                "role_template_id": "backend_developer",
+                "provider_id": "arena-local-bridge",
+                "allocation_mode": "one_per_employee",
+                "create_browser_profile": False,
+            },
+        )
+    ).json()
+    old_session_id = emp_bridge["provider_session_id"]
+    assert old_session_id
+
+    rep = await client.post(f"/api/v1/employees/{emp_bridge['id']}/replace", headers=auth_headers)
+    assert rep.status_code == 200
+    rep_body = rep.json()
+    assert rep_body["bridge_session_cleanup"] is not None
+    assert rep_body["bridge_session_cleanup"]["deleted"] is True
+    assert rep_body["bridge_session_cleanup"]["session_id"] == old_session_id
+    assert any(sid == old_session_id for sid, _ in deleted_calls)
+
+    async with AsyncSessionLocal() as db:
+        closed_sess = await db.get(ProviderSession, old_session_id)
+        assert closed_sess is not None and closed_sess.status == "closed"
+
+    # When the local bridge is offline/unreachable, replacement must still succeed gracefully.
+    async def _mock_delete_session_offline(self, session_id: str, account_id: str | None = None):
+        raise RuntimeError("Bridge connection refused")
+
+    monkeypatch.setattr(ArenaLocalBridgeAdapter, "delete_session", _mock_delete_session_offline)
+
+    emp_offline = (
+        await client.post(
+            "/api/v1/employees",
+            headers=auth_headers,
+            json={
+                "name": "E2E Offline Bridge Employee",
+                "role_template_id": "backend_developer",
+                "provider_id": "arena-local-bridge",
+                "allocation_mode": "one_per_employee",
+                "create_browser_profile": False,
+            },
+        )
+    ).json()
+    rep_offline = await client.post(f"/api/v1/employees/{emp_offline['id']}/replace", headers=auth_headers)
+    assert rep_offline.status_code == 200
+    cleanup_offline = rep_offline.json()["bridge_session_cleanup"]
+    assert cleanup_offline is not None
+    assert cleanup_offline["deleted"] is False
+    assert cleanup_offline["bridge_reachable"] is False
+
+
+# --------------------------------------------------------------------------------------
+# 9. Round 2: Isolated Per-Agent Git Worktrees & Approval Payload Compatibility
+# --------------------------------------------------------------------------------------
+async def test_e2e_agent_git_worktree_lifecycle_isolation_and_hygiene(tmp_path):
+    import subprocess as _subprocess
+
+    from sqlalchemy import select
+
+    from app.git_workflows.manager import git_workflow_manager
+    from app.models import AuditLog
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    _subprocess.run(["git", "-C", str(repo), "config", "user.email", "qa@aatm.local"], check=True)
+    _subprocess.run(["git", "-C", str(repo), "config", "user.name", "AATM QA"], check=True)
+    (repo / "README.md").write_text("# Temporary Repo\n", encoding="utf-8")
+    _subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    _subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial commit"], check=True, capture_output=True)
+
+    # 1. Path traversal / unsafe agent_id values must be rejected.
+    for bad_agent in ("../../etc/passwd", "../escape", "/abs/path", "-flag", "worker/sub", ""):
+        res_bad = git_workflow_manager.create_agent_worktree(bad_agent, "feature/test", repo_path=repo)
+        assert res_bad["allowed"] is False
+        assert res_bad["ok"] is False
+        rm_bad = git_workflow_manager.remove_agent_worktree(bad_agent, repo_path=repo)
+        assert rm_bad["allowed"] is False
+        assert rm_bad["ok"] is False
+
+    # 2. Invalid branch names and unapproved protected branches must be rejected.
+    for bad_branch in ("../../bad", "-f", "branch.lock", "main", "master", "production"):
+        res_br = git_workflow_manager.create_agent_worktree("worker-4", bad_branch, repo_path=repo)
+        assert res_br["allowed"] is False
+        assert res_br["ok"] is False
+
+    # 3. Create isolated worktrees for worker-4 and worker-1 with DB audit logging.
+    async with AsyncSessionLocal() as db:
+        wt_w4 = await git_workflow_manager.create_agent_worktree(
+            "worker-4",
+            "feature/w4-worktree",
+            base_ref="HEAD",
+            db=db,
+            repo_path=repo,
+        )
+        assert wt_w4["allowed"] is True
+        assert wt_w4["ok"] is True
+        w4_path = Path(wt_w4["worktree_path"])
+        assert w4_path == (repo / "data" / "worktrees" / "worker-4").resolve()
+        assert w4_path.is_dir()
+
+        wt_w1 = await git_workflow_manager.create_agent_worktree(
+            "worker-1",
+            "feature/w1-worktree",
+            base_ref="HEAD",
+            db=db,
+            repo_path=repo,
+        )
+        assert wt_w1["allowed"] is True
+        assert wt_w1["ok"] is True
+        w1_path = Path(wt_w1["worktree_path"])
+        assert w1_path == (repo / "data" / "worktrees" / "worker-1").resolve()
+
+        # Verify file isolation across worktrees and main repo.
+        (w4_path / "w4_only.py").write_text(f"TOKEN = '{_sample_secret('github')}'\n", encoding="utf-8")
+        assert not (repo / "w4_only.py").exists()
+        assert not (w1_path / "w4_only.py").exists()
+
+        # 4. Conflict prevention: duplicate agent worktree or duplicate checked-out branch is refused.
+        dup_agent = git_workflow_manager.create_agent_worktree("worker-4", "feature/another", repo_path=repo)
+        assert dup_agent["allowed"] is False
+        assert dup_agent["ok"] is False
+
+        dup_branch = git_workflow_manager.create_agent_worktree("worker-2", "feature/w4-worktree", repo_path=repo)
+        assert dup_branch["allowed"] is False
+        assert dup_branch["ok"] is False
+
+        # 5. QA Engine excludes transient local data/worktrees/ runtime files while flagging committed forbidden artifacts.
+        scan_clean = qa_engine.run_security_scan(repo_root=repo)
+        assert scan_clean["status"] == "passed", scan_clean["findings"]
+
+        (repo / ".env").write_text("S=1\n", encoding="utf-8")
+        _subprocess.run(["git", "-C", str(repo), "add", "-f", ".env"], check=True)
+        scan_flagged = qa_engine.run_security_scan(repo_root=repo)
+        assert scan_flagged["status"] == "warning"
+        assert any(f["rule"] == "env_file_committed" for f in scan_flagged["findings"])
+        _subprocess.run(["git", "-C", str(repo), "rm", "-f", ".env"], check=True, capture_output=True)
+
+        # 6. Clean teardown of worktrees and verification of AuditLog records.
+        rm_w4 = await git_workflow_manager.remove_agent_worktree("worker-4", db=db, repo_path=repo)
+        assert rm_w4["ok"] is True
+        assert rm_w4["removed"] is True
+        assert not w4_path.exists()
+
+        rm_w1 = await git_workflow_manager.remove_agent_worktree("worker-1", db=db, repo_path=repo)
+        assert rm_w1["ok"] is True
+        assert not w1_path.exists()
+
+        logs = (
+            await db.execute(select(AuditLog).where(AuditLog.resource_type == "git_worktree"))
+        ).scalars().all()
+        actions = {lg.action for lg in logs}
+        assert "git.worktree_create" in actions
+        assert "git.worktree_remove" in actions
+
+
+async def test_e2e_github_verify_approval_target_branch_and_base_payload_compatibility(
+    monkeypatch, project_id
+):
+    import subprocess as _subprocess
+
+    from app.git_workflows.manager import git_workflow_manager
+    from app.github_client.client import verify_approval
+    from app.models import ApprovalRequest
+
+    monkeypatch.setattr(
+        "app.github_client.client.subprocess.run",
+        lambda cmd, *a, **kw: _subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="https://github.com/oldman-088/AATM/pull/99\n",
+            stderr="",
+        ),
+    )
+
+    for payload_key in ("target_branch", "base", "base_branch", "target"):
+        approval = ApprovalRequest(
+            id=f"app-compat-{payload_key}",
+            project_id=project_id,
+            action_type="merge",
+            title=f"Approve PR via {payload_key}",
+            description="Payload compatibility verification",
+            requested_by="worker-4",
+            payload={payload_key: "main", "repo": "oldman-088/AATM"},
+            status="approved",
+        )
+        ok, _reason, resolved_id = verify_approval(approval, target_branch="main", repo="oldman-088/AATM")
+        assert ok is True
+        assert resolved_id == f"app-compat-{payload_key}"
+
+        pr_ok = git_workflow_manager.create_pull_request(
+            repo="oldman-088/AATM",
+            title="Compatible approval payload PR",
+            head="feature/compat-check",
+            base="main",
+            approval=approval,
+        )
+        assert pr_ok["allowed"] is True
+        assert pr_ok["ok"] is True
+
+        # Using an approval scoped to `main` for `production` must be rejected.
+        pr_mismatch = git_workflow_manager.create_pull_request(
+            repo="oldman-088/AATM",
+            title="Mismatched protected target PR",
+            head="feature/compat-check",
+            base="production",
+            approval=approval,
+        )
+        assert pr_mismatch["allowed"] is False
+        assert pr_mismatch["ok"] is False
+        assert "production" in pr_mismatch["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 23. Round 3: QA Self-Healing Orphaned Worktree Pruning & POST /github/branches
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_e2e_self_healing_prunes_orphaned_worktrees_and_preserves_active(
+    client, auth_headers, tmp_path, monkeypatch
+):
+    """Verify `qa_engine.run_self_healing(db)` (via `POST /api/v1/qa/self-heal`)
+    automatically prunes git worktrees under `data/worktrees/` whose `agent_id`
+    either belongs to an `offline` / `replaced` employee or does not exist in
+    `agents`, while preserving active agents' worktrees.
+    """
+    import subprocess as _subprocess
+
+    from app.core.config import get_settings
+    from app.git_workflows.manager import git_workflow_manager
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+    _subprocess.run(
+        ["git", "config", "user.email", "aatm-test@aatm.local"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+    )
+    _subprocess.run(
+        ["git", "config", "user.name", "AATM Test"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+    )
+    (repo_dir / "README.md").write_text("# Self-Healing Worktree Pruning Test\n", encoding="utf-8")
+    _subprocess.run(["git", "add", "README.md"], cwd=str(repo_dir), check=True, capture_output=True)
+    _subprocess.run(
+        ["git", "commit", "-m", "initial commit"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+    )
+
+    # Create an employee and then replace it so the original employee transitions to status="offline".
+    emp_resp = await client.post(
+        "/api/v1/employees",
+        headers=auth_headers,
+        json={
+            "name": "Transient Worktree Worker",
+            "title": "Transient Engineer",
+            "role": "backend",
+            "department": "Engineering",
+            "system_prompt": "Test worker",
+        },
+    )
+    assert emp_resp.status_code == 201, emp_resp.text
+    offline_emp_id = emp_resp.json()["id"]
+
+    replace_resp = await client.post(
+        f"/api/v1/employees/{offline_emp_id}/replace",
+        headers=auth_headers,
+        json={"reason": "Replaced before self-healing sweep"},
+    )
+    assert replace_resp.status_code == 200, replace_resp.text
+    replacement_emp_id = replace_resp.json()["replacement_employee"]
+
+    # Create 3 isolated worktrees under repo_dir / "data" / "worktrees":
+    # 1) Active employee (replacement_emp_id) -> must be preserved
+    # 2) Replaced/offline employee (offline_emp_id) -> must be pruned
+    # 3) Non-existent ghost agent ("ghost-orphan-worker") -> must be pruned
+    wt_active = await git_workflow_manager.create_agent_worktree(
+        replacement_emp_id,
+        "feature/active-worker",
+        base_ref="main",
+        repo_path=repo_dir,
+    )
+    wt_offline = await git_workflow_manager.create_agent_worktree(
+        offline_emp_id,
+        "feature/offline-worker",
+        base_ref="main",
+        repo_path=repo_dir,
+    )
+    wt_ghost = await git_workflow_manager.create_agent_worktree(
+        "ghost-orphan-worker",
+        "feature/ghost-worker",
+        base_ref="main",
+        repo_path=repo_dir,
+    )
+    assert wt_active["ok"] is True
+    assert wt_offline["ok"] is True
+    assert wt_ghost["ok"] is True
+
+    active_path = Path(wt_active["worktree_path"])
+    offline_path = Path(wt_offline["worktree_path"])
+    ghost_path = Path(wt_ghost["worktree_path"])
+    assert active_path.is_dir()
+    assert offline_path.is_dir()
+    assert ghost_path.is_dir()
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "REPO_ROOT", repo_dir)
+    monkeypatch.setattr(settings, "DATA_DIR", repo_dir / "data")
+
+    heal_resp = await client.post("/api/v1/qa/self-heal", headers=auth_headers)
+    assert heal_resp.status_code == 200, heal_resp.text
+    heal_data = heal_resp.json()
+    assert "pruned_worktrees" in heal_data
+    assert offline_emp_id in heal_data["pruned_worktrees"]
+    assert "ghost-orphan-worker" in heal_data["pruned_worktrees"]
+    assert replacement_emp_id not in heal_data["pruned_worktrees"]
+
+    # Orphaned worktrees were removed from disk; active employee's worktree remains intact.
+    assert not offline_path.exists()
+    assert not ghost_path.exists()
+    assert active_path.is_dir()
+
+    # Clean up remaining active worktree
+    cleanup = await git_workflow_manager.remove_agent_worktree(
+        replacement_emp_id, repo_path=repo_dir
+    )
+    assert cleanup["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_e2e_github_branches_endpoint_enforces_branch_approval_and_payload_match(
+    client, auth_headers, project_id, monkeypatch
+):
+    """Verify `POST /api/v1/github/branches` enforces `action_type="branch"` approval
+    and exact payload matching (`repo`, `branch_name`, `from_branch`), rejecting
+    missing/wrong-type/pending/mismatched requests with 403 and succeeding (201)
+    with a mocked `gh` client once approved.
+    """
+    import subprocess as _subprocess
+
+    gh_calls: list[list[str]] = []
+
+    def _fake_gh_run(cmd, *args, **kwargs):
+        gh_calls.append(list(cmd))
+        joined = " ".join(cmd)
+        if "git/ref/heads/" in joined:
+            return _subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="deadbeefcafebabe1234567890\n", stderr=""
+            )
+        if "git/refs" in joined:
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"ref": "refs/heads/feature/round3-verified"}\n',
+                stderr="",
+            )
+        return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", _fake_gh_run)
+
+    # 1. Missing approval_id -> 403
+    missing_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": "nonexistent-approval-id",
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert missing_resp.status_code == 403
+
+    # 2. Approval with wrong action_type ("merge" instead of "branch"), even when approved -> 403
+    wrong_type_create = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "project_id": project_id,
+            "action_type": "merge",
+            "title": "Merge approval misused for branch create",
+            "description": "Should be rejected by /github/branches",
+            "requested_by": "worker-4",
+            "payload": {
+                "repo": "oldman-088/AATM",
+                "branch_name": "feature/round3-verified",
+                "from_branch": "main",
+            },
+        },
+    )
+    assert wrong_type_create.status_code == 201
+    wrong_type_id = wrong_type_create.json()["id"]
+    await client.post(
+        f"/api/v1/approvals/{wrong_type_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "review_note": "Approved merge"},
+    )
+    wrong_type_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": wrong_type_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert wrong_type_resp.status_code == 403
+
+    # 3. Create valid `action_type="branch"` approval; while still pending -> 403
+    branch_app_create = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "project_id": project_id,
+            "action_type": "branch",
+            "title": "Create branch feature/round3-verified from main",
+            "description": "Round 3 governed branch creation test",
+            "requested_by": "worker-4",
+            "payload": {
+                "repo": "oldman-088/AATM",
+                "branch_name": "feature/round3-verified",
+                "from_branch": "main",
+            },
+        },
+    )
+    assert branch_app_create.status_code == 201
+    branch_app_id = branch_app_create.json()["id"]
+
+    pending_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert pending_resp.status_code == 403
+
+    # Approve the branch creation request
+    decide_resp = await client.post(
+        f"/api/v1/approvals/{branch_app_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "review_note": "Approved branch creation"},
+    )
+    assert decide_resp.status_code == 200
+
+    # 4. Payload mismatch checks (mismatched branch_name, from_branch, or repo) -> 403
+    mismatch_branch = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/tampered-branch",
+            "from_branch": "main",
+        },
+    )
+    assert mismatch_branch.status_code == 403
+
+    mismatch_base = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "develop",
+        },
+    )
+    assert mismatch_base.status_code == 403
+
+    # Ensure zero `gh` calls occurred during all rejected attempts
+    assert gh_calls == []
+
+    # 5. Matching approved request -> 201 Created
+    ok_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert ok_resp.status_code == 201, ok_resp.text
+    ok_data = ok_resp.json()
+    assert ok_data["ok"] is True
+    assert ok_data["allowed"] is True
+    assert ok_data["branch_name"] == "feature/round3-verified"
+    assert ok_data["base_branch"] == "main"
+    assert ok_data["ref"] == "refs/heads/feature/round3-verified"
+    assert ok_data["approval_id"] == branch_app_id
+    assert len(gh_calls) == 2
+
+
+
 

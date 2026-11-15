@@ -1,22 +1,29 @@
+import re
 import uuid
+from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 from app.browser.engines import BROWSER_ENGINE_REGISTRY, validate_userscript_policy
 from app.core.security import mask_credential_ref, sanitize_untrusted_content
 from app.db.base import utcnow
 from app.db.session import get_db
 from app.employees.catalog import ROLE_TEMPLATES, create_dynamic_employee
 from app.git_workflows.manager import git_workflow_manager
-from app.github_client.client import github_client
+from app.github_client.client import github_client, sanitize_cli_output
 from app.models import (
     AgentMessage,
+    ApprovalRequest,
+    AuditLog,
     ExecutionDevice,
     ProviderAccount,
     ProviderSession,
+    ProviderUsageLog,
+    Task,
     User,
     Userscript,
     WorkspaceArtifact,
@@ -29,8 +36,10 @@ from app.schemas.common import (
     DeviceRegisterRequest,
     EmergencyStopRequest,
     EmployeeCreate,
+    GitHubBranchCreateRequest,
     GitHubIssueCreateRequest,
     GitHubPRCreateRequest,
+    GitWorktreeCreateRequest,
     ProviderAccountCreate,
     SanitizeRequest,
     SDLCRequest,
@@ -40,6 +49,55 @@ from app.schemas.common import (
 )
 
 router = APIRouter(tags=["enterprise-platform"])
+
+_TRACE_BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*")
+_TRACE_SECRET_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])['\"]?(api[_-]?key|access[_-]?token|refresh[_-]?token|device[_-]?token|token|secret|password|credential|authorization|cookie)['\"]?(\s*[:=]\s*)['\"]?([^\s,;\"'}]+)['\"]?"
+)
+
+
+def _redact_trace_text(value: str | None) -> str | None:
+    """Mask credential-like key/value text before identifiers enter a trace response."""
+    if value is None:
+        return None
+    value = _TRACE_BEARER_RE.sub(r"\1[REDACTED]", value)
+    value = _TRACE_SECRET_RE.sub(r"\1\2[REDACTED]", value)
+    return sanitize_cli_output(value)
+
+
+def _trace_utc(value: datetime) -> datetime:
+    """Normalize DB timestamps for stable cross-source ordering and ISO serialization."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _audit_trace_links(
+    audit: AuditLog,
+    task_by_id: dict[str, Task],
+) -> tuple[str | None, str | None]:
+    details = audit.details if isinstance(audit.details, dict) else {}
+    agent_id = details.get("agent_id") or details.get("assigned_agent_id")
+    project_id = details.get("project_id")
+    if audit.resource_type == "agent":
+        agent_id = agent_id or audit.resource_id
+    elif audit.resource_type == "project":
+        project_id = project_id or audit.resource_id
+    elif audit.resource_type == "task" and audit.resource_id in task_by_id:
+        task = task_by_id[audit.resource_id]
+        agent_id = agent_id or task.assigned_agent_id
+        project_id = project_id or task.project_id
+    return (str(agent_id) if agent_id is not None else None, str(project_id) if project_id is not None else None)
+
+
+def _raise_git_worktree_error(result: dict[str, Any]) -> None:
+    detail = str(result.get("error") or result.get("reason") or "Git worktree operation failed")
+    approval_failure = (
+        bool(result.get("approval_id"))
+        or result.get("is_protected_target") is True
+        or "approval" in detail.casefold()
+    )
+    raise HTTPException(status_code=403 if approval_failure else 400, detail=detail)
 
 
 @router.get("/employees/templates")
@@ -69,11 +127,16 @@ async def create_employee_endpoint(
         device_id=body.device_id,
         actor=user.email,
     )
+    if emp.role != "manager":
+        emp.reports_to = body.reports_to or "manager-0"
+    await db.commit()
+    await db.refresh(emp)
     return {
         "id": emp.id,
         "name": emp.name,
         "role": emp.role,
         "role_template": emp.role_template,
+        "reports_to": emp.reports_to,
         "specialty": emp.specialty,
         "skills": emp.skills,
         "divisions": emp.divisions,
@@ -337,7 +400,7 @@ async def register_device(
             "max_concurrent_tasks": existing.max_concurrent_tasks,
             "last_heartbeat": existing.last_heartbeat,
             "registered_at": existing.registered_at,
-            "device_token": issue_device_token(existing.id),
+            "device_token": issue_device_token(existing.id, existing.token_version),
         }
 
     dev = ExecutionDevice(
@@ -368,7 +431,7 @@ async def register_device(
         "max_concurrent_tasks": dev.max_concurrent_tasks,
         "last_heartbeat": dev.last_heartbeat,
         "registered_at": dev.registered_at,
-        "device_token": issue_device_token(dev.id),
+        "device_token": issue_device_token(dev.id, dev.token_version),
     }
 
 
@@ -416,6 +479,240 @@ async def github_change_summary():
     return {
         "auth": github_client.get_auth_status(),
         "changes": github_client.generate_change_summary(),
+    }
+
+
+@router.post("/git/worktrees", status_code=201)
+async def create_agent_git_worktree(
+    body: GitWorktreeCreateRequest,
+    user: User = Depends(require_role("admin", "operator")),
+    db: AsyncSession = Depends(get_db),
+):
+    approval = None
+    if body.approval_id is not None:
+        approval = await db.get(ApprovalRequest, body.approval_id)
+        if approval is None or approval.action_type != "branch":
+            raise HTTPException(status_code=403, detail="A valid branch approval is required")
+
+    result = await git_workflow_manager.create_agent_worktree(
+        agent_id=body.agent_id,
+        branch_name=body.branch_name,
+        base_ref=body.base_ref,
+        db=db,
+        approval=approval,
+        actor=user.email,
+    )
+    if not result.get("allowed") or not result.get("ok"):
+        _raise_git_worktree_error(result)
+    return result
+
+
+@router.delete("/git/worktrees/{agent_id}")
+async def remove_agent_git_worktree(
+    agent_id: str,
+    user: User = Depends(require_role("admin", "operator")),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await git_workflow_manager.remove_agent_worktree(
+        agent_id=agent_id,
+        db=db,
+        actor=user.email,
+    )
+    if not result.get("allowed") or not result.get("ok"):
+        _raise_git_worktree_error(result)
+    return result
+
+
+@router.post("/github/branches", status_code=201)
+async def create_github_branch(
+    body: GitHubBranchCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    approval = await db.get(ApprovalRequest, body.approval_id)
+    if approval is None or approval.action_type != "branch":
+        raise HTTPException(status_code=403, detail="GitHub branch creation requires a branch approval")
+
+    approved_payload = approval.payload if isinstance(approval.payload, dict) else {}
+    if any(
+        approved_payload.get(field) != requested
+        for field, requested in (
+            ("repo", body.repo),
+            ("branch_name", body.branch_name),
+            ("from_branch", body.from_branch),
+        )
+    ):
+        raise HTTPException(status_code=403, detail="Approval does not match the requested branch write")
+
+    result = await git_workflow_manager.create_branch(
+        branch_name=body.branch_name,
+        base_branch=body.from_branch,
+        repo=body.repo,
+        approval=approval,
+        require_approval=True,
+        db=db,
+        approval_id=body.approval_id,
+        actor=user.email,
+    )
+    if not result.get("allowed"):
+        raise HTTPException(status_code=403, detail=result.get("error") or "GitHub branch blocked by approval/branch policy")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "GitHub branch creation failed")
+    return result
+
+
+@router.get("/traces")
+async def get_execution_traces(
+    agent_id: str | None = None,
+    project_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return a read-only timeline made only from persisted execution records.
+
+    Free-form instructions, audit details, artifact summaries, provider errors, and
+    message payloads are intentionally omitted because they may contain credentials.
+    """
+    scan_limit = min(limit * 5, 1000)
+    audit_rows = list(
+        (
+            await db.execute(
+                select(AuditLog).order_by(AuditLog.created_at.desc()).limit(scan_limit)
+            )
+        ).scalars().all()
+    )
+    task_ids = [
+        audit.resource_id
+        for audit in audit_rows
+        if audit.resource_type == "task" and audit.resource_id is not None
+    ]
+    task_by_id: dict[str, Task] = {}
+    if task_ids:
+        task_rows = await db.execute(select(Task).where(Task.id.in_(task_ids)))
+        task_by_id = {task.id: task for task in task_rows.scalars().all()}
+
+    traces: list[dict[str, Any]] = []
+    for audit in audit_rows:
+        linked_agent, linked_project = _audit_trace_links(audit, task_by_id)
+        if agent_id is not None and linked_agent is None and audit.actor == agent_id:
+            linked_agent = agent_id
+        if agent_id is not None and linked_agent != agent_id:
+            continue
+        if project_id is not None and linked_project != project_id:
+            continue
+        traces.append(
+            {
+                "id": _redact_trace_text(f"audit:{audit.id}"),
+                "source": "audit_log",
+                "source_id": _redact_trace_text(str(audit.id)),
+                "timestamp": _trace_utc(audit.created_at),
+                "agent_id": _redact_trace_text(linked_agent),
+                "project_id": _redact_trace_text(linked_project),
+                "actor": _redact_trace_text(audit.actor),
+                "action": _redact_trace_text(audit.action),
+                "resource_type": _redact_trace_text(audit.resource_type),
+                "resource_id": _redact_trace_text(audit.resource_id),
+                "severity": _redact_trace_text(audit.severity),
+            }
+        )
+
+    usage_stmt = (
+        select(ProviderUsageLog, Task.project_id, Task.assigned_agent_id)
+        .outerjoin(Task, ProviderUsageLog.task_id == Task.id)
+        .order_by(ProviderUsageLog.created_at.desc())
+        .limit(scan_limit)
+    )
+    if agent_id is not None:
+        usage_stmt = usage_stmt.where(
+            or_(ProviderUsageLog.agent_id == agent_id, Task.assigned_agent_id == agent_id)
+        )
+    if project_id is not None:
+        usage_stmt = usage_stmt.where(Task.project_id == project_id)
+    usage_rows = (await db.execute(usage_stmt)).all()
+    for usage, linked_project, task_agent in usage_rows:
+        traces.append(
+            {
+                "id": _redact_trace_text(f"provider_usage:{usage.id}"),
+                "source": "provider_usage_log",
+                "source_id": _redact_trace_text(str(usage.id)),
+                "timestamp": _trace_utc(usage.created_at),
+                "agent_id": _redact_trace_text(usage.agent_id or task_agent),
+                "project_id": _redact_trace_text(linked_project),
+                "provider_id": _redact_trace_text(usage.provider_id),
+                "task_id": _redact_trace_text(usage.task_id),
+                "model_name": _redact_trace_text(usage.model_name),
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "estimated_cost_usd": usage.estimated_cost_usd,
+                "latency_ms": usage.latency_ms,
+                "success": usage.success,
+            }
+        )
+
+    artifact_stmt = select(WorkspaceArtifact).order_by(WorkspaceArtifact.created_at.desc()).limit(scan_limit)
+    if agent_id is not None:
+        artifact_stmt = artifact_stmt.where(WorkspaceArtifact.agent_id == agent_id)
+    if project_id is not None:
+        artifact_stmt = artifact_stmt.where(WorkspaceArtifact.project_id == project_id)
+    artifact_rows = (await db.execute(artifact_stmt)).scalars().all()
+    for artifact in artifact_rows:
+        traces.append(
+            {
+                "id": _redact_trace_text(f"workspace_artifact:{artifact.id}"),
+                "source": "workspace_artifact",
+                "source_id": _redact_trace_text(str(artifact.id)),
+                "timestamp": _trace_utc(artifact.created_at),
+                "agent_id": _redact_trace_text(artifact.agent_id),
+                "project_id": _redact_trace_text(artifact.project_id),
+                "task_id": _redact_trace_text(artifact.task_id),
+                "action": _redact_trace_text(artifact.action),
+                "relative_path": _redact_trace_text(artifact.relative_path),
+                "exit_code": artifact.exit_code,
+            }
+        )
+
+    message_stmt = select(AgentMessage).order_by(AgentMessage.created_at.desc()).limit(scan_limit)
+    if agent_id is not None:
+        message_stmt = message_stmt.where(
+            or_(AgentMessage.sender_id == agent_id, AgentMessage.recipient_id == agent_id)
+        )
+    if project_id is not None:
+        message_stmt = message_stmt.where(AgentMessage.project_id == project_id)
+    message_rows = (await db.execute(message_stmt)).scalars().all()
+    for message in message_rows:
+        traces.append(
+            {
+                "id": _redact_trace_text(f"agent_message:{message.id}"),
+                "source": "agent_message",
+                "source_id": _redact_trace_text(str(message.id)),
+                "timestamp": _trace_utc(message.created_at),
+                "agent_id": _redact_trace_text(
+                    agent_id if agent_id is not None else message.sender_id
+                ),
+                "project_id": _redact_trace_text(message.project_id),
+                "task_id": _redact_trace_text(message.task_id),
+                "sender_id": _redact_trace_text(message.sender_id),
+                "recipient_id": _redact_trace_text(message.recipient_id),
+                "channel_type": _redact_trace_text(message.channel_type),
+                "priority": _redact_trace_text(message.priority),
+                "execution_status": _redact_trace_text(message.execution_status),
+                "delivery_status": _redact_trace_text(message.delivery_status),
+            }
+        )
+
+    traces.sort(key=lambda trace: trace["timestamp"], reverse=True)
+    traces = traces[:limit]
+    for trace in traces:
+        trace["timestamp"] = trace["timestamp"].isoformat()
+
+    return {
+        "traces": traces,
+        "count": len(traces),
+        "filters": {
+            "agent_id": _redact_trace_text(agent_id),
+            "project_id": _redact_trace_text(project_id),
+        },
     }
 
 

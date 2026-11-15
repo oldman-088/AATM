@@ -14,11 +14,11 @@ The `bridge/` package provides a compliant, loopback-bound reference implementat
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Readiness & diagnostic telemetry (`status`, `mode`, `auth_required`, `models`, `active_sessions`, `uptime_seconds`). |
-| `POST` | `/v1/chat/completions` | OpenAI-compatible completion endpoint returning `choices`, `usage`, and isolated `session` summary. |
-| `GET` | `/v1/sessions` | Lists active bridge sessions (optionally filtered by `X-AATM-Account-Id`). |
+| `GET` | `/health` | Readiness & diagnostic telemetry (`status`, `version`, `mode`, `auth_required`, `streaming_supported`, `models`, `active_sessions`, `uptime_seconds`). |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible completion endpoint returning `choices`, `usage`, and isolated `session` summary; supports optional SSE streaming (`"stream": true`, `text/event-stream`) with strict `account_id` isolation. |
+| `GET` | `/v1/sessions` | Lists active bridge sessions with health status & aggregate count/token metrics (strictly scoped to `X-AATM-Account-Id` when supplied). |
 | `GET` | `/v1/sessions/{session_id}` | Inspects a specific employee session summary + bounded conversation `history`. |
-| `DELETE` | `/v1/sessions/{session_id}` | Clears/resets an isolated employee session context. |
+| `DELETE` | `/v1/sessions/{session_id}` | Clears/resets an isolated employee session context (used by `ArenaLocalBridgeAdapter.delete_session()` during employee replacement handoffs). |
 
 ---
 
@@ -31,7 +31,9 @@ The `bridge/` package provides a compliant, loopback-bound reference implementat
 | `ARENA_BRIDGE_TOKEN` | _(unset)_ | Shared secret matched against `Authorization: Bearer <token>` (referenced by AATM as `env:ARENA_BRIDGE_TOKEN`). |
 | `ARENA_BRIDGE_REQUIRE_AUTH` | `false` | Set `true` in production to refuse requests when `ARENA_BRIDGE_TOKEN` is unset. |
 | `ARENA_BRIDGE_MAX_HISTORY` | `40` | Maximum messages retained per isolated employee session. |
-| `ARENA_BRIDGE_UPSTREAM_URL` | _(unset)_ | Optional official/local OpenAI-compatible base URL (e.g. local Ollama/vLLM/LiteLLM). |
+| `AATM_BRIDGE_STATE_FILE` | _(unset)_ | Optional JSON file path for atomic (`0600`) session-store persistence across daemon restarts (never stores secrets/tokens). |
+| `AATM_BRIDGE_SESSION_TTL_SECONDS` | _(unset)_ | Optional idle-session TTL in seconds; sessions inactive longer than this threshold are evicted automatically. |
+| `ARENA_BRIDGE_UPSTREAM_URL` | _(unset)_ | Optional official/local OpenAI-compatible base URL (e.g. local Ollama/vLLM/LiteLLM); streams SSE chunks incrementally when `stream: true`. |
 | `ARENA_BRIDGE_UPSTREAM_API_KEY` | _(unset)_ | Optional Bearer key for `ARENA_BRIDGE_UPSTREAM_URL` (env-only, never persisted). |
 
 ---
@@ -67,8 +69,25 @@ curl -fsS -X POST http://127.0.0.1:4100/v1/chat/completions \
   -H "X-AATM-Account-Id: acct-arena-primary" \
   -d '{"model":"arena-bridge-default","messages":[{"role":"user","content":"Verify session isolation"}]}'
 
-# 3. Inspect isolated session context
+# 3. Sample SSE streaming completion (`stream: true`)
+curl -fsSN -X POST http://127.0.0.1:4100/v1/chat/completions \
+  -H "Authorization: Bearer $ARENA_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-AATM-Session-Id: sess-worker-3" \
+  -H "X-AATM-Account-Id: acct-arena-primary" \
+  -d '{"model":"arena-bridge-default","stream":true,"messages":[{"role":"user","content":"Verify SSE streaming"}]}'
+
+# 4. Inspect session metrics & isolated session context
 curl -fsS -H "Authorization: Bearer $ARENA_BRIDGE_TOKEN" \
+  -H "X-AATM-Account-Id: acct-arena-primary" \
+  http://127.0.0.1:4100/v1/sessions
+
+curl -fsS -H "Authorization: Bearer $ARENA_BRIDGE_TOKEN" \
+  -H "X-AATM-Account-Id: acct-arena-primary" \
+  http://127.0.0.1:4100/v1/sessions/sess-worker-3
+
+# 5. Teardown session (employee replacement handoff)
+curl -fsS -X DELETE -H "Authorization: Bearer $ARENA_BRIDGE_TOKEN" \
   -H "X-AATM-Account-Id: acct-arena-primary" \
   http://127.0.0.1:4100/v1/sessions/sess-worker-3
 ```

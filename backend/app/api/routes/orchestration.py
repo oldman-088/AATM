@@ -19,6 +19,7 @@ def _serialize_agent(a: Agent) -> dict:
         "name": a.name,
         "role": a.role,
         "role_template": a.role_template,
+        "reports_to": a.reports_to,
         "specialty": a.specialty,
         "skills": a.skills,
         "divisions": a.divisions,
@@ -96,8 +97,13 @@ async def update_agent(
         val = getattr(body, field)
         if val is not None:
             setattr(agent, field, val)
+    if "reports_to" in body.model_fields_set:
+        agent.reports_to = body.reports_to
     agent.last_heartbeat = utcnow()
-    db.add(AuditLog(actor=user.email, action="agent.update", resource_type="agent", resource_id=agent.id, details=body.model_dump(exclude_none=True)))
+    audit_details = body.model_dump(exclude_none=True)
+    if "reports_to" in body.model_fields_set:
+        audit_details["reports_to"] = body.reports_to
+    db.add(AuditLog(actor=user.email, action="agent.update", resource_type="agent", resource_id=agent.id, details=audit_details))
     await db.commit()
     await db.refresh(agent)
     await event_bus.emit("agent.heartbeat", {"agent_id": agent.id, "status": agent.status})

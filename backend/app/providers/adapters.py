@@ -1,6 +1,9 @@
+import json
+import re
 import time
+from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -9,10 +12,12 @@ from app.providers.base import (
     ProviderHealth,
     ProviderRequest,
     ProviderResponse,
+    ProviderStreamChunk,
 )
 
 DEFAULT_ARENA_BRIDGE_URL = "http://127.0.0.1:4100"
 DEFAULT_ANTHROPIC_URL = "https://api.anthropic.com/v1"
+SAFE_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
 
 MODEL_PRICING_PER_1M = {
     "claude-sonnet-4-5": (3.0, 15.0),
@@ -281,8 +286,266 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 metadata={"bridge_offline": False, **session_meta},
             )
 
+    async def generate_stream(self, req: ProviderRequest) -> AsyncIterator[ProviderStreamChunk]:
+        """Consume OpenAI-compatible SSE frames (`stream: true`) from the Arena Local Bridge daemon."""
+        t0 = time.perf_counter()
+        model = req.model or self.default_model
+        in_tok = self.estimate_tokens(req.system_prompt + req.prompt)
+
+        req_meta = dict(req.metadata or {})
+        session_id = req_meta.get("session_id")
+        account_id = req_meta.get("account_id")
+        conversation_id = req_meta.get("conversation_id")
+        agent_id = req.agent_id or req_meta.get("agent_id")
+        project_id = req_meta.get("project_id")
+
+        session_meta: dict[str, Any] = {}
+        if session_id:
+            session_meta["session_id"] = str(session_id)
+        if account_id:
+            session_meta["account_id"] = str(account_id)
+        if conversation_id:
+            session_meta["conversation_id"] = str(conversation_id)
+        if agent_id:
+            session_meta["agent_id"] = str(agent_id)
+        if project_id:
+            session_meta["project_id"] = str(project_id)
+        if req.task_id:
+            session_meta["task_id"] = str(req.task_id)
+
+        if not self.credential_ref_valid:
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                done=True,
+                finish_reason="error",
+                input_tokens=in_tok,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                success=False,
+                error_message=self.credential_ref_error,
+                metadata={"policy_error": True, **session_meta},
+            )
+            return
+
+        ok, normalized_or_err = _validate_http_endpoint(self._base_url())
+        if not ok:
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                done=True,
+                finish_reason="error",
+                input_tokens=in_tok,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                success=False,
+                error_message=normalized_or_err,
+                metadata={"bridge_offline": False, **session_meta},
+            )
+            return
+
+        base_url = normalized_or_err
+        if req.dry_run:
+            preview = f"[dry-run] Arena Local Bridge SSE preview ({base_url}, model={model})."
+            out_tok = self.estimate_tokens(preview)
+            meta = {"dry_run": True, "stream": True, "endpoint": base_url, **session_meta}
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                delta=preview,
+                done=False,
+                metadata=meta,
+            )
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                delta="",
+                done=True,
+                finish_reason="stop",
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                estimated_cost_usd=0.0,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                success=True,
+                metadata=meta,
+            )
+            return
+
+        url = base_url + "/v1/chat/completions"
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        token = self.resolve_credential()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if session_id:
+            headers["X-AATM-Session-Id"] = str(session_id)
+        if account_id:
+            headers["X-AATM-Account-Id"] = str(account_id)
+        if agent_id:
+            headers["X-AATM-Agent-Id"] = str(agent_id)
+        if conversation_id:
+            headers["X-AATM-Conversation-Id"] = str(conversation_id)
+
+        messages: list[dict[str, str]] = []
+        if req.system_prompt:
+            messages.append({"role": "system", "content": req.system_prompt})
+        messages.append({"role": "user", "content": req.prompt})
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+            "stream": True,
+        }
+        if session_id:
+            payload["session_id"] = str(session_id)
+        if account_id:
+            payload["account_id"] = str(account_id)
+        if agent_id:
+            payload["user"] = str(agent_id)
+        if session_meta:
+            payload["metadata"] = session_meta
+
+        collected_parts: list[str] = []
+        usage_data: dict[str, Any] = {}
+        bridge_session: dict[str, Any] | None = None
+        finish_reason = "stop"
+        stream_error: str | None = None
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        yield ProviderStreamChunk(
+                            provider_id=self.provider_id,
+                            model=model,
+                            done=True,
+                            finish_reason="error",
+                            input_tokens=in_tok,
+                            latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                            success=False,
+                            error_message=f"Arena Local Bridge HTTP error ({resp.status_code}) at {base_url}",
+                            metadata={"bridge_offline": False, "http_status": resp.status_code, "stream": True, **session_meta},
+                        )
+                        return
+
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            frame = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(frame, dict):
+                            continue
+
+                        if isinstance(frame.get("error"), dict):
+                            stream_error = str(frame["error"].get("message") or frame["error"].get("type") or "Upstream stream error")
+                        if isinstance(frame.get("usage"), dict):
+                            usage_data = frame["usage"]
+                        if isinstance(frame.get("session"), dict):
+                            bridge_session = frame["session"]
+
+                        choices = frame.get("choices")
+                        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                            first = choices[0]
+                            if first.get("finish_reason"):
+                                finish_reason = str(first["finish_reason"])
+                            delta_obj = first.get("delta")
+                            if isinstance(delta_obj, dict):
+                                piece = delta_obj.get("content")
+                                if isinstance(piece, str) and piece:
+                                    collected_parts.append(piece)
+                                    yield ProviderStreamChunk(
+                                        provider_id=self.provider_id,
+                                        model=model,
+                                        delta=piece,
+                                        done=False,
+                                        metadata={"stream": True, "endpoint": base_url, **session_meta},
+                                    )
+
+            if stream_error is not None or finish_reason == "error":
+                yield ProviderStreamChunk(
+                    provider_id=self.provider_id,
+                    model=model,
+                    delta="",
+                    done=True,
+                    finish_reason="error",
+                    input_tokens=in_tok,
+                    output_tokens=self.estimate_tokens("".join(collected_parts)) if collected_parts else 0,
+                    estimated_cost_usd=0.0,
+                    latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                    success=False,
+                    error_message=stream_error or "Arena Local Bridge reported stream error",
+                    metadata={"bridge_offline": False, "stream": True, "upstream_stream_error": True, **session_meta},
+                )
+                return
+
+            full_text = "".join(collected_parts)
+            real_in = (
+                int(usage_data["prompt_tokens"])
+                if usage_data.get("prompt_tokens") is not None
+                else in_tok
+            )
+            real_out = (
+                int(usage_data["completion_tokens"])
+                if usage_data.get("completion_tokens") is not None
+                else self.estimate_tokens(full_text)
+            )
+            final_meta: dict[str, Any] = {
+                "endpoint": base_url,
+                "stream": True,
+                "confirmed_usage": bool(usage_data),
+                **session_meta,
+            }
+            if bridge_session is not None:
+                final_meta["bridge_session"] = bridge_session
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                delta="",
+                done=True,
+                finish_reason=finish_reason,
+                input_tokens=real_in,
+                output_tokens=real_out,
+                estimated_cost_usd=compute_cost(model, real_in, real_out),
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                success=True,
+                metadata=final_meta,
+            )
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                done=True,
+                finish_reason="error",
+                input_tokens=in_tok,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                success=False,
+                error_message=f"Arena Local Bridge offline at {base_url}: {type(exc).__name__}",
+                metadata={"bridge_offline": True, "stream": True, **session_meta},
+            )
+        except Exception as exc:
+            yield ProviderStreamChunk(
+                provider_id=self.provider_id,
+                model=model,
+                done=True,
+                finish_reason="error",
+                input_tokens=in_tok,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                success=False,
+                error_message=f"Arena Local Bridge stream error at {base_url}: {type(exc).__name__}",
+                metadata={"bridge_offline": False, "stream": True, **session_meta},
+            )
+
     async def get_session(self, session_id: str, account_id: str | None = None) -> dict[str, Any] | None:
         """Inspect a per-employee session context from the Arena Local Bridge daemon."""
+        cleaned_sid = (session_id or "").strip()
+        if not cleaned_sid or not SAFE_SESSION_ID_RE.fullmatch(cleaned_sid):
+            return None
         if not self.credential_ref_valid:
             return None
         ok, normalized_or_err = _validate_http_endpoint(self._base_url())
@@ -294,7 +557,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
             headers["Authorization"] = f"Bearer {token}"
         if account_id:
             headers["X-AATM-Account-Id"] = str(account_id)
-        url = f"{normalized_or_err}/v1/sessions/{session_id}"
+        url = f"{normalized_or_err}/v1/sessions/{quote(cleaned_sid, safe='')}"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(url, headers=headers)
@@ -305,6 +568,103 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    async def delete_session(self, session_id: str, account_id: str | None = None) -> dict[str, Any]:
+        """Teardown an isolated employee session on the Arena Local Bridge daemon (for employee replacement handoff)."""
+        cleaned_sid = (session_id or "").strip()
+        if not cleaned_sid or not SAFE_SESSION_ID_RE.fullmatch(cleaned_sid):
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "invalid_session_id",
+                "bridge_reachable": False,
+                "error": "Invalid session_id format.",
+            }
+        if not self.credential_ref_valid:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "policy_error",
+                "bridge_reachable": False,
+                "error": self.credential_ref_error,
+            }
+        ok, normalized_or_err = _validate_http_endpoint(self._base_url())
+        if not ok:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "invalid_endpoint",
+                "bridge_reachable": False,
+                "error": normalized_or_err,
+            }
+
+        headers: dict[str, str] = {}
+        token = self.resolve_credential()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if account_id:
+            headers["X-AATM-Account-Id"] = str(account_id)
+
+        url = f"{normalized_or_err}/v1/sessions/{quote(cleaned_sid, safe='')}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.delete(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json() if resp.content else {}
+                    return {
+                        "deleted": bool(data.get("deleted", True)) if isinstance(data, dict) else True,
+                        "session_id": cleaned_sid,
+                        "account_id": account_id,
+                        "status": "deleted",
+                        "bridge_reachable": True,
+                    }
+                if resp.status_code == 404:
+                    return {
+                        "deleted": False,
+                        "session_id": cleaned_sid,
+                        "account_id": account_id,
+                        "status": "not_found",
+                        "bridge_reachable": True,
+                    }
+                if resp.status_code == 403:
+                    return {
+                        "deleted": False,
+                        "session_id": cleaned_sid,
+                        "account_id": account_id,
+                        "status": "forbidden",
+                        "bridge_reachable": True,
+                        "error": "Cross-account session delete denied (HTTP 403).",
+                    }
+                return {
+                    "deleted": False,
+                    "session_id": cleaned_sid,
+                    "account_id": account_id,
+                    "status": "http_error",
+                    "http_status": resp.status_code,
+                    "bridge_reachable": True,
+                    "error": f"Bridge returned HTTP {resp.status_code} on session delete.",
+                }
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "bridge_offline",
+                "bridge_reachable": False,
+                "error": f"Arena Local Bridge offline at {normalized_or_err}: {type(exc).__name__}",
+            }
+        except Exception as exc:
+            return {
+                "deleted": False,
+                "session_id": cleaned_sid,
+                "account_id": account_id,
+                "status": "error",
+                "bridge_reachable": False,
+                "error": f"Session delete error: {type(exc).__name__}",
+            }
 
 
 class ArenaAgentAdapter(BaseProviderAdapter):

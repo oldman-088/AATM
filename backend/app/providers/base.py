@@ -1,5 +1,6 @@
 import re
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +50,22 @@ class ProviderResponse:
 
 
 @dataclass
+class ProviderStreamChunk:
+    provider_id: str
+    model: str
+    delta: str = ""
+    done: bool = False
+    finish_reason: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    latency_ms: float = 0.0
+    success: bool = True
+    error_message: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ProviderHealth:
     provider_id: str
     status: str  # healthy | degraded | offline
@@ -84,6 +101,47 @@ class BaseProviderAdapter(ABC):
     @abstractmethod
     async def generate(self, req: ProviderRequest) -> ProviderResponse:
         ...
+
+    async def generate_stream(self, req: ProviderRequest) -> AsyncIterator[ProviderStreamChunk]:
+        """Default streaming fallback wrapping generate() for adapters without native SSE streaming."""
+        resp = await self.generate(req)
+        if not resp.success:
+            yield ProviderStreamChunk(
+                provider_id=resp.provider_id,
+                model=resp.model,
+                delta="",
+                done=True,
+                finish_reason="error",
+                input_tokens=resp.input_tokens,
+                output_tokens=resp.output_tokens,
+                estimated_cost_usd=resp.estimated_cost_usd,
+                latency_ms=resp.latency_ms,
+                success=False,
+                error_message=resp.error_message,
+                metadata=dict(resp.metadata),
+            )
+            return
+        if resp.content:
+            yield ProviderStreamChunk(
+                provider_id=resp.provider_id,
+                model=resp.model,
+                delta=resp.content,
+                done=False,
+                metadata=dict(resp.metadata),
+            )
+        yield ProviderStreamChunk(
+            provider_id=resp.provider_id,
+            model=resp.model,
+            delta="",
+            done=True,
+            finish_reason="stop",
+            input_tokens=resp.input_tokens,
+            output_tokens=resp.output_tokens,
+            estimated_cost_usd=resp.estimated_cost_usd,
+            latency_ms=resp.latency_ms,
+            success=True,
+            metadata=dict(resp.metadata),
+        )
 
     @staticmethod
     def estimate_tokens(text: str) -> int:

@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 _CREDENTIAL_REF_PATTERN = re.compile(r"env:[A-Z_][A-Z0-9_]*")
 CREDENTIAL_REF_ERROR = "credential_ref must reference an environment variable (env:NAME); inline credentials are not accepted."
@@ -44,6 +44,7 @@ class ProjectCreate(BaseModel):
 class EmployeeCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     role_template_id: str | None = None
+    reports_to: str | None = Field(default=None, max_length=64)
     specialty: str | None = None
     skills: list[str] | None = None
     divisions: list[str] | None = None
@@ -60,6 +61,7 @@ class AgentUpdate(BaseModel):
     status: str | None = None
     provider_id: str | None = None
     model_name: str | None = None
+    reports_to: str | None = Field(default=None, max_length=64)
     is_enabled: bool | None = None
     permissions: list[str] | None = None
     autonomy_mode: str | None = None
@@ -123,6 +125,51 @@ class ProviderTestRequest(BaseModel):
     prompt: str = "Respond with AATM connectivity verification."
     model: str | None = None
     dry_run: bool = True
+    agent_id: str | None = None
+    session_id: str | None = None
+
+
+class ProviderUsageBudgetSummary(BaseModel):
+    global_daily_spend_usd: float
+    global_monthly_spend_usd: float
+    daily_limit_usd: float
+    monthly_limit_usd: float
+    daily_remaining_usd: float
+    monthly_remaining_usd: float
+
+
+class ProviderUsageTotals(BaseModel):
+    total_input_tokens: int
+    total_output_tokens: int
+    total_estimated_cost_usd: float
+
+
+class ProviderUsageLogEntry(BaseModel):
+    id: str
+    provider_id: str
+    agent_id: str | None
+    model_name: str
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_usd: float
+    latency_ms: float
+    success: bool
+    error_message: str | None
+    created_at: datetime
+
+
+class ProviderUsageResponse(BaseModel):
+    budget_summary: ProviderUsageBudgetSummary
+    summary: ProviderUsageTotals
+    logs: list[ProviderUsageLogEntry]
+
+
+class DeviceTokenRevokeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    token_version: int = Field(ge=1)
+    device_token: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class BrowserLaunchRequest(BaseModel):
@@ -225,7 +272,7 @@ class ChatSendRequest(BaseModel):
 
 class ApprovalCreate(BaseModel):
     project_id: str | None = None
-    action_type: str = Field(pattern="^(spend|deploy|merge|delete|credential|security|irreversible)$")
+    action_type: str = Field(pattern="^(branch|spend|deploy|merge|delete|credential|security|irreversible)$")
     title: str
     description: str
     estimated_cost_usd: float | None = None
@@ -245,6 +292,11 @@ class _GitHubWriteApprovalRequest(BaseModel):
     repo: str = Field(pattern=r"^[^/\s]+/[^/\s]+$", description="GitHub repository in owner/name form.")
 
 
+class GitHubBranchCreateRequest(_GitHubWriteApprovalRequest):
+    branch_name: str = Field(min_length=1, max_length=255)
+    from_branch: str = Field(min_length=1, max_length=255)
+
+
 class GitHubPRCreateRequest(_GitHubWriteApprovalRequest):
     title: str = Field(min_length=1, max_length=256)
     body: str = ""
@@ -258,6 +310,13 @@ class GitHubIssueCreateRequest(_GitHubWriteApprovalRequest):
     body: str = ""
     labels: list[str] = Field(default_factory=list)
     assignees: list[str] = Field(default_factory=list)
+
+
+class GitWorktreeCreateRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+    branch_name: str = Field(min_length=1, max_length=200)
+    base_ref: str = Field(default="HEAD", min_length=1, max_length=200)
+    approval_id: str | None = Field(default=None, min_length=1)
 
 
 class GitWorkflowCreate(BaseModel):

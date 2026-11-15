@@ -1,7 +1,7 @@
 # AATM - full verification suite (Windows 11 PowerShell).
 #
-# Gates: prerequisites, alembic migrations, ruff, pytest (incl. E2E), static secret
-# scan, and (when node_modules exists) tsc / vitest / vite build.
+# Gates: prerequisites, alembic migrations, ruff (backend + bridge), pytest (backend +
+# E2E + bridge), static secret scan, and (when node_modules exists) tsc / vitest / vite build.
 #
 # Usage:  .\scripts\windows\verify.ps1 [-SkipFrontend] [-Install]
 param(
@@ -56,14 +56,17 @@ Push-Location backend
 if ($LASTEXITCODE -ne 0) { Fail "alembic upgrade head" } else { Ok "alembic upgrade head" }
 Pop-Location
 
-Step "3/6 Backend lint"
-Invoke-Gate "ruff check" { & .\.venv\Scripts\ruff.exe check backend }
+Step "3/6 Backend & Bridge lint"
+Invoke-Gate "ruff check backend" { & .\.venv\Scripts\ruff.exe check backend }
+Invoke-Gate "ruff check bridge"  { & .\.venv\Scripts\ruff.exe check --config backend\pyproject.toml bridge }
 
-Step "4/6 Backend tests"
+Step "4/6 Backend & Bridge tests"
 Push-Location backend
 & $Py -m pytest -q
-if ($LASTEXITCODE -ne 0) { Fail "pytest" } else { Ok "pytest (unit + E2E verification suite)" }
+if ($LASTEXITCODE -ne 0) { Fail "pytest (backend)" } else { Ok "pytest (backend + E2E verification suite)" }
 Pop-Location
+& $Py -m pytest -v bridge\tests\test_bridge.py
+if ($LASTEXITCODE -ne 0) { Fail "pytest (bridge suite)" } else { Ok "pytest (bridge suite)" }
 
 Step "5/6 Static secret scan"
 Push-Location backend

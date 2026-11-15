@@ -13,6 +13,7 @@ class Agent(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     role: Mapped[str] = mapped_column(String(80), nullable=False)  # manager | worker | custom
+    reports_to: Mapped[str | None] = mapped_column(String(64), nullable=True)
     role_template: Mapped[str | None] = mapped_column(String(80), nullable=True)
     specialty: Mapped[str] = mapped_column(String(200), nullable=False)
     skills: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
