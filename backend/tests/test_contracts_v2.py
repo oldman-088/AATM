@@ -1,23 +1,34 @@
 import json
+import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
+from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
+from alembic import command
 from app.browser.manager import browser_manager
 from app.core.config import get_settings
-from app.db.base import Base
+from app.db.base import Base, utcnow
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
+from app.models import AIProvider, ProviderUsageLog
+from app.providers.base import ProviderResponse
+from app.providers.router import provider_router
+from app.runtime.device_auth import issue_device_token, verify_device_token
 from app.schemas.common import (
     GitHubIssueCreateRequest,
     GitHubPRCreateRequest,
+    ProviderTestRequest,
     validate_credential_ref,
 )
 
-CONTRACT_PATH = Path(__file__).resolve().parents[2] / "contracts" / "schemas.json"
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+CONTRACT_PATH = BACKEND_ROOT.parent / "contracts" / "schemas.json"
+ALEMBIC_CONFIG_PATH = BACKEND_ROOT / "alembic.ini"
 
 
 @pytest.fixture(scope="module")
@@ -302,3 +313,183 @@ async def test_github_write_endpoints_enforce_approval_gate(client: AsyncClient,
     )
     assert issue.status_code == 201
     assert issue.json()["ok"] is True
+
+
+async def test_device_token_revocation_invalidates_old_token_and_allows_rotated_token(
+    client: AsyncClient, auth_headers
+):
+    device_id = "token-revoke-v2-test"
+    register_payload = {
+        "name": "Revocation Test Device",
+        "device_type": "remote_server",
+        "host_address": "127.0.0.2",
+        "os_name": "Linux",
+    }
+    registered = await client.post(
+        f"/api/v1/devices/{device_id}/register",
+        headers=auth_headers,
+        json=register_payload,
+    )
+    assert registered.status_code == 200
+    old_token = registered.json()["device_token"]
+    old_headers = {"X-AATM-Device-Token": old_token}
+
+    assert issue_device_token(device_id, 1) == old_token
+    assert verify_device_token(device_id, old_token, token_version=1) is True
+    assert verify_device_token(device_id, old_token, token_version=2) is False
+    status_url = f"/api/v1/devices/{device_id}/status"
+    assert (await client.get(status_url, headers=old_headers)).status_code == 200
+
+    unauthenticated_revoke = await client.post(f"/api/v1/devices/{device_id}/revoke")
+    assert unauthenticated_revoke.status_code == 401
+
+    revoked = await client.post(f"/api/v1/devices/{device_id}/revoke", headers=auth_headers)
+    assert revoked.status_code == 200
+    assert revoked.json()["token_version"] == 2
+    assert revoked.json()["revoked"] is True
+    assert (await client.get(status_url, headers=old_headers)).status_code == 401
+
+    new_token = revoked.json()["device_token"]
+    assert new_token != old_token
+    assert new_token == issue_device_token(device_id, 2)
+    assert (await client.get(status_url, headers={"X-AATM-Device-Token": new_token})).status_code == 200
+
+
+def _upgrade_sqlite_database(database_path: Path, revision: str, monkeypatch) -> None:
+    sync_url = f"sqlite:///{database_path.as_posix()}"
+    async_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("SYNC_DATABASE_URL", sync_url)
+    monkeypatch.setenv("DATABASE_URL", async_url)
+    get_settings.cache_clear()
+    config = Config(str(ALEMBIC_CONFIG_PATH))
+    config.set_main_option("path_separator", "os")
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    try:
+        command.upgrade(config, revision)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_token_version_migration_supports_fresh_and_existing_sqlite_databases(tmp_path, monkeypatch):
+    fresh_db = tmp_path / "fresh.sqlite"
+    _upgrade_sqlite_database(fresh_db, "head", monkeypatch)
+    with sqlite3.connect(fresh_db) as connection:
+        fresh_columns = {row[1]: row for row in connection.execute("PRAGMA table_info(execution_devices)")}
+        assert "token_version" in fresh_columns
+        assert fresh_columns["token_version"][2].upper() == "INTEGER"
+        assert fresh_columns["token_version"][3] == 1
+        assert str(fresh_columns["token_version"][4]).strip("'\"") == "1"
+
+    existing_db = tmp_path / "existing.sqlite"
+    _upgrade_sqlite_database(existing_db, "ee92483cefa3", monkeypatch)
+    with sqlite3.connect(existing_db) as connection:
+        connection.execute(
+            """
+            INSERT INTO execution_devices (
+                id, name, device_type, host_address, os_name, cpu_cores, ram_gb,
+                capabilities, status, max_concurrent_tasks, active_tasks, last_heartbeat, registered_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "existing-device",
+                "Existing Device",
+                "remote_server",
+                "127.0.0.3",
+                "Linux",
+                2,
+                4.0,
+                "[]",
+                "online",
+                2,
+                0,
+                "2026-11-15 00:00:00",
+                "2026-11-15 00:00:00",
+            ),
+        )
+        connection.commit()
+
+    _upgrade_sqlite_database(existing_db, "head", monkeypatch)
+    with sqlite3.connect(existing_db) as connection:
+        row = connection.execute(
+            "SELECT token_version FROM execution_devices WHERE id = ?", ("existing-device",)
+        ).fetchone()
+        assert row == (1,)
+
+
+async def test_provider_usage_includes_budget_headroom(client: AsyncClient):
+    provider_id = "budget-summary-v2-test"
+    async with AsyncSessionLocal() as db:
+        db.add(
+            AIProvider(
+                id=provider_id,
+                name="Budget Summary Test Provider",
+                provider_type="arena_agent",
+                default_model="budget-test-model",
+                available_models=["budget-test-model"],
+                daily_limit_usd=10.0,
+                config={"monthly_limit_usd": 8.0},
+            )
+        )
+        db.add(
+            ProviderUsageLog(
+                provider_id=provider_id,
+                model_name="budget-test-model",
+                input_tokens=10,
+                output_tokens=5,
+                estimated_cost_usd=2.5,
+                latency_ms=1.0,
+                success=True,
+                created_at=utcnow(),
+            )
+        )
+        await db.commit()
+
+    response = await client.get("/api/v1/providers/usage")
+    assert response.status_code == 200
+    budget = response.json()["budget_summary"]
+    assert budget["global_daily_spend_usd"] >= 2.5
+    assert budget["global_monthly_spend_usd"] >= 2.5
+    assert budget["daily_remaining_usd"] == pytest.approx(
+        max(0.0, budget["daily_limit_usd"] - budget["global_daily_spend_usd"])
+    )
+    assert budget["monthly_remaining_usd"] == pytest.approx(
+        max(0.0, budget["monthly_limit_usd"] - budget["global_monthly_spend_usd"])
+    )
+
+    provider_budget = budget["per_provider"][provider_id]
+    assert provider_budget["daily_spend_usd"] == pytest.approx(2.5)
+    assert provider_budget["monthly_spend_usd"] == pytest.approx(2.5)
+    assert provider_budget["daily_remaining_usd"] == pytest.approx(7.5)
+    assert provider_budget["monthly_limit_usd"] == pytest.approx(8.0)
+    assert provider_budget["monthly_remaining_usd"] == pytest.approx(5.5)
+
+
+async def test_provider_test_forwards_agent_and_session_context(client: AsyncClient, auth_headers, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_route_and_execute(db, request, preferred_provider_id=None):
+        captured["request"] = request
+        captured["preferred_provider_id"] = preferred_provider_id
+        return ProviderResponse(
+            provider_id=preferred_provider_id or "arena-agent",
+            model="test-model",
+            content="ok",
+            input_tokens=1,
+            output_tokens=1,
+            estimated_cost_usd=0.0,
+            latency_ms=1.0,
+        )
+
+    monkeypatch.setattr(provider_router, "route_and_execute", fake_route_and_execute)
+    response = await client.post(
+        "/api/v1/providers/arena-agent/test",
+        headers=auth_headers,
+        json={"dry_run": True, "agent_id": "worker-1", "session_id": "provider-session-v2-test"},
+    )
+
+    assert response.status_code == 200
+    request = captured["request"]
+    assert request.agent_id == "worker-1"
+    assert request.metadata["session_id"] == "provider-session-v2-test"
+    assert captured["preferred_provider_id"] == "arena-agent"
+    assert ProviderTestRequest(agent_id="worker-1", session_id="session-1").agent_id == "worker-1"

@@ -1,20 +1,9 @@
 """Device-scoped authentication for remote worker daemons.
 
 A remote execution node is not a human operator and does not hold an admin JWT.
-Instead each device gets a token bound to its device id, derived from the server
-secret with HMAC-SHA256:
-
-    token = HMAC-SHA256(SECRET_KEY, device_id)
-
-Properties:
-* The token cannot be forged without the server secret.
-* The token is bound to exactly one device id, so a stolen token cannot be replayed
-  against a different node.
-* Nothing is stored in the database, so a database leak does not expose device tokens.
-
-Because the token is derived rather than persisted it cannot be revoked individually;
-rotating `SECRET_KEY` revokes every device token at once. That trade-off is
-documented in `docs/SECURITY_ASSESSMENT.md`.
+Instead, each device gets a token bound to its device id and database-backed token
+version using HMAC-SHA256. Incrementing one device's version immediately invalidates
+its prior tokens without rotating the server secret or affecting other devices.
 """
 
 import hmac
@@ -32,18 +21,22 @@ def using_default_secret() -> bool:
     return hmac.compare_digest(get_settings().SECRET_KEY, DEFAULT_DEV_SECRET)
 
 
-def issue_device_token(device_id: str) -> str:
-    """Derive the deterministic authentication token for a device id."""
+def issue_device_token(device_id: str, token_version: int = 1) -> str:
+    """Derive a token bound to both the device id and its current revocation version."""
+    if not device_id or isinstance(token_version, bool) or not isinstance(token_version, int) or token_version < 1:
+        raise ValueError("device_id and a positive token_version are required")
+
     settings = get_settings()
-    return hmac.new(
-        settings.SECRET_KEY.encode("utf-8"),
-        device_id.encode("utf-8"),
-        sha256,
-    ).hexdigest()
+    message = f"{device_id}\0{token_version}".encode("utf-8")
+    return hmac.new(settings.SECRET_KEY.encode("utf-8"), message, sha256).hexdigest()
 
 
-def verify_device_token(device_id: str, token: str | None) -> bool:
-    """Constant-time verification of a device token against its device id."""
-    if not token or not device_id:
+def verify_device_token(device_id: str, token: str | None, token_version: int = 1) -> bool:
+    """Constant-time verification against the device id and currently stored version."""
+    if not isinstance(token, str) or not token.strip() or not device_id:
         return False
-    return hmac.compare_digest(issue_device_token(device_id), token.strip())
+    try:
+        expected = issue_device_token(device_id, token_version)
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(expected, token.strip())

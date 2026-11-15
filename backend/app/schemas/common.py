@@ -123,6 +123,8 @@ class ProviderTestRequest(BaseModel):
     prompt: str = "Respond with AATM connectivity verification."
     model: str | None = None
     dry_run: bool = True
+    agent_id: str | None = None
+    session_id: str | None = None
 
 
 class BrowserLaunchRequest(BaseModel):

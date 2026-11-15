@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,9 +141,16 @@ async def test_provider(
     p = await db.get(AIProvider, provider_id)
     if not p:
         raise HTTPException(status_code=404, detail="Provider not found")
+    request_metadata = {"session_id": body.session_id} if body.session_id is not None else {}
     resp = await provider_router.route_and_execute(
         db,
-        ProviderRequest(prompt=body.prompt, model=body.model, dry_run=body.dry_run, agent_id="manager-0"),
+        ProviderRequest(
+            prompt=body.prompt,
+            model=body.model,
+            dry_run=body.dry_run,
+            agent_id=body.agent_id or "manager-0",
+            metadata=request_metadata,
+        ),
         preferred_provider_id=provider_id,
     )
     return {
@@ -168,7 +177,48 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
         )
     )
     in_tok, out_tok, total_cost = tot_res.one()
+
+    budget_summary: dict[str, Any] = dict(await provider_router.get_spend_summary(db))
+    global_daily_remaining = float(budget_summary["daily_remaining_usd"])
+    global_monthly_remaining = float(budget_summary["monthly_remaining_usd"])
+    global_monthly_limit = float(budget_summary["monthly_limit_usd"])
+    providers = list(
+        (
+            await db.execute(select(AIProvider).order_by(AIProvider.priority.asc(), AIProvider.id.asc()))
+        ).scalars().all()
+    )
+    provider_budgets: dict[str, dict[str, Any]] = {}
+    for provider in providers:
+        daily_spend = await provider_router.get_daily_spend(db, provider.id)
+        monthly_spend = await provider_router.get_monthly_spend(db, provider.id)
+        daily_limit = float(provider.daily_limit_usd)
+        raw_monthly_limit = provider.config.get("monthly_limit_usd") if isinstance(provider.config, dict) else None
+        try:
+            provider_monthly_limit = float(raw_monthly_limit) if raw_monthly_limit is not None else None
+        except (TypeError, ValueError):
+            provider_monthly_limit = None
+        if provider_monthly_limit is not None and provider_monthly_limit < 0:
+            provider_monthly_limit = None
+        effective_monthly_limit = (
+            global_monthly_limit if provider_monthly_limit is None else provider_monthly_limit
+        )
+
+        provider_budgets[provider.id] = {
+            "provider_id": provider.id,
+            "daily_spend_usd": daily_spend,
+            "monthly_spend_usd": monthly_spend,
+            "daily_limit_usd": daily_limit,
+            "monthly_limit_usd": provider_monthly_limit,
+            "effective_monthly_limit_usd": effective_monthly_limit,
+            "daily_remaining_usd": round(min(global_daily_remaining, max(0.0, daily_limit - daily_spend)), 6),
+            "monthly_remaining_usd": round(
+                min(global_monthly_remaining, max(0.0, effective_monthly_limit - monthly_spend)), 6
+            ),
+        }
+    budget_summary["per_provider"] = provider_budgets
+
     return {
+        "budget_summary": budget_summary,
         "summary": {
             "total_input_tokens": int(in_tok or 0),
             "total_output_tokens": int(out_tok or 0),

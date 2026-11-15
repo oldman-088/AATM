@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional
+from app.api.deps import get_current_user_optional, require_role
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
@@ -35,10 +35,12 @@ def _bound_agent_id(device_id: str) -> str:
     return f"dev-{device_id}"[:64]
 
 
-def require_device_token(device_id: str, token: str | None) -> None:
-    """Raise 401 unless the supplied token is valid for this device."""
-    if not verify_device_token(device_id, token):
+async def require_device_token(device_id: str, token: str | None, db: AsyncSession) -> ExecutionDevice:
+    """Load a device and require a token signed for its current revocation version."""
+    device = await db.get(ExecutionDevice, device_id)
+    if device is None or not verify_device_token(device_id, token, device.token_version):
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    return device
 
 
 async def _ensure_bound_agent(
@@ -93,11 +95,13 @@ async def register_worker_device(
     Accepts either an admin JWT (an operator registering a node) or the device's own
     token (a daemon refreshing its registration after a server restart).
     """
-    token_valid = verify_device_token(device_id, x_aatm_device_token)
-    if not token_valid and user is None:
+    device = await db.get(ExecutionDevice, device_id)
+    token_valid = device is not None and verify_device_token(
+        device_id, x_aatm_device_token, device.token_version
+    )
+    if not token_valid and (user is None or not user.is_active):
         raise HTTPException(status_code=401, detail="Invalid or missing device token.")
 
-    device = await db.get(ExecutionDevice, device_id)
     created = device is None
     if device is None:
         device = ExecutionDevice(
@@ -150,11 +154,42 @@ async def register_worker_device(
             "last_heartbeat": device.last_heartbeat,
         },
         "bound_agent_id": agent.id,
-        "device_token": issue_device_token(device_id),
+        "device_token": issue_device_token(device_id, device.token_version),
         "token_hardened": hardened,
         "warning": None
         if hardened
         else "Server is still using the default development SECRET_KEY; device tokens are forgeable.",
+    }
+
+
+@router.post("/devices/{device_id}/revoke")
+async def revoke_device_token(
+    device_id: str,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke all currently issued tokens for one device; an operator must re-register it."""
+    device = await db.get(ExecutionDevice, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    previous_version = device.token_version
+    device.token_version = previous_version + 1
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="device.token_revoked",
+            resource_type="execution_device",
+            resource_id=device_id,
+            details={"previous_token_version": previous_version, "token_version": device.token_version},
+        )
+    )
+    await db.commit()
+    return {
+        "device_id": device.id,
+        "token_version": device.token_version,
+        "device_token": issue_device_token(device.id, device.token_version),
+        "revoked": True,
     }
 
 
@@ -168,15 +203,16 @@ async def worker_heartbeat(
 ):
     """Liveness ping from a remote worker daemon or authenticated operator."""
     if x_aatm_device_token is not None:
-        require_device_token(device_id, x_aatm_device_token)
-    elif user is None or not user.is_active:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing X-AATM-Device-Token or authenticated operator token",
-        )
-    device = await db.get(ExecutionDevice, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
+        device = await require_device_token(device_id, x_aatm_device_token, db)
+    else:
+        if user is None or not user.is_active:
+            raise HTTPException(
+                status_code=401,
+                detail="Missing X-AATM-Device-Token or authenticated operator token",
+            )
+        device = await db.get(ExecutionDevice, device_id)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found")
     device.status = "online"
     device.last_heartbeat = utcnow()
     await db.commit()
@@ -202,10 +238,7 @@ async def claim_task_for_device(
     db: AsyncSession = Depends(get_db),
 ):
     """Claim the next eligible task for a remote device."""
-    require_device_token(device_id, x_aatm_device_token)
-    device = await db.get(ExecutionDevice, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
+    device = await require_device_token(device_id, x_aatm_device_token, db)
 
     worker_id = body.get("worker_id") or f"{device_id}-worker"
 
@@ -299,10 +332,7 @@ async def report_task_result(
     db: AsyncSession = Depends(get_db),
 ):
     """Report the outcome of a task executed by a remote worker daemon."""
-    require_device_token(device_id, x_aatm_device_token)
-    device = await db.get(ExecutionDevice, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
+    device = await require_device_token(device_id, x_aatm_device_token, db)
     task = await db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -382,10 +412,7 @@ async def device_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Return the device record and the tasks it currently owns."""
-    require_device_token(device_id, x_aatm_device_token)
-    device = await db.get(ExecutionDevice, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
+    device = await require_device_token(device_id, x_aatm_device_token, db)
     tasks = list(
         (
             await db.execute(
