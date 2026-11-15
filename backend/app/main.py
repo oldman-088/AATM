@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 import app.models  # noqa: F401
 from app.api.routes import auth, devices, governance, infra, orchestration, platform, projects
+from app.browser.manager import browser_manager
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import Base
@@ -22,7 +23,10 @@ async def lifespan(_: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
-    yield
+    try:
+        yield
+    finally:
+        await browser_manager.shutdown_all()
 
 
 settings = get_settings()

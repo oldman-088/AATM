@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.browser.manager import browser_manager
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.employees.catalog import ensure_employee_workspace
@@ -188,8 +189,7 @@ class ReplacementAndEmergencyService:
             if scope == "browser":
                 bp_stmt = select(BrowserProfile).where(BrowserProfile.id == target_id)
             for bp in (await db.execute(bp_stmt)).scalars().all():
-                bp.status = "stopped"
-                bp.lock_owner = None
+                await browser_manager.stop_profile(db, bp, actor=actor)
                 stopped["browsers"] += 1
 
         db.add(

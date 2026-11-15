@@ -161,18 +161,36 @@ async def register_worker_device(
 @router.post("/devices/{device_id}/heartbeat")
 async def worker_heartbeat(
     device_id: str,
+    body: dict[str, Any] | None = None,
     x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    user: User | None = Depends(get_current_user_optional),
     db: AsyncSession = Depends(get_db),
 ):
-    """Liveness ping from a remote worker daemon."""
-    require_device_token(device_id, x_aatm_device_token)
+    """Liveness ping from a remote worker daemon or authenticated operator."""
+    if x_aatm_device_token is not None:
+        require_device_token(device_id, x_aatm_device_token)
+    elif user is None or not user.is_active:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing X-AATM-Device-Token or authenticated operator token",
+        )
     device = await db.get(ExecutionDevice, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
     device.status = "online"
     device.last_heartbeat = utcnow()
     await db.commit()
-    await event_bus.emit("device.heartbeat", {"device_id": device_id})
+    await event_bus.emit(
+        "device.heartbeat",
+        {
+            "device_id": device_id,
+            "telemetry": {
+                k: body[k]
+                for k in ("cpu_percent", "ram_percent")
+                if isinstance(body, dict) and k in body
+            },
+        },
+    )
     return {"id": device.id, "status": device.status, "last_heartbeat": device.last_heartbeat}
 
 

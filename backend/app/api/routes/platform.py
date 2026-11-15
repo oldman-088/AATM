@@ -10,6 +10,7 @@ from app.core.security import mask_credential_ref, sanitize_untrusted_content
 from app.db.base import utcnow
 from app.db.session import get_db
 from app.employees.catalog import ROLE_TEMPLATES, create_dynamic_employee
+from app.git_workflows.manager import git_workflow_manager
 from app.github_client.client import github_client
 from app.models import (
     AgentMessage,
@@ -28,6 +29,8 @@ from app.schemas.common import (
     DeviceRegisterRequest,
     EmergencyStopRequest,
     EmployeeCreate,
+    GitHubIssueCreateRequest,
+    GitHubPRCreateRequest,
     ProviderAccountCreate,
     SanitizeRequest,
     SDLCRequest,
@@ -180,7 +183,12 @@ async def create_userscript(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ok, msg = validate_userscript_policy(body.code, body.match_patterns)
+    ok, msg = validate_userscript_policy(
+        body.code,
+        body.match_patterns,
+        allowed_roles=body.allowed_roles,
+        allowed_agent_ids=body.allowed_agent_ids,
+    )
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     us = Userscript(
@@ -409,3 +417,50 @@ async def github_change_summary():
         "auth": github_client.get_auth_status(),
         "changes": github_client.generate_change_summary(),
     }
+
+
+@router.post("/github/prs", status_code=201)
+async def create_github_pull_request(
+    body: GitHubPRCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await git_workflow_manager.create_pull_request(
+        repo=body.repo,
+        title=body.title,
+        head=body.head,
+        base=body.base,
+        body=body.body,
+        draft=body.draft,
+        db=db,
+        approval_id=body.approval_id,
+        actor=user.email,
+    )
+    if not res.get("allowed"):
+        raise HTTPException(status_code=403, detail=res.get("error") or "GitHub PR blocked by approval/branch policy")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "GitHub PR creation failed")
+    return res
+
+
+@router.post("/github/issues", status_code=201)
+async def create_github_issue(
+    body: GitHubIssueCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await git_workflow_manager.create_issue(
+        repo=body.repo,
+        title=body.title,
+        body=body.body,
+        labels=body.labels,
+        assignees=body.assignees,
+        db=db,
+        approval_id=body.approval_id,
+        actor=user.email,
+    )
+    if not res.get("allowed"):
+        raise HTTPException(status_code=403, detail=res.get("error") or "GitHub issue blocked by approval policy")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "GitHub issue creation failed")
+    return res

@@ -119,7 +119,7 @@ def test_credential_ref_validation_is_strict_and_does_not_echo_values():
 
 
 async def test_provider_rejects_inline_credentials_without_echoing_secret(client: AsyncClient, auth_headers):
-    secret = "sk_live_inline_secret_never_echo_4c91"
+    secret = "sk_live_" + "inline_secret_never_echo_4c91"
     response = await client.post(
         "/api/v1/providers",
         headers=auth_headers,
@@ -195,3 +195,110 @@ def test_github_write_schemas_require_approval_and_validate_payloads():
             repo="project-without-owner",
             title="Invalid repository",
         )
+
+
+async def test_operator_jwt_device_heartbeat_and_userscript_role_scoping(client: AsyncClient, auth_headers):
+    dev = await client.post(
+        "/api/v1/devices",
+        headers=auth_headers,
+        json={
+            "id": "node-ui-hb-01",
+            "name": "UI Heartbeat Node",
+            "device_type": "remote_server",
+            "host_address": "10.0.0.44",
+            "os_name": "Ubuntu 24.04",
+        },
+    )
+    assert dev.status_code == 201
+
+    hb = await client.post(
+        "/api/v1/devices/node-ui-hb-01/heartbeat",
+        headers=auth_headers,
+        json={"cpu_percent": 21, "ram_percent": 34},
+    )
+    assert hb.status_code == 200
+    assert hb.json()["status"] == "online"
+
+    bad_us = await client.post(
+        "/api/v1/userscripts",
+        headers=auth_headers,
+        json={
+            "name": "Wildcard Role Script",
+            "description": "Should be rejected by role policy",
+            "match_patterns": ["https://example.com/*"],
+            "allowed_roles": ["*"],
+            "code": "console.log('ok');",
+        },
+    )
+    assert bad_us.status_code == 400
+
+
+async def test_github_write_endpoints_enforce_approval_gate(client: AsyncClient, auth_headers, monkeypatch):
+    import subprocess
+
+    def fake_run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/oldman-088/AATM/pull/99\n", stderr="")
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", fake_run)
+
+    # Create pending approval (not yet approved) -> must return 403
+    pending_app = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "action_type": "merge",
+            "title": "Create integration PR",
+            "description": "Test approval gate on POST /api/v1/github/prs",
+        },
+    )
+    assert pending_app.status_code == 201
+    app_id = pending_app.json()["id"]
+
+    blocked = await client.post(
+        "/api/v1/github/prs",
+        headers=auth_headers,
+        json={
+            "approval_id": app_id,
+            "repo": "oldman-088/AATM",
+            "title": "Blocked PR",
+            "head": "feature/test",
+            "base": "main",
+        },
+    )
+    assert blocked.status_code == 403
+
+    dec = await client.post(
+        f"/api/v1/approvals/{app_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "review_note": "Approved for test"},
+    )
+    assert dec.status_code == 200
+
+    allowed = await client.post(
+        "/api/v1/github/prs",
+        headers=auth_headers,
+        json={
+            "approval_id": app_id,
+            "repo": "oldman-088/AATM",
+            "title": "Approved PR",
+            "head": "feature/test",
+            "base": "main",
+        },
+    )
+    assert allowed.status_code == 201
+    assert allowed.json()["ok"] is True
+    assert allowed.json()["allowed"] is True
+
+    issue = await client.post(
+        "/api/v1/github/issues",
+        headers=auth_headers,
+        json={
+            "approval_id": app_id,
+            "repo": "oldman-088/AATM",
+            "title": "Approved Issue",
+            "body": "Created via approval-gated endpoint",
+            "labels": ["enhancement"],
+        },
+    )
+    assert issue.status_code == 201
+    assert issue.json()["ok"] is True

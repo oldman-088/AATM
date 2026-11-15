@@ -1,48 +1,29 @@
 ========================================================================
 AATM — SYSTEM STATUS REPORT
 ========================================================================
-Updated (UTC): 2026-11-15T07:35:00Z
-Current Phase: Phase 14 — Worker 4 Verification, Remediation & Multi-Device Delivery
-Current Division: Divisions 07, 08, 09, 10, 11, 12 (Orchestration / GitHub / QA / Ops)
+Updated (UTC): 2026-11-15T10:45:00Z
+Current Phase: Sprint v2.1 Integrated — Unified 4-Worker Delivery Verified
+Current Division: Divisions 01–12 (All 4 Workers Integrated on arena/b15bbe5c-aatm)
 
-TEST RESULTS (verified by `scripts/ubuntu/verify.sh`, exit 0, 10/10 gates):
+TEST RESULTS (verified via `scripts/ubuntu/verify.sh` + `bridge/tests/test_bridge.py`, exit 0):
 - Alembic upgrade head (a56f5804a0ab -> ee92483cefa3): PASSED
-- Backend ruff check: PASSED (0 errors)
-- Backend pytest: PASSED (32/32 in 6.2s)
-    * pre-existing integration suite: 9/9
-    * new E2E verification suite (test_e2e_verification.py): 23/23
-- Static secret scan (python -m app.qa.engine): PASSED (0 findings)
-- Frontend tsc --noEmit: PASSED (0 errors)
-- Frontend vitest (1/1 EN/AR/FA RTL test): PASSED
-- Frontend production vite build: PASSED
-- Live multi-device round trip (uvicorn + daemon OS process): PASSED
+- Backend & Bridge ruff check: PASSED (0 errors)
+- Backend pytest: PASSED (55/55)
+    * test_aatm_backend.py: 5/5
+    * test_enterprise_platform.py: 4/4
+    * test_contracts_v2.py (Worker 1 + cross-division integration): 7/7
+    * test_worker3_providers_browser.py (Worker 3): 11/11
+    * test_e2e_verification.py (Worker 4 + Backup W4): 28/28
+- Reference Arena Bridge pytest (`bridge/tests/test_bridge.py`): PASSED (3/3)
+- Static secret scan (`python -m app.qa.engine`): PASSED (0 findings, 101+ files)
+- Frontend `tsc --noEmit`: PASSED (0 errors)
+- Frontend `vitest run` (Worker 2 full 12-tab & EN/AR/FA RTL suite): PASSED (22/22)
+- Frontend production `vite build`: PASSED
 
-WORK COMPLETED THIS PHASE (Worker 4):
-- Fixed 5 verified defects (see docs/VERIFICATION_REPORT.md):
-  D1 Emergency Stop orphaned in-flight tasks (HIGH)
-  D2 Secret scanner blind spots: .env/.sh/.ps1/.yaml + generic secrets (HIGH)
-  D3 Approval Center gate bypassable by directive phrasing (HIGH)
-  D4 ruff failures while STATUS.txt claimed 0 errors (MEDIUM)
-  D5 naive/aware datetime comparison crash in recovery paths (MEDIUM)
-- Delivered the Multi-Device Worker Daemon: remote daemon, device-scoped tokens,
-  claim/report API, offline-device reclamation, Ubuntu + Windows launchers.
-  Multi-Device Execution is now COMPLETE (was Partially Complete).
-- Added the E2E verification suite (23 tests) covering DAG scheduling, Agent Messaging,
-  isolated workspace execution, smart replacement, Emergency Stop, secret scanning,
-  the governance gate and the multi-device round trip.
-- Deployment hardening: verify.sh / verify.ps1 one-command gate, PID-safe stop
-  scripts, health-checked start, verified backup/restore, .gitignore and
-  docker-compose hardening.
-
-KEY UPGRADES COMPLETED (cumulative):
-- Dynamic AI Employees (16 Role Templates, 20+ concurrent scale, isolated workspaces).
-- Arena Accounts (`one_per_employee | shared | hybrid`) & Independent Provider Sessions.
-- Modular Browser Engines (`playwright`, `browser_use`, `openbrowser`, `automa`) & Policy-Audited Tampermonkey Userscripts.
-- 3-Mode Orchestration (`manual | automatic | collaborative`) & Smart Employee Replacement.
-- AATM Agent Messaging System & Real Executable Agent Runtime (workspace containment + Python/Pytest runner).
-- Automated SDLC Idea-to-Delivery Pipeline (`POST /api/v1/sdlc/execute`).
-- Full GitHub Integration, 4-Layer Permissioned Memory, Multi-Device Node Registry,
-  Prompt-Injection Sanitizer & Global Emergency Stop.
-- 16-Section Command Center UI preserving English, Arabic & Persian full RTL support.
-- Remote Multi-Device Worker Daemon with device-scoped authentication and
-  automatic reclamation of work owned by a dead execution node.
+SPRINT v2.1 INTEGRATED DELIVERABLES (Workers 1–4):
+- Worker 1: `contracts/schemas.json` v2.0.0, strict `env:*` validation, `GitHubPRCreateRequest` / `GitHubIssueCreateRequest`, HTTP 400 mapping in `infra.py`.
+- Worker 2: Full `enterprise` i18n namespace (EN/AR/FA), logical-CSS RTL parity, relative-URL enforcement, 22/22 Vitest suite.
+- Worker 3: Compliant `bridge/` Arena Local Bridge daemon with per-employee session/account isolation, daily/monthly global+per-provider spend caps, atomic `.aatm.lock` + PID liveness Playwright lifecycle, hardened Tampermonkey policy & role scoping.
+- Worker 4 (+ Backup): 5 defect remediations (D1–D5), Multi-Device Worker Daemon (`worker_daemon.py` + `device_auth.py`), approval-gated GitHub write helpers (`create_branch`, `create_pull_request`, `create_issue`), `verify.sh`/`verify.ps1`, and 28 E2E tests.
+- Manager Integration: Wired `browser_manager.shutdown_all()` in `main.py`, `stop_profile` in `replacement.py` emergency stop, role-scoped `POST /api/v1/userscripts`, `POST /api/v1/github/{prs,issues}`, and dual-auth (device token OR operator JWT) on `POST /api/v1/devices/{id}/heartbeat`.
+========================================================================
