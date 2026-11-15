@@ -287,6 +287,12 @@ export interface Translations {
     executionTraces: string
     noTraces: string
     tracesUnavailable: string
+    traceAgentFilter: string
+    reportingHierarchy: string
+    targetBranch: string
+    branchName: string
+    fromBranch: string
+    submitBranch: string
     revokeFailed: string
     guardTitle: string
     guardPlaceholder: string

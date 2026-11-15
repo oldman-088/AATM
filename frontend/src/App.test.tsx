@@ -383,6 +383,57 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     expect(screen.getByRole('button', { name: /Create Pull Request/ })).toBeDisabled()
   })
 
+  it('requests a branch-scoped approval and submits the approved branch write', async () => {
+    const { calls } = installFetchMock({
+      '/api/v1/approvals': (_path: string, init: RequestInit) => (init.method || 'GET') === 'POST'
+        ? { id: 'branch-approval', status: 'pending' }
+        : [{ id: 'branch-approval', status: 'approved', action_type: 'branch' }],
+    })
+    render(<App />)
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
+    expect(screen.getByLabelText('From branch')).toHaveValue('main')
+    expect(screen.getByRole('button', { name: /Request Approval/ })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/rtl' } })
+    fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')?.body).toMatchObject({
+      action_type: 'branch', payload: { kind: 'branch', repo: 'oldman-088/AATM', branch_name: 'feature/rtl', from_branch: 'main' },
+    }))
+    await waitFor(() => expect(screen.getByText('Approval status: Approved')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Create Branch' }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/github/branches')?.body).toEqual({
+      approval_id: 'branch-approval', repo: 'oldman-088/AATM', branch_name: 'feature/rtl', from_branch: 'main',
+    }))
+    expect(await screen.findByText(/feature\/rtl/)).toBeInTheDocument()
+  })
+
+  it('surfaces a branch write rejected by the backend policy', async () => {
+    const mock = installFetchMock({ '/api/v1/approvals': [{ id: 'approved-branch', status: 'approved' }] })
+    const original = mock.mock.getMockImplementation()!
+    mock.mock.mockImplementation(async (input: any, init: RequestInit = {}) => String(input) === '/api/v1/github/branches'
+      ? { ok: false, status: 403, json: async () => ({ detail: 'Approval does not match the requested branch write' }) }
+      : original(input, init))
+    render(<App />)
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
+    fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/rejected' } })
+    fireEvent.change(screen.getByPlaceholderText('Approval UUID'), { target: { value: 'approved-branch' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create Branch' }))
+    expect(await screen.findByText('Approval does not match the requested branch write')).toBeInTheDocument()
+  })
+
+  it('blocks branch submission while its approval is pending', async () => {
+    const { calls } = installFetchMock()
+    render(<App />)
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
+    fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/a' } })
+    fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
+    expect(await screen.findByText('Approval status: Pending')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create Branch' })).toBeDisabled()
+    expect(calls.some((c) => c.path === '/api/v1/github/branches')).toBe(false)
+  })
+
   it('blocks GitHub writes until an approval id is present', async () => {
     const { calls } = installFetchMock()
     render(<App />)

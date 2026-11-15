@@ -21,16 +21,39 @@ export function EmployeeCreatorAndOrgPanel({
   const [feedback, setFeedback] = useState<string | null>(null)
   const [traces, setTraces] = useState<any[] | null>(null)
   const [traceUnavailable, setTraceUnavailable] = useState(false)
+  const [traceAgent, setTraceAgent] = useState('')
   useEffect(() => {
     let active = true
-    apiFetch<any>('/traces').then((result) => {
+    setTraces(null)
+    setTraceUnavailable(false)
+    const path = traceAgent ? `/traces?agent_id=${encodeURIComponent(traceAgent)}` : '/traces'
+    apiFetch<any>(path).then((result) => {
       if (active) setTraces(Array.isArray(result) ? result : Array.isArray(result?.traces) ? result.traces : [])
     }).catch(() => { if (active) setTraceUnavailable(true) })
     return () => { active = false }
-  }, [])
-  const managers = agents.filter((agent) => agent.id === 'manager-0' || agent.role === 'manager')
+  }, [traceAgent])
+  const byId = new Map(agents.map((agent) => [agent.id, agent]))
+  // Ignore missing, self-referential and cyclic links rather than inventing a hierarchy.
+  const parentOf = (agent: any): string | undefined => {
+    const seen = new Set([agent.id])
+    let current = agent
+    while (current?.reports_to) {
+      if (seen.has(current.reports_to) || !byId.has(current.reports_to)) return undefined
+      seen.add(current.reports_to)
+      current = byId.get(current.reports_to)
+    }
+    return agent.reports_to || undefined
+  }
+  const children = new Map<string, any[]>()
+  const roots: any[] = []
+  for (const agent of agents) {
+    const parent = parentOf(agent)
+    if (parent) children.set(parent, [...(children.get(parent) || []), agent])
+    else roots.push(agent)
+  }
+  const managers = roots.filter((agent) => agent.id === 'manager-0' || agent.role === 'manager')
   const groups = new Map<string, any[]>()
-  for (const agent of agents.filter((item) => !managers.includes(item))) {
+  for (const agent of roots.filter((item) => !managers.includes(item))) {
     const divisions = Array.isArray(agent.divisions) && agent.divisions.length ? agent.divisions : [t.enterprise.unassignedDivision]
     for (const division of divisions) groups.set(division, [...(groups.get(division) || []), agent])
   }
@@ -65,6 +88,18 @@ export function EmployeeCreatorAndOrgPanel({
       setFeedback(err?.message || t.enterprise.replacementFailed)
     }
   }
+
+  const renderAgent = (ag: any): React.ReactNode => (
+    <div key={ag.id} className="space-y-2">
+      <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
+        <div className="min-w-0"><div className="truncate font-semibold text-white">{ag.name}</div>
+          <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}</div>
+        </div>
+        {ag.role !== 'manager' && <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>}
+      </div>
+      {(children.get(ag.id) || []).length > 0 && <div className="space-y-2 border-s border-sky-800 ps-3">{children.get(ag.id)?.map(renderAgent)}</div>}
+    </div>
+  )
 
   return (
     <div className="space-y-4">
@@ -109,27 +144,23 @@ export function EmployeeCreatorAndOrgPanel({
       {/* Organization Structure + Smart Replacement trigger */}
       <Card className="space-y-2">
         <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.orgStructureTitle}</h3>
-        <p className="text-xs text-slate-400">{t.enterprise.divisionGroups}</p>
-        {managers.map((ag) => <div key={ag.id} className="rounded border border-sky-800 p-2 text-xs text-white">{ag.name} • {ag.role}</div>)}
+        <p className="text-xs text-slate-400">{t.enterprise.reportingHierarchy}</p>
+        {managers.map(renderAgent)}
+        {groups.size > 0 && <p className="text-xs text-slate-400">{t.enterprise.divisionGroups}</p>}
         {[...groups.entries()].map(([division, members]) => (
           <section key={division} className="space-y-2 border-s border-slate-700 ps-3">
             <h4 className="text-xs font-semibold text-sky-300">{division}</h4>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {members.map((ag) => (
-                <div key={ag.id} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
-                  <div className="min-w-0"><div className="truncate font-semibold text-white">{ag.name}</div>
-                    <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}</div>
-                  </div>
-                  <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>
-                </div>
-              ))}
-            </div>
+            <div className="space-y-2">{members.map(renderAgent)}</div>
           </section>
         ))}
       </Card>
       <Card className="space-y-2">
         <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.executionTraces}</h3>
-        {traceUnavailable ? <p className="text-xs text-slate-400">{t.enterprise.tracesUnavailable}</p> : traces && traces.length === 0 ? <p className="text-xs text-slate-400">{t.enterprise.noTraces}</p> : traces?.map((trace, i) => <div key={trace.id || i} className="break-all rounded border border-slate-800 p-2 text-xs text-slate-300">{[trace.name || trace.action || trace.id, trace.status, trace.agent_id, trace.created_at].filter(Boolean).join(' • ')}</div>)}
+        <Select aria-label={t.enterprise.traceAgentFilter} value={traceAgent} onChange={(e) => setTraceAgent(e.target.value)}>
+          <option value="">{t.enterprise.noSelection}</option>
+          {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+        </Select>
+        {traceUnavailable ? <p className="text-xs text-slate-400">{t.enterprise.tracesUnavailable}</p> : traces && traces.length === 0 ? <p className="text-xs text-slate-400">{t.enterprise.noTraces}</p> : traces?.map((trace, i) => <div key={trace.id || i} className="break-all rounded border border-slate-800 p-2 text-xs text-slate-300">{[trace.name || trace.action || trace.model_name || trace.channel_type || trace.source || trace.id, trace.severity || trace.delivery_status || trace.status || (trace.success === false ? 'failed' : undefined), trace.agent_id, trace.timestamp || trace.created_at].filter(Boolean).join(' • ')}</div>)}
       </Card>
     </div>
   )
