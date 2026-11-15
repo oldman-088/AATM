@@ -365,6 +365,28 @@ describe('Sprint v2.2 — device token revocation', () => {
     unmount()
   })
 
+  it('shows the registration bootstrap token transiently and dismisses it', async () => {
+    installFetchMock()
+    renderWithLocale(<MultiDeviceNodesPanel devices={devices} onReload={noop} />)
+    fireEvent.change(screen.getByPlaceholderText('Node Name'), { target: { value: 'Edge Node' } })
+    fireEvent.click(screen.getByRole('button', { name: /Register Node/ }))
+    expect(await screen.findByText('Device registered: Edge Node')).toBeInTheDocument()
+    expect(screen.getByTestId('rotated-device-token')).toHaveTextContent('aatm_dev_bootstrap_token')
+    expect(JSON.stringify(localStorage)).not.toContain('aatm_dev_bootstrap_token')
+    fireEvent.click(screen.getByRole('button', { name: /Cancel/ }))
+    expect(screen.queryByTestId('rotated-device-token')).not.toBeInTheDocument()
+  })
+
+  it('shows authentication denial without revealing a token', async () => {
+    const failing = installFetchMock()
+    failing.mock.mockImplementation(async () => ({ ok: false, status: 401, json: async () => ({ detail: 'Unauthorized' }) }))
+    renderWithLocale(<MultiDeviceNodesPanel devices={devices} onReload={noop} />)
+    fireEvent.click(screen.getByRole('button', { name: /Revoke Token/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Confirm revoke/ }))
+    expect(await screen.findByText('Unauthorized')).toBeInTheDocument()
+    expect(screen.queryByTestId('rotated-device-token')).not.toBeInTheDocument()
+  })
+
   it('surfaces a localized revocation error when the backend rejects the request', async () => {
     const failing = installFetchMock()
     failing.mock.mockImplementation(async (input: any) => {
@@ -389,5 +411,21 @@ describe('Sprint v2.2 — device token revocation', () => {
       expect(screen.getByRole('button', { name: lang === 'ar' ? /إبطال الرمز/ : /ابطال توکن/ })).toBeInTheDocument()
       unmount()
     }
+  })
+})
+
+
+describe('Round 2 organization and traces', () => {
+  it('groups agents by live division and displays available traces', async () => {
+    installFetchMock({ '/api/v1/traces': [{ id: 'trace-1', name: 'Build task', status: 'running', agent_id: 'worker-1' }] })
+    renderWithLocale(<EmployeeCreatorAndOrgPanel agents={AGENTS} templates={TEMPLATES} onReload={noop} />)
+    expect(screen.getByText('D03')).toBeInTheDocument()
+    expect(screen.getByText(/reporting relationships are not provided/)).toBeInTheDocument()
+    expect(await screen.findByText(/Build task.*running.*worker-1/)).toBeInTheDocument()
+  })
+  it('handles an unavailable trace API', async () => {
+    installFetchMock({ '/api/v1/traces': () => { throw new Error('unavailable') } })
+    renderWithLocale(<EmployeeCreatorAndOrgPanel agents={AGENTS} templates={TEMPLATES} onReload={noop} />)
+    expect(await screen.findByText('Trace service unavailable')).toBeInTheDocument()
   })
 })

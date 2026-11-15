@@ -19,6 +19,22 @@ export function EmployeeCreatorAndOrgPanel({
   const [allocationMode, setAllocationMode] = useState('hybrid')
   const [autonomyMode, setAutonomyMode] = useState('semi_autonomous')
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [traces, setTraces] = useState<any[] | null>(null)
+  const [traceUnavailable, setTraceUnavailable] = useState(false)
+  useEffect(() => {
+    let active = true
+    apiFetch<any>('/traces').then((result) => {
+      if (active) setTraces(Array.isArray(result) ? result : Array.isArray(result?.traces) ? result.traces : [])
+    }).catch(() => { if (active) setTraceUnavailable(true) })
+    return () => { active = false }
+  }, [])
+  const managers = agents.filter((agent) => agent.id === 'manager-0' || agent.role === 'manager')
+  const groups = new Map<string, any[]>()
+  for (const agent of agents.filter((item) => !managers.includes(item))) {
+    const divisions = Array.isArray(agent.divisions) && agent.divisions.length ? agent.divisions : [t.enterprise.unassignedDivision]
+    for (const division of divisions) groups.set(division, [...(groups.get(division) || []), agent])
+  }
+
 
   const createEmployee = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -93,23 +109,27 @@ export function EmployeeCreatorAndOrgPanel({
       {/* Organization Structure + Smart Replacement trigger */}
       <Card className="space-y-2">
         <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.orgStructureTitle}</h3>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {agents.map((ag) => (
-            <div key={ag.id} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
-              <div className="min-w-0">
-                <div className="truncate font-semibold text-white">{ag.name}</div>
-                <div className="truncate text-slate-400">
-                  {ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}
+        <p className="text-xs text-slate-400">{t.enterprise.divisionGroups}</p>
+        {managers.map((ag) => <div key={ag.id} className="rounded border border-sky-800 p-2 text-xs text-white">{ag.name} • {ag.role}</div>)}
+        {[...groups.entries()].map(([division, members]) => (
+          <section key={division} className="space-y-2 border-s border-slate-700 ps-3">
+            <h4 className="text-xs font-semibold text-sky-300">{division}</h4>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {members.map((ag) => (
+                <div key={ag.id} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
+                  <div className="min-w-0"><div className="truncate font-semibold text-white">{ag.name}</div>
+                    <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}</div>
+                  </div>
+                  <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>
                 </div>
-              </div>
-              {ag.role !== 'manager' && (
-                <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>
-                  {t.enterprise.replace}
-                </Button>
-              )}
+              ))}
             </div>
-          ))}
-        </div>
+          </section>
+        ))}
+      </Card>
+      <Card className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.executionTraces}</h3>
+        {traceUnavailable ? <p className="text-xs text-slate-400">{t.enterprise.tracesUnavailable}</p> : traces && traces.length === 0 ? <p className="text-xs text-slate-400">{t.enterprise.noTraces}</p> : traces?.map((trace, i) => <div key={trace.id || i} className="break-all rounded border border-slate-800 p-2 text-xs text-slate-300">{[trace.name || trace.action || trace.id, trace.status, trace.agent_id, trace.created_at].filter(Boolean).join(' • ')}</div>)}
       </Card>
     </div>
   )
@@ -510,13 +530,13 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
   const [osName, setOsName] = useState('Ubuntu 24.04')
   const [pinged, setPinged] = useState<string | null>(null)
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
-  const [rotated, setRotated] = useState<{ deviceId: string; deviceName: string; token: string } | null>(null)
+  const [rotated, setRotated] = useState<{ deviceId: string; deviceName: string; token: string; registration?: boolean } | null>(null)
   const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const registerDevice = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
-    await apiFetch('/devices', {
+    const result = await apiFetch<any>('/devices', {
       method: 'POST',
       body: JSON.stringify({
         id: `node-${Date.now().toString(36)}`,
@@ -526,6 +546,7 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
         os_name: osName,
       }),
     })
+    if (result?.device_token) setRotated({ deviceId: result.device?.id || result.id, deviceName: name, token: result.device_token, registration: true })
     setName('')
     onReload()
   }
@@ -572,7 +593,7 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
         <div className="space-y-1 rounded-lg border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs text-amber-100">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="font-semibold">
-              {t.enterprise.revokeSuccess} {rotated.deviceName}
+              {rotated.registration ? t.enterprise.deviceRegistered : t.enterprise.revokeSuccess} {rotated.deviceName}
             </span>
             <Button size="sm" variant="secondary" onClick={() => setRotated(null)}>
               {t.common.cancel}
@@ -580,7 +601,7 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
           </div>
           {rotated.token ? (
             <>
-              <div className="font-semibold">{t.enterprise.rotatedToken}</div>
+              <div className="font-semibold">{rotated.registration ? t.enterprise.deviceToken : t.enterprise.rotatedToken}</div>
               <code
                 data-testid="rotated-device-token"
                 className="block break-all rounded bg-slate-950/70 p-2 font-mono text-[11px] text-emerald-200"

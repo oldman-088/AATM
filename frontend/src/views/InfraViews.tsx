@@ -178,9 +178,9 @@ function HeadroomBar({
   remainingLabel: string
   remainingOverride?: number
 }) {
-  const hasLimit = typeof limit === 'number' && limit > 0
+  const hasLimit = typeof limit === 'number' && limit >= 0
   const remaining = typeof remainingOverride === 'number' ? remainingOverride : hasLimit ? Math.max(0, (limit as number) - spent) : undefined
-  const pct = hasLimit ? Math.min(100, (spent / (limit as number)) * 100) : 0
+  const pct = hasLimit ? (limit === 0 ? 100 : Math.min(100, (spent / (limit as number)) * 100)) : 0
   return (
     <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs">
       <div className="flex items-center justify-between text-slate-300">
@@ -263,14 +263,20 @@ export function BudgetHeadroom({
 export function ProvidersView({
   providers,
   usage,
+  agents,
+  sessions,
   onReload,
 }: {
   providers: any[]
   usage: any
+  agents: any[]
+  sessions: any[]
   onReload: () => void
 }) {
   const { t, formatNumber } = useI18n()
   const [testResult, setTestResult] = useState<string | null>(null)
+  const [agentId, setAgentId] = useState('')
+  const [sessionId, setSessionId] = useState('')
   const [budget, setBudget] = useState<BudgetLimits | null>(null)
 
   // Budget limits live in the `budgets` system setting (GET /settings returns key -> {value}).
@@ -294,7 +300,7 @@ export function ProvidersView({
   const dryRun = async (id: string) => {
     const res = await apiFetch<any>(`/providers/${id}/test`, {
       method: 'POST',
-      body: JSON.stringify({ prompt: 'Verify provider routing & cost control.', dry_run: true }),
+      body: JSON.stringify({ prompt: 'Verify provider routing & cost control.', dry_run: true, ...(agentId && { agent_id: agentId }), ...(sessionId && { session_id: sessionId }) }),
     })
     setTestResult(`${res.provider_id} (${res.model}): ${res.content}`)
     onReload()
@@ -317,6 +323,16 @@ export function ProvidersView({
         <Card className="border-sky-500/40 bg-sky-950/30 text-sm text-sky-200">{testResult}</Card>
       )}
 
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Select aria-label={t.enterprise.optionalAgent} value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+          <option value="">{t.enterprise.optionalAgent}: {t.enterprise.noSelection}</option>
+          {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+        </Select>
+        <Select aria-label={t.enterprise.optionalSession} value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
+          <option value="">{t.enterprise.optionalSession}: {t.enterprise.noSelection}</option>
+          {sessions.map((session) => <option key={session.id} value={session.id}>{session.name || session.id}</option>)}
+        </Select>
+      </div>
       <div className="grid gap-4 md:grid-cols-3">
         {providers.map((p) => (
           <Card key={p.id} className="space-y-3">
@@ -490,7 +506,7 @@ export function ProjectsMemoryView({
 
 type GitHubTarget = 'pr' | 'issue'
 
-export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload: () => void }) {
+export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: any; approvals: any[]; onReload: () => void }) {
   const { t } = useI18n()
   const [mergeFeedback, setMergeFeedback] = useState<string | null>(null)
 
@@ -502,13 +518,16 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
   const [headBranch, setHeadBranch] = useState('')
   const [baseBranch, setBaseBranch] = useState('main')
   const [approvalId, setApprovalId] = useState('')
-  const [writeFeedback, setWriteFeedback] = useState<{ kind: 'ok' | 'error' | 'info'; message: string } | null>(null)
+  const [requestedApprovalId, setRequestedApprovalId] = useState('')
+  const [writeFeedback, setWriteFeedback] = useState<{ kind: 'ok' | 'error' | 'info'; message: string; url?: string } | null>(null)
   const [requesting, setRequesting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
   if (!gitData) return null
 
   const { repository, workflows } = gitData
+  const approvalStatus = approvals.find((a) => a.id === approvalId.trim())?.status ?? (approvalId && approvalId === requestedApprovalId ? 'pending' : 'unknown')
+  const statusLabel = approvalStatus === 'approved' ? t.enterprise.statusApproved : approvalStatus === 'pending' ? t.enterprise.statusPending : approvalStatus === 'rejected' ? t.enterprise.statusRejected : t.enterprise.statusUnknown
 
   const attemptMerge = async (wfId: string) => {
     const res = await apiFetch<any>(`/git/workflows/${wfId}/merge`, { method: 'POST' })
@@ -531,10 +550,11 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
             target === 'pr'
               ? `Create PR ${headBranch || repository.current_branch} -> ${baseBranch} in ${repo}`
               : `Create issue "${title}" in ${repo}`,
-          payload: { target, repo, title, body: bodyText, head: headBranch, base: baseBranch },
+          payload: { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
         }),
       })
       setApprovalId(created?.id || '')
+      setRequestedApprovalId(created?.id || '')
       setWriteFeedback({ kind: 'info', message: `${t.git.approvalCreated} ${created?.id} — ${t.git.approvalPendingHint}` })
       onReload()
     } catch (err: any) {
@@ -546,7 +566,7 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
 
   const submitWrite = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!title.trim() || !approvalId.trim()) {
+    if (!title.trim() || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected') {
       setWriteFeedback({ kind: 'error', message: t.git.approvalRequired })
       return
     }
@@ -567,8 +587,10 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
         method: 'POST',
         body: JSON.stringify(payload),
       })
-      const ref = res?.html_url || (res?.number ? `#${res.number}` : '') || res?.id || ''
-      setWriteFeedback({ kind: 'ok', message: `${t.git.writeSuccess} ${ref}`.trim() })
+      const number = res?.pr_number ?? res?.issue_number ?? res?.number
+      const ref = res?.url || res?.html_url || (number ? `#${number}` : '') || res?.id || ''
+      const url = typeof res?.url === 'string' ? res.url : res?.html_url
+      setWriteFeedback({ kind: 'ok', message: `${t.git.writeSuccess} ${ref}`.trim(), url: typeof url === 'string' && /^https:\/\//i.test(url) ? url : undefined })
       setTitle('')
       setBodyText('')
       onReload()
@@ -658,7 +680,7 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
                   : 'border-rose-500/40 bg-rose-950/30 text-rose-200'
             }`}
           >
-            {writeFeedback.message}
+            {writeFeedback.url ? <a href={writeFeedback.url} target="_blank" rel="noopener noreferrer" className="underline">{writeFeedback.message}</a> : writeFeedback.message}
           </div>
         )}
 
@@ -677,6 +699,7 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
               aria-label={t.git.approvalId}
             />
           </div>
+          {approvalId.trim() && <div role="status" className="text-xs text-slate-300">{t.enterprise.approvalStatus} {statusLabel}</div>}
           <Input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -711,7 +734,7 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
             <Button type="button" variant="secondary" onClick={requestApproval} disabled={requesting}>
               {t.git.requestApproval}
             </Button>
-            <Button type="submit" disabled={submitting || !approvalId.trim()}>
+            <Button type="submit" disabled={submitting || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected'}>
               {target === 'pr' ? t.git.submitPr : t.git.submitIssue}
             </Button>
           </div>

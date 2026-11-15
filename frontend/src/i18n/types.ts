@@ -272,6 +272,21 @@ export interface Translations {
     revokeSuccess: string
     rotatedToken: string
     rotatedTokenHint: string
+    approvalStatus: string
+    statusPending: string
+    statusApproved: string
+    statusRejected: string
+    statusUnknown: string
+    optionalAgent: string
+    optionalSession: string
+    noSelection: string
+    deviceRegistered: string
+    deviceToken: string
+    divisionGroups: string
+    unassignedDivision: string
+    executionTraces: string
+    noTraces: string
+    tracesUnavailable: string
     revokeFailed: string
     guardTitle: string
     guardPlaceholder: string
