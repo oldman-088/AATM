@@ -10,10 +10,10 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_current_user_optional
+from app.api.deps import get_current_user_optional, require_role
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
@@ -22,6 +22,7 @@ from app.models import Agent, AuditLog, ExecutionDevice, Task, User, WorkspaceAr
 from app.orchestration.scheduler import PRIORITY_WEIGHT, task_scheduler
 from app.runtime.device_auth import issue_device_token, using_default_secret, verify_device_token
 from app.runtime.temporal import to_naive_utc
+from app.schemas.common import DeviceTokenRevokeResponse
 
 router = APIRouter(tags=["multi-device-execution"])
 
@@ -162,37 +163,42 @@ async def register_worker_device(
     }
 
 
-@router.post("/devices/{device_id}/revoke")
+@router.post("/devices/{device_id}/revoke", response_model=DeviceTokenRevokeResponse)
 async def revoke_device_token(
     device_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin", "operator")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Revoke one device's current token version and mint its replacement for the operator."""
-    device = await db.get(ExecutionDevice, device_id)
-    if device is None:
+    """Atomically revoke prior device tokens; only admins and operators may rotate them."""
+    result = await db.execute(
+        update(ExecutionDevice)
+        .where(ExecutionDevice.id == device_id)
+        .values(token_version=ExecutionDevice.token_version + 1)
+        .returning(ExecutionDevice.token_version)
+    )
+    token_version = result.scalar_one_or_none()
+    if token_version is None:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    previous_version = device.token_version
-    device.token_version = previous_version + 1
+    previous_version = token_version - 1
     db.add(
         AuditLog(
             actor=user.email,
             action="device.token_revoked",
             resource_type="execution_device",
             resource_id=device_id,
-            details={"previous_token_version": previous_version, "token_version": device.token_version},
+            details={"previous_token_version": previous_version, "token_version": token_version},
         )
     )
     await db.commit()
     await event_bus.emit(
         "device.token_revoked",
-        {"device_id": device.id, "token_version": device.token_version, "actor": user.email},
+        {"device_id": device_id, "token_version": token_version, "actor": user.email},
     )
     return {
-        "id": device.id,
-        "token_version": device.token_version,
-        "device_token": issue_device_token(device.id, device.token_version),
+        "id": device_id,
+        "token_version": token_version,
+        "device_token": issue_device_token(device_id, token_version),
     }
 
 

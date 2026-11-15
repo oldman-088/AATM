@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -13,18 +14,33 @@ from alembic import command
 from app.browser.manager import browser_manager
 from app.core.config import get_settings
 from app.core.events import event_bus
+from app.core.security import create_access_token, hash_password
 from app.db.base import Base, utcnow
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
-from app.models import AIProvider, AuditLog, ProviderUsageLog
+from app.models import (
+    Agent,
+    AgentMessage,
+    AIProvider,
+    AuditLog,
+    ExecutionDevice,
+    Project,
+    ProviderUsageLog,
+    Task,
+    User,
+    WorkspaceArtifact,
+)
 from app.providers.base import ProviderResponse
 from app.providers.router import provider_router
 from app.runtime.device_auth import issue_device_token, verify_device_token
 from app.schemas.common import (
+    DeviceTokenRevokeResponse,
+    GitHubBranchCreateRequest,
     GitHubIssueCreateRequest,
     GitHubPRCreateRequest,
     ProviderTestRequest,
+    ProviderUsageResponse,
     validate_credential_ref,
 )
 
@@ -57,6 +73,22 @@ async def auth_headers(client: AsyncClient):
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
+async def _headers_for_role(role: str) -> dict[str, str]:
+    email = f"round2-{role}-device-revoke@example.test"
+    async with AsyncSessionLocal() as db:
+        db.add(
+            User(
+                email=email,
+                full_name=f"Round 2 {role.title()}",
+                password_hash=hash_password("test-only-password"),
+                role=role,
+            )
+        )
+        await db.commit()
+    token = create_access_token(subject=email, role=role)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _pattern_values(openapi: dict, component: str, field: str) -> set[str]:
     pattern = openapi["components"]["schemas"][component]["properties"][field]["pattern"]
     assert pattern.startswith("^(") and pattern.endswith(")$")
@@ -65,7 +97,7 @@ def _pattern_values(openapi: dict, component: str, field: str) -> set[str]:
 
 async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient):
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    assert contract["version"] == "2.0.0"
+    assert contract["version"] == "2.1.0"
     assert contract["api_prefix"] == "/api/v1"
 
     response = await client.get("/openapi.json")
@@ -82,7 +114,12 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
         "/api/v1/providers",
         "/api/v1/browsers/{profile_id}/navigate",
         "/api/v1/devices",
+        "/api/v1/devices/{device_id}/revoke",
         "/api/v1/github/repos",
+        "/api/v1/github/branches",
+        "/api/v1/traces",
+        "/api/v1/providers/usage",
+        "/api/v1/providers/{provider_id}/test",
     }.issubset(paths)
     assert all(methods for methods in paths.values())
 
@@ -98,6 +135,7 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     }
     for enum_name, expected_values in expected_v2_enums.items():
         assert enums[enum_name] == expected_values
+    assert "branch" in enums["approval_types"]
 
     openapi_enum_fields = {
         "approval_types": ("ApprovalCreate", "action_type"),
@@ -111,6 +149,60 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     }
     for enum_name, (component, field) in openapi_enum_fields.items():
         assert _pattern_values(openapi, component, field) == set(enums[enum_name])
+
+    operations = contract["operations"]
+    assert operations["device_token_revoke"]["operator_roles"] == ["admin", "operator"]
+    revoke_schema = operations["device_token_revoke"]["response"]
+    assert revoke_schema["required"] == ["id", "token_version", "device_token"]
+    assert revoke_schema["additionalProperties"] is False
+    assert set(operations["providers_usage"]["response"]["required"]) == {
+        "budget_summary",
+        "summary",
+        "logs",
+    }
+    assert set(operations["providers_usage"]["response"]["properties"]["budget_summary"]["required"]) == {
+        "global_daily_spend_usd",
+        "global_monthly_spend_usd",
+        "daily_limit_usd",
+        "monthly_limit_usd",
+        "daily_remaining_usd",
+        "monthly_remaining_usd",
+    }
+    provider_test_request = operations["provider_test"]["request"]
+    assert provider_test_request["required"] == []
+    assert provider_test_request["properties"]["agent_id"] == {
+        "type": ["string", "null"],
+        "default": None,
+    }
+    assert provider_test_request["properties"]["session_id"] == {
+        "type": ["string", "null"],
+        "default": None,
+    }
+    trace_operation = operations["execution_traces"]
+    assert trace_operation["path"] == "/api/v1/traces"
+    assert set(trace_operation["query"]) == {"agent_id", "project_id", "limit"}
+    trace_sources = trace_operation["response"]["properties"]["traces"]["items"]["properties"]["source"]["enum"]
+    assert set(trace_sources) == {"audit_log", "provider_usage_log", "workspace_artifact", "agent_message"}
+
+    expected_github_requests = {
+        "github_branch_create": {"approval_id", "repo", "branch_name", "from_branch"},
+        "github_pr_create": {"approval_id", "repo", "title", "body", "head", "base", "draft"},
+        "github_issue_create": {"approval_id", "repo", "title", "body", "labels", "assignees"},
+    }
+    for operation_name, expected_fields in expected_github_requests.items():
+        operation_request = operations[operation_name]["request"]
+        assert "approval_id" in operation_request["required"]
+        assert set(operation_request["properties"]) == expected_fields
+
+    revoke_schema_in_openapi = openapi["components"]["schemas"]["DeviceTokenRevokeResponse"]
+    assert set(revoke_schema_in_openapi["required"]) == {"id", "token_version", "device_token"}
+    assert revoke_schema_in_openapi["additionalProperties"] is False
+    usage_schema_in_openapi = openapi["components"]["schemas"]["ProviderUsageResponse"]
+    assert "budget_summary" in usage_schema_in_openapi["properties"]
+    provider_test_schema = openapi["components"]["schemas"]["ProviderTestRequest"]["properties"]
+    assert provider_test_schema["agent_id"].get("anyOf") or provider_test_schema["agent_id"].get("type") == "string"
+    assert provider_test_schema["session_id"].get("anyOf") or provider_test_schema["session_id"].get("type") == "string"
+    assert "branch" in _pattern_values(openapi, "ApprovalCreate", "action_type")
 
     browser_engines = await client.get("/api/v1/browsers/engines")
     assert browser_engines.status_code == 200
@@ -170,6 +262,12 @@ async def test_browser_navigation_maps_value_error_to_http_400(client: AsyncClie
 
 
 def test_github_write_schemas_require_approval_and_validate_payloads():
+    branch = GitHubBranchCreateRequest(
+        approval_id="approval-branch-001",
+        repo="example/project",
+        branch_name="feature/contracts",
+        from_branch="main",
+    )
     pull_request = GitHubPRCreateRequest(
         approval_id="approval-pr-001",
         repo="example/project",
@@ -188,13 +286,38 @@ def test_github_write_schemas_require_approval_and_validate_payloads():
         assignees=["worker-4"],
     )
 
+    assert branch.approval_id == "approval-branch-001"
+    assert branch.repo == "example/project"
+    assert branch.branch_name == "feature/contracts"
+    assert branch.from_branch == "main"
     assert pull_request.approval_id == "approval-pr-001"
     assert pull_request.repo == "example/project"
     assert pull_request.draft is True
     assert issue.approval_id == "approval-issue-001"
     assert issue.labels == ["backend", "approved"]
-    assert "approval_id" in GitHubPRCreateRequest.model_fields
-    assert "approval_id" in GitHubIssueCreateRequest.model_fields
+    assert set(GitHubBranchCreateRequest.model_fields) == {
+        "approval_id",
+        "repo",
+        "branch_name",
+        "from_branch",
+    }
+    assert set(GitHubPRCreateRequest.model_fields) == {
+        "approval_id",
+        "repo",
+        "title",
+        "body",
+        "head",
+        "base",
+        "draft",
+    }
+    assert set(GitHubIssueCreateRequest.model_fields) == {
+        "approval_id",
+        "repo",
+        "title",
+        "body",
+        "labels",
+        "assignees",
+    }
 
     with pytest.raises(ValidationError):
         GitHubPRCreateRequest(
@@ -317,6 +440,110 @@ async def test_github_write_endpoints_enforce_approval_gate(client: AsyncClient,
     assert issue.json()["ok"] is True
 
 
+async def test_github_branch_creation_requires_matching_approval_and_allowlist(
+    client: AsyncClient, auth_headers, monkeypatch
+):
+    from app.git_workflows.manager import git_workflow_manager
+
+    gh_calls: list[list[str]] = []
+
+    def fake_run_gh(args, cwd=None):
+        gh_calls.append(args)
+        if any("/git/ref/heads/" in arg for arg in args):
+            return 0, "a" * 40
+        return 0, '{"ref":"refs/heads/feature/approved-branch"}'
+
+    monkeypatch.setattr(git_workflow_manager.github_client, "_run_gh", fake_run_gh)
+    request_body = {
+        "repo": "example/project",
+        "branch_name": "feature/approved-branch",
+        "from_branch": "main",
+    }
+    pending_approval = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "action_type": "branch",
+            "title": "Create approved feature branch",
+            "description": "Test approval-gated branch creation",
+            "payload": request_body,
+        },
+    )
+    assert pending_approval.status_code == 201
+    approval_id = pending_approval.json()["id"]
+    blocked_pending = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={"approval_id": approval_id, **request_body},
+    )
+    assert blocked_pending.status_code == 403
+    assert gh_calls == []
+
+    decision = await client.post(
+        f"/api/v1/approvals/{approval_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "review_note": "Approved for test"},
+    )
+    assert decision.status_code == 200
+    created = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={"approval_id": approval_id, **request_body},
+    )
+    assert created.status_code == 201
+    assert created.json()["ok"] is True
+    assert created.json()["allowed"] is True
+    assert created.json()["branch_name"] == request_body["branch_name"]
+    assert len(gh_calls) == 2
+
+    mismatched = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": approval_id,
+            "repo": request_body["repo"],
+            "branch_name": "feature/not-approved",
+            "from_branch": request_body["from_branch"],
+        },
+    )
+    assert mismatched.status_code == 403
+    assert len(gh_calls) == 2
+
+    blocked_repo = "not-allowed/project"
+    denied_approval = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "action_type": "branch",
+            "title": "Disallowed repository branch",
+            "description": "Must be denied by repository policy",
+            "payload": {
+                "repo": blocked_repo,
+                "branch_name": "feature/disallowed-repo",
+                "from_branch": "main",
+            },
+        },
+    )
+    denied_id = denied_approval.json()["id"]
+    await client.post(
+        f"/api/v1/approvals/{denied_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved"},
+    )
+    denied = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": denied_id,
+            "repo": blocked_repo,
+            "branch_name": "feature/disallowed-repo",
+            "from_branch": "main",
+        },
+    )
+    assert denied.status_code == 403
+    assert len(gh_calls) == 2
+
+
 async def test_device_token_revocation_invalidates_old_token_and_allows_rotated_token(
     client: AsyncClient, auth_headers
 ):
@@ -350,6 +577,7 @@ async def test_device_token_revocation_invalidates_old_token_and_allows_rotated_
     assert revoked.json()["id"] == device_id
     assert revoked.json()["token_version"] == 2
     assert set(revoked.json()) == {"id", "token_version", "device_token"}
+    assert DeviceTokenRevokeResponse.model_validate(revoked.json()).token_version == 2
     assert (await client.get(status_url, headers=old_headers)).status_code == 401
 
     new_token = revoked.json()["device_token"]
@@ -368,6 +596,78 @@ async def test_device_token_revocation_invalidates_old_token_and_allows_rotated_
             select(AuditLog).where(AuditLog.action == "device.token_revoked", AuditLog.resource_id == device_id)
         )
         assert audit.scalar_one_or_none() is not None
+
+    revoked_again = await client.post(f"/api/v1/devices/{device_id}/revoke", headers=auth_headers)
+    assert revoked_again.status_code == 200
+    assert revoked_again.json()["token_version"] == 3
+    latest_token = revoked_again.json()["device_token"]
+    assert (await client.get(status_url, headers={"X-AATM-Device-Token": new_token})).status_code == 401
+    assert (await client.get(status_url, headers={"X-AATM-Device-Token": latest_token})).status_code == 200
+
+
+async def test_device_token_revoke_requires_admin_or_operator(client: AsyncClient, auth_headers):
+    device_id = "token-revoke-role-v2-test"
+    async with AsyncSessionLocal() as db:
+        db.add(
+            ExecutionDevice(
+                id=device_id,
+                name="Role Guard Device",
+                device_type="remote_server",
+                host_address="127.0.0.8",
+                os_name="Linux",
+            )
+        )
+        await db.commit()
+
+    operator_headers = await _headers_for_role("operator")
+    worker_headers = await _headers_for_role("worker")
+    path = f"/api/v1/devices/{device_id}/revoke"
+    assert (await client.post(path)).status_code == 401
+
+    forbidden = await client.post(path, headers=worker_headers)
+    assert forbidden.status_code == 403
+    assert forbidden.json()["detail"].startswith("Requires role in")
+
+    authorized = await client.post(path, headers=operator_headers)
+    assert authorized.status_code == 200
+    assert authorized.json()["token_version"] == 2
+    assert set(authorized.json()) == {"id", "token_version", "device_token"}
+
+    # The administrator role remains explicitly authorized by the same policy.
+    admin_authorized = await client.post(path, headers=auth_headers)
+    assert admin_authorized.status_code == 200
+    assert admin_authorized.json()["token_version"] == 3
+
+
+async def test_concurrent_device_token_revocations_are_atomic_and_monotonic(client: AsyncClient, auth_headers):
+    device_id = "token-revoke-concurrent-v2-test"
+    registered = await client.post(
+        f"/api/v1/devices/{device_id}/register",
+        headers=auth_headers,
+        json={
+            "name": "Concurrent Revocation Device",
+            "device_type": "remote_server",
+            "host_address": "127.0.0.9",
+            "os_name": "Linux",
+        },
+    )
+    assert registered.status_code == 200
+
+    path = f"/api/v1/devices/{device_id}/revoke"
+    responses = await asyncio.gather(*(client.post(path, headers=auth_headers) for _ in range(4)))
+    assert [response.status_code for response in responses] == [200] * 4
+    versions = sorted(response.json()["token_version"] for response in responses)
+    assert versions == [2, 3, 4, 5]
+    assert all(set(response.json()) == {"id", "token_version", "device_token"} for response in responses)
+
+    status_url = f"/api/v1/devices/{device_id}/status"
+    for response in responses:
+        token = response.json()["device_token"]
+        result = await client.get(status_url, headers={"X-AATM-Device-Token": token})
+        if response.json()["token_version"] == max(versions):
+            assert result.status_code == 200
+        else:
+            assert result.status_code == 401
 
 
 def _upgrade_sqlite_database(database_path: Path, revision: str, monkeypatch) -> None:
@@ -465,6 +765,8 @@ async def test_provider_usage_includes_budget_headroom(client: AsyncClient):
     response = await client.get("/api/v1/providers/usage")
     assert response.status_code == 200
     assert "summary" in response.json() and "logs" in response.json()
+    typed_usage = ProviderUsageResponse.model_validate(response.json())
+    assert typed_usage.budget_summary.daily_limit_usd >= 0
     budget = response.json()["budget_summary"]
     assert budget == expected_budget
     assert budget["global_daily_spend_usd"] >= 2.5
@@ -515,3 +817,116 @@ async def test_provider_test_forwards_agent_and_session_context(client: AsyncCli
     assert request.metadata["session_id"] == "provider-session-v2-test"
     assert captured["preferred_provider_id"] == "arena-agent"
     assert ProviderTestRequest(agent_id="worker-1", session_id="session-1").agent_id == "worker-1"
+    default_request = ProviderTestRequest()
+    assert default_request.agent_id is None and default_request.session_id is None
+
+
+async def test_traces_combine_real_sources_filter_and_omit_credentials(client: AsyncClient, auth_headers):
+    project_id = "trace-project-v2-test"
+    agent_id = "trace-agent-v2-test"
+    task_id = "trace-task-v2-test"
+    trace_marker = "trace-secret-value-do-not-return"
+
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Project(
+                id=project_id,
+                name="Trace Contract Project",
+                slug="trace-contract-project",
+                description="",
+            )
+        )
+        db.add(
+            Agent(
+                id=agent_id,
+                name="Trace Test Agent",
+                role="worker",
+                specialty="trace test",
+            )
+        )
+        await db.flush()
+        db.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                assigned_agent_id=agent_id,
+                title="Trace source task",
+            )
+        )
+        db.add(
+            AuditLog(
+                actor=f"trace-auditor token={trace_marker}",
+                action="trace.task_started",
+                resource_type="task",
+                resource_id=task_id,
+                details={"agent_id": agent_id, "api_key": trace_marker},
+            )
+        )
+        db.add(
+            ProviderUsageLog(
+                provider_id="arena-agent",
+                agent_id=agent_id,
+                task_id=task_id,
+                model_name="trace-test-model",
+                input_tokens=11,
+                output_tokens=7,
+                estimated_cost_usd=0.02,
+                latency_ms=12.0,
+                success=False,
+                error_message=f"Authorization: Bearer {trace_marker}",
+            )
+        )
+        db.add(
+            WorkspaceArtifact(
+                agent_id=agent_id,
+                project_id=project_id,
+                task_id=task_id,
+                relative_path=f"reports/token={trace_marker}.txt",
+                action="create",
+                summary=f"api_key={trace_marker}",
+                exit_code=0,
+            )
+        )
+        db.add(
+            AgentMessage(
+                task_id=task_id,
+                project_id=project_id,
+                sender_id=agent_id,
+                recipient_id="manager-0",
+                instructions=f"Authorization: Bearer {trace_marker}",
+                response_payload={"token": trace_marker},
+            )
+        )
+        await db.commit()
+
+    response = await client.get(
+        "/api/v1/traces",
+        headers=auth_headers,
+        params={"agent_id": agent_id, "project_id": project_id},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 4
+    assert {trace["source"] for trace in payload["traces"]} == {
+        "audit_log",
+        "provider_usage_log",
+        "workspace_artifact",
+        "agent_message",
+    }
+    assert all(trace["agent_id"] == agent_id for trace in payload["traces"])
+    assert all(trace["project_id"] == project_id for trace in payload["traces"])
+    audit_trace = next(trace for trace in payload["traces"] if trace["source"] == "audit_log")
+    artifact_trace = next(trace for trace in payload["traces"] if trace["source"] == "workspace_artifact")
+    assert "[REDACTED]" in audit_trace["actor"]
+    assert "[REDACTED]" in artifact_trace["relative_path"]
+    assert trace_marker not in json.dumps(payload)
+    assert all("details" not in trace and "error_message" not in trace for trace in payload["traces"])
+
+    missing = await client.get(
+        "/api/v1/traces",
+        headers=auth_headers,
+        params={"agent_id": "missing-trace-agent", "project_id": project_id},
+    )
+    assert missing.status_code == 200
+    assert missing.json()["traces"] == []
+    assert missing.json()["count"] == 0

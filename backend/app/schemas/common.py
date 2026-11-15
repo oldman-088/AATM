@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 _CREDENTIAL_REF_PATTERN = re.compile(r"env:[A-Z_][A-Z0-9_]*")
 CREDENTIAL_REF_ERROR = "credential_ref must reference an environment variable (env:NAME); inline credentials are not accepted."
@@ -127,6 +127,49 @@ class ProviderTestRequest(BaseModel):
     session_id: str | None = None
 
 
+class ProviderUsageBudgetSummary(BaseModel):
+    global_daily_spend_usd: float
+    global_monthly_spend_usd: float
+    daily_limit_usd: float
+    monthly_limit_usd: float
+    daily_remaining_usd: float
+    monthly_remaining_usd: float
+
+
+class ProviderUsageTotals(BaseModel):
+    total_input_tokens: int
+    total_output_tokens: int
+    total_estimated_cost_usd: float
+
+
+class ProviderUsageLogEntry(BaseModel):
+    id: str
+    provider_id: str
+    agent_id: str | None
+    model_name: str
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_usd: float
+    latency_ms: float
+    success: bool
+    error_message: str | None
+    created_at: datetime
+
+
+class ProviderUsageResponse(BaseModel):
+    budget_summary: ProviderUsageBudgetSummary
+    summary: ProviderUsageTotals
+    logs: list[ProviderUsageLogEntry]
+
+
+class DeviceTokenRevokeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    token_version: int = Field(ge=1)
+    device_token: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class BrowserLaunchRequest(BaseModel):
     mode: str = Field(default="background", pattern="^(visible|background)$")
     url: str | None = None
@@ -227,7 +270,7 @@ class ChatSendRequest(BaseModel):
 
 class ApprovalCreate(BaseModel):
     project_id: str | None = None
-    action_type: str = Field(pattern="^(spend|deploy|merge|delete|credential|security|irreversible)$")
+    action_type: str = Field(pattern="^(branch|spend|deploy|merge|delete|credential|security|irreversible)$")
     title: str
     description: str
     estimated_cost_usd: float | None = None
@@ -245,6 +288,11 @@ class _GitHubWriteApprovalRequest(BaseModel):
         description="ID of an approved governance request; integrations must verify approval before writing.",
     )
     repo: str = Field(pattern=r"^[^/\s]+/[^/\s]+$", description="GitHub repository in owner/name form.")
+
+
+class GitHubBranchCreateRequest(_GitHubWriteApprovalRequest):
+    branch_name: str = Field(min_length=1, max_length=255)
+    from_branch: str = Field(min_length=1, max_length=255)
 
 
 class GitHubPRCreateRequest(_GitHubWriteApprovalRequest):
