@@ -62,7 +62,7 @@ The canonical machine-readable contract is [`schemas.json`](schemas.json), curre
 
 ## Browser workflows and text extraction
 
-- `POST /api/v1/browsers/{profile_id}/workflow` accepts an engine (default `automa`), a list of workflow step objects, and an optional `agent_id`. The engine must be registered; disallowed or invalid workflow steps fail closed with HTTP 400.
+- `POST /api/v1/browsers/{profile_id}/workflow` accepts an engine (default `automa`), a list of workflow step objects, and an optional `agent_id` (when supplied, it must match the profile's assigned agent). The engine must be registered; disallowed or invalid workflow steps fail closed with HTTP 400.
 - `POST /api/v1/browsers/{profile_id}/extract-text` accepts a selector and `max_chars` (default 2000). Extraction is policy-checked and applies the browser manager's sensitive-text redaction.
 
 ## GitHub pull-request reviews and webhooks

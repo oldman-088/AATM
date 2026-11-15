@@ -298,13 +298,18 @@ async def execute_browser_workflow(
     engine = BROWSER_ENGINE_REGISTRY.get(body.engine)
     if engine is None:
         raise HTTPException(status_code=400, detail=f"Unsupported browser workflow engine '{body.engine}'.")
+    workflow_actor = user.email
+    if body.agent_id is not None:
+        if body.agent_id != profile.agent_id:
+            raise HTTPException(status_code=403, detail="Agent ID does not match the browser profile")
+        workflow_actor = body.agent_id
     try:
         result = await engine.execute_workflow(
             db,
             profile,
             body.steps,
             manager=browser_manager,
-            actor=user.email,
+            actor=workflow_actor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None

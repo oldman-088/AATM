@@ -241,7 +241,7 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     assert workflow_operation["path"] == "/api/v1/browsers/{profile_id}/workflow"
     assert workflow_operation["request"]["properties"]["engine"]["default"] == "automa"
     assert "agent_id" in workflow_operation["request"]["properties"]
-    assert "400" in workflow_operation["error_responses"]
+    assert set(workflow_operation["error_responses"]) == {"400", "403"}
     extract_operation = operations["browser_extract_text"]
     assert extract_operation["path"] == "/api/v1/browsers/{profile_id}/extract-text"
     assert extract_operation["request"]["properties"]["max_chars"]["default"] == 2000
@@ -728,8 +728,16 @@ async def test_browser_workflow_and_extract_text_routes_fail_closed(client: Asyn
     assert calls["workflow"]["profile"].id == profile_id
     assert calls["workflow"]["steps"] == [{"type": "navigate", "url": "https://example.com"}]
     assert calls["workflow"]["manager"] is browser_manager
-    assert calls["workflow"]["actor"] == "admin@aatm.local"
+    assert calls["workflow"]["actor"] == "worker-1"
     assert BrowserWorkflowRequest(steps=[]).engine == "automa"
+
+    mismatched_agent = await client.post(
+        f"/api/v1/browsers/{profile_id}/workflow",
+        headers=auth_headers,
+        json={"steps": [], "agent_id": "worker-2"},
+    )
+    assert mismatched_agent.status_code == 403
+    assert calls["workflow"]["actor"] == "worker-1"
 
     rejected = await client.post(
         f"/api/v1/browsers/{profile_id}/workflow",

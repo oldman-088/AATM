@@ -174,7 +174,10 @@
           "agent_id": {"type": ["string", "null"], "default": null}
         }
       },
-      "error_responses": {"400": "Unsupported engine or disallowed/invalid workflow steps."}
+      "error_responses": {
+        "400": "Unsupported engine or disallowed/invalid workflow steps.",
+        "403": "Supplied agent_id does not match the browser profile assignment."
+      }
     },
     "browser_extract_text": {
       "method": "POST",
