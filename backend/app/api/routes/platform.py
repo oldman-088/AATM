@@ -1,18 +1,29 @@
+import hashlib
+import hmac
+import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
 from app.browser.engines import BROWSER_ENGINE_REGISTRY, validate_userscript_policy
+from app.core.config import get_settings
+from app.core.events import event_bus
 from app.core.security import mask_credential_ref, sanitize_untrusted_content
 from app.db.base import utcnow
 from app.db.session import get_db
-from app.employees.catalog import ROLE_TEMPLATES, create_dynamic_employee
+from app.employees.catalog import (
+    ROLE_TEMPLATES,
+    analyze_team_skill_gaps,
+    create_dynamic_employee,
+    provision_missing_specialists,
+)
 from app.git_workflows.manager import git_workflow_manager
 from app.github_client.client import github_client, sanitize_cli_output
 from app.models import (
@@ -20,6 +31,7 @@ from app.models import (
     ApprovalRequest,
     AuditLog,
     ExecutionDevice,
+    Notification,
     ProviderAccount,
     ProviderSession,
     ProviderUsageLog,
@@ -36,8 +48,10 @@ from app.schemas.common import (
     DeviceRegisterRequest,
     EmergencyStopRequest,
     EmployeeCreate,
+    EmployeeSkillGapRequest,
     GitHubBranchCreateRequest,
     GitHubIssueCreateRequest,
+    GitHubPRCommentRequest,
     GitHubPRCreateRequest,
     GitWorktreeCreateRequest,
     ProviderAccountCreate,
@@ -49,6 +63,7 @@ from app.schemas.common import (
 )
 
 router = APIRouter(tags=["enterprise-platform"])
+sanitize_untrusted_text = sanitize_untrusted_content
 
 _TRACE_BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*")
 _TRACE_SECRET_RE = re.compile(
@@ -100,6 +115,17 @@ def _raise_git_worktree_error(result: dict[str, Any]) -> None:
     raise HTTPException(status_code=403 if approval_failure else 400, detail=detail)
 
 
+def _sanitize_github_webhook_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    sanitized = sanitize_untrusted_text(text[:5_000], source="github_webhook")
+    return sanitize_cli_output(str(sanitized.get("quarantined_text") or ""))[:6_000]
+
+
 @router.get("/employees/templates")
 async def list_role_templates():
     return ROLE_TEMPLATES
@@ -149,6 +175,29 @@ async def create_employee_endpoint(
         "autonomy_mode": emp.autonomy_mode,
         "status": emp.status,
     }
+
+
+@router.post("/employees/skill-gaps")
+async def analyze_employee_skill_gaps(
+    body: EmployeeSkillGapRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await analyze_team_skill_gaps(db, body.required_skills, divisions=body.divisions)
+
+
+@router.post("/employees/provision-specialists", status_code=201)
+async def provision_employee_specialists(
+    body: EmployeeSkillGapRequest,
+    user: User = Depends(require_role("admin", "operator")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await provision_missing_specialists(
+        db,
+        body.required_skills,
+        divisions=body.divisions,
+        actor=user.email,
+    )
 
 
 @router.post("/employees/{agent_id}/replace")
@@ -714,6 +763,142 @@ async def get_execution_traces(
             "project_id": _redact_trace_text(project_id),
         },
     }
+
+
+@router.post("/github/prs/{pr_number}/comments", status_code=201)
+async def comment_on_github_pull_request(
+    pr_number: int,
+    body: GitHubPRCommentRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if pr_number < 1:
+        raise HTTPException(status_code=400, detail="Pull request number must be positive")
+    if not body.approval_id:
+        raise HTTPException(status_code=403, detail="An approved pull request comment/review request is required")
+
+    approval = await db.get(ApprovalRequest, body.approval_id)
+    if approval is None or approval.status != "approved":
+        raise HTTPException(status_code=403, detail="An approved pull request comment/review request is required")
+    approved_payload = approval.payload if isinstance(approval.payload, dict) else {}
+    approved_repo = approved_payload.get("repo")
+    try:
+        approved_pr_number = int(approved_payload.get("pr_number"))
+    except (TypeError, ValueError):
+        approved_pr_number = None
+    if (
+        not isinstance(approved_repo, str)
+        or approved_repo.strip().casefold() != body.repo.strip().casefold()
+        or approved_pr_number != pr_number
+        or approved_payload.get("body") != body.body
+        or str(approved_payload.get("event") or "").strip().upper() != body.event
+    ):
+        raise HTTPException(status_code=403, detail="Approval does not match the requested pull request comment/review")
+
+    result = github_client.comment_on_pull_request(
+        repo=body.repo,
+        pr_number=pr_number,
+        body=body.body,
+        event=body.event,
+        approval=approval,
+    )
+    if not result.get("allowed"):
+        raise HTTPException(status_code=403, detail=result.get("error") or "Pull request comment/review blocked by policy")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Pull request comment/review failed")
+
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="github.pr_review",
+            resource_type="github_pull_request",
+            resource_id=str(pr_number),
+            details={
+                "repo": body.repo,
+                "event": body.event,
+                "approval_id": body.approval_id,
+                "ok": True,
+            },
+        )
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/github/webhooks", status_code=202)
+async def receive_github_webhook(
+    request: Request,
+    x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
+    x_github_event: str | None = Header(default=None, alias="X-GitHub-Event"),
+    x_github_delivery: str | None = Header(default=None, alias="X-GitHub-Delivery"),
+    db: AsyncSession = Depends(get_db),
+):
+    settings = get_settings()
+    signing_key = getattr(settings, "GITHUB_WEBHOOK_SECRET", "") or os.getenv("AATM_GITHUB_WEBHOOK_SECRET", "")
+    if not isinstance(signing_key, str) or not signing_key.strip():
+        raise HTTPException(status_code=503, detail="GitHub webhook verification is not configured")
+
+    raw_body = await request.body()
+    expected_signature = "sha256=" + hmac.new(signing_key.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    if (
+        not x_hub_signature_256
+        or re.fullmatch(r"sha256=[0-9a-fA-F]{64}", x_hub_signature_256) is None
+        or not hmac.compare_digest(x_hub_signature_256, expected_signature)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
+
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="GitHub webhook payload must be valid JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="GitHub webhook payload must be a JSON object")
+
+    repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+    pull_request = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else {}
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+    subject = pull_request or issue
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    raw_number = subject.get("number")
+    try:
+        number = int(raw_number) if not isinstance(raw_number, bool) and raw_number is not None else None
+    except (TypeError, ValueError):
+        number = None
+
+    delivery_fingerprint = hashlib.sha256((x_github_delivery or hashlib.sha256(raw_body).hexdigest()).encode()).hexdigest()
+    safe_payload = {
+        "delivery_id": _sanitize_github_webhook_text(x_github_delivery),
+        "event": _sanitize_github_webhook_text(x_github_event or "unknown"),
+        "action": _sanitize_github_webhook_text(payload.get("action")),
+        "repository": _sanitize_github_webhook_text(repository.get("full_name") or repository.get("name")),
+        "sender": _sanitize_github_webhook_text(sender.get("login")),
+        "number": number,
+        "title": _sanitize_github_webhook_text(subject.get("title")),
+    }
+    notification_title = f"GitHub webhook received: {safe_payload['event']}"[:200]
+    notification_message = "\n".join(
+        f"{key}: {value}" for key, value in safe_payload.items() if value not in (None, "")
+    )[:4_000]
+    db.add(
+        AuditLog(
+            actor="github-webhook",
+            action="github.webhook",
+            resource_type="github_webhook",
+            resource_id=delivery_fingerprint[:64],
+            details=safe_payload,
+        )
+    )
+    db.add(
+        Notification(
+            category="github",
+            severity="info",
+            title=notification_title,
+            message=notification_message,
+        )
+    )
+    await db.commit()
+    await event_bus.emit("github.webhook", safe_payload)
+    return {"accepted": True, "delivery_id": safe_payload["delivery_id"], "event": safe_payload["event"]}
 
 
 @router.post("/github/prs", status_code=201)
