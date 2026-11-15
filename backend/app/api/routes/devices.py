@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user_optional, require_role
+from app.api.deps import get_current_user, get_current_user_optional
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
@@ -165,10 +165,10 @@ async def register_worker_device(
 @router.post("/devices/{device_id}/revoke")
 async def revoke_device_token(
     device_id: str,
-    user: User = Depends(require_role("admin")),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Revoke all currently issued tokens for one device; an operator must re-register it."""
+    """Revoke one device's current token version and mint its replacement for the operator."""
     device = await db.get(ExecutionDevice, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -185,11 +185,14 @@ async def revoke_device_token(
         )
     )
     await db.commit()
+    await event_bus.emit(
+        "device.token_revoked",
+        {"device_id": device.id, "token_version": device.token_version, "actor": user.email},
+    )
     return {
-        "device_id": device.id,
+        "id": device.id,
         "token_version": device.token_version,
         "device_token": issue_device_token(device.id, device.token_version),
-        "revoked": True,
     }
 
 

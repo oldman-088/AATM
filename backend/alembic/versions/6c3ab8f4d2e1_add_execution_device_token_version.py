@@ -18,11 +18,15 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "execution_devices",
-        sa.Column("token_version", sa.Integer(), server_default="1", nullable=False),
-    )
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("execution_devices")}
+    if "token_version" not in columns:
+        op.add_column(
+            "execution_devices",
+            sa.Column("token_version", sa.Integer(), server_default="1", nullable=False),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("execution_devices", "token_version")
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("execution_devices")}
+    if "token_version" in columns:
+        op.drop_column("execution_devices", "token_version")

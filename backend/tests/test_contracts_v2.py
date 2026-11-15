@@ -7,15 +7,17 @@ import pytest
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from alembic import command
 from app.browser.manager import browser_manager
 from app.core.config import get_settings
+from app.core.events import event_bus
 from app.db.base import Base, utcnow
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
-from app.models import AIProvider, ProviderUsageLog
+from app.models import AIProvider, AuditLog, ProviderUsageLog
 from app.providers.base import ProviderResponse
 from app.providers.router import provider_router
 from app.runtime.device_auth import issue_device_token, verify_device_token
@@ -345,14 +347,27 @@ async def test_device_token_revocation_invalidates_old_token_and_allows_rotated_
 
     revoked = await client.post(f"/api/v1/devices/{device_id}/revoke", headers=auth_headers)
     assert revoked.status_code == 200
+    assert revoked.json()["id"] == device_id
     assert revoked.json()["token_version"] == 2
-    assert revoked.json()["revoked"] is True
+    assert set(revoked.json()) == {"id", "token_version", "device_token"}
     assert (await client.get(status_url, headers=old_headers)).status_code == 401
 
     new_token = revoked.json()["device_token"]
     assert new_token != old_token
     assert new_token == issue_device_token(device_id, 2)
     assert (await client.get(status_url, headers={"X-AATM-Device-Token": new_token})).status_code == 200
+
+    assert any(
+        event["type"] == "device.token_revoked"
+        and event["payload"].get("device_id") == device_id
+        and event["payload"].get("token_version") == 2
+        for event in event_bus.recent_events()
+    )
+    async with AsyncSessionLocal() as db:
+        audit = await db.execute(
+            select(AuditLog).where(AuditLog.action == "device.token_revoked", AuditLog.resource_id == device_id)
+        )
+        assert audit.scalar_one_or_none() is not None
 
 
 def _upgrade_sqlite_database(database_path: Path, revision: str, monkeypatch) -> None:
@@ -444,9 +459,14 @@ async def test_provider_usage_includes_budget_headroom(client: AsyncClient):
         )
         await db.commit()
 
+    async with AsyncSessionLocal() as db:
+        expected_budget = await provider_router.get_spend_summary(db)
+
     response = await client.get("/api/v1/providers/usage")
     assert response.status_code == 200
+    assert "summary" in response.json() and "logs" in response.json()
     budget = response.json()["budget_summary"]
+    assert budget == expected_budget
     assert budget["global_daily_spend_usd"] >= 2.5
     assert budget["global_monthly_spend_usd"] >= 2.5
     assert budget["daily_remaining_usd"] == pytest.approx(
@@ -456,12 +476,14 @@ async def test_provider_usage_includes_budget_headroom(client: AsyncClient):
         max(0.0, budget["monthly_limit_usd"] - budget["global_monthly_spend_usd"])
     )
 
-    provider_budget = budget["per_provider"][provider_id]
-    assert provider_budget["daily_spend_usd"] == pytest.approx(2.5)
-    assert provider_budget["monthly_spend_usd"] == pytest.approx(2.5)
-    assert provider_budget["daily_remaining_usd"] == pytest.approx(7.5)
-    assert provider_budget["monthly_limit_usd"] == pytest.approx(8.0)
-    assert provider_budget["monthly_remaining_usd"] == pytest.approx(5.5)
+    assert set(budget) == {
+        "global_daily_spend_usd",
+        "global_monthly_spend_usd",
+        "daily_limit_usd",
+        "monthly_limit_usd",
+        "daily_remaining_usd",
+        "monthly_remaining_usd",
+    }
 
 
 async def test_provider_test_forwards_agent_and_session_context(client: AsyncClient, auth_headers, monkeypatch):

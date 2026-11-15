@@ -337,7 +337,7 @@ async def register_device(
             "max_concurrent_tasks": existing.max_concurrent_tasks,
             "last_heartbeat": existing.last_heartbeat,
             "registered_at": existing.registered_at,
-            "device_token": issue_device_token(existing.id),
+            "device_token": issue_device_token(existing.id, existing.token_version),
         }
 
     dev = ExecutionDevice(
@@ -368,7 +368,7 @@ async def register_device(
         "max_concurrent_tasks": dev.max_concurrent_tasks,
         "last_heartbeat": dev.last_heartbeat,
         "registered_at": dev.registered_at,
-        "device_token": issue_device_token(dev.id),
+        "device_token": issue_device_token(dev.id, dev.token_version),
     }
 
 

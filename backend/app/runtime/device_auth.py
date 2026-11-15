@@ -27,7 +27,7 @@ def issue_device_token(device_id: str, token_version: int = 1) -> str:
         raise ValueError("device_id and a positive token_version are required")
 
     settings = get_settings()
-    message = f"{device_id}\0{token_version}".encode("utf-8")
+    message = f"{device_id}:v{token_version}".encode("utf-8")
     return hmac.new(settings.SECRET_KEY.encode("utf-8"), message, sha256).hexdigest()
 
 
