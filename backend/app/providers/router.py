@@ -1,17 +1,26 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.models import AIProvider, ProviderUsageLog
+from app.models import Agent, AIProvider, ProviderSession, ProviderUsageLog, SystemSetting
 from app.providers.adapters import build_adapter
-from app.providers.base import ProviderHealth, ProviderRequest, ProviderResponse
+from app.providers.base import (
+    BaseProviderAdapter,
+    ProviderHealth,
+    ProviderRequest,
+    ProviderResponse,
+    validate_credential_ref,
+)
 
 
 class ProviderRouter:
-    """Routes AI requests across enabled providers with budget enforcement, failover & usage logging."""
+    """Routes AI requests across enabled providers with credential indirection, daily/monthly budget caps, failover & usage logging."""
 
     async def check_provider_health(self, db: AsyncSession, provider: AIProvider) -> ProviderHealth:
         adapter = build_adapter(
@@ -36,15 +45,136 @@ class ProviderRouter:
             results.append(await self.check_provider_health(db, p))
         return results
 
-    async def get_daily_spend(self, db: AsyncSession, provider_id: str) -> float:
+    async def get_daily_spend(self, db: AsyncSession, provider_id: str | None = None) -> float:
         since = datetime.now(timezone.utc) - timedelta(hours=24)
-        res = await db.execute(
-            select(func.coalesce(func.sum(ProviderUsageLog.estimated_cost_usd), 0.0)).where(
-                ProviderUsageLog.provider_id == provider_id,
-                ProviderUsageLog.created_at >= since,
-            )
+        stmt = select(func.coalesce(func.sum(ProviderUsageLog.estimated_cost_usd), 0.0)).where(
+            ProviderUsageLog.created_at >= since,
         )
-        return float(res.scalar_one() or 0.0)
+        if provider_id is not None:
+            stmt = stmt.where(ProviderUsageLog.provider_id == provider_id)
+        res = await db.execute(stmt)
+        return round(float(res.scalar_one() or 0.0), 6)
+
+    async def get_monthly_spend(self, db: AsyncSession, provider_id: str | None = None) -> float:
+        now = datetime.now(timezone.utc)
+        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        stmt = select(func.coalesce(func.sum(ProviderUsageLog.estimated_cost_usd), 0.0)).where(
+            ProviderUsageLog.created_at >= month_start,
+        )
+        if provider_id is not None:
+            stmt = stmt.where(ProviderUsageLog.provider_id == provider_id)
+        res = await db.execute(stmt)
+        return round(float(res.scalar_one() or 0.0), 6)
+
+    async def get_budget_limits(self, db: AsyncSession) -> dict[str, float]:
+        settings = get_settings()
+        daily_limit = float(settings.DAILY_BUDGET_USD)
+        monthly_limit = float(settings.MONTHLY_BUDGET_USD)
+        approval_threshold = 5.0
+
+        budget_setting = await db.get(SystemSetting, "budgets")
+        if budget_setting and isinstance(budget_setting.value, dict):
+            if budget_setting.value.get("daily_limit_usd") is not None:
+                daily_limit = float(budget_setting.value["daily_limit_usd"])
+            if budget_setting.value.get("monthly_limit_usd") is not None:
+                monthly_limit = float(budget_setting.value["monthly_limit_usd"])
+            if budget_setting.value.get("require_approval_above_usd") is not None:
+                approval_threshold = float(budget_setting.value["require_approval_above_usd"])
+
+        return {
+            "daily_limit_usd": daily_limit,
+            "monthly_limit_usd": monthly_limit,
+            "require_approval_above_usd": approval_threshold,
+        }
+
+    async def get_spend_summary(self, db: AsyncSession) -> dict[str, float]:
+        limits = await self.get_budget_limits(db)
+        daily_spend = await self.get_daily_spend(db)
+        monthly_spend = await self.get_monthly_spend(db)
+        return {
+            "global_daily_spend_usd": daily_spend,
+            "global_monthly_spend_usd": monthly_spend,
+            "daily_limit_usd": limits["daily_limit_usd"],
+            "monthly_limit_usd": limits["monthly_limit_usd"],
+            "daily_remaining_usd": round(max(0.0, limits["daily_limit_usd"] - daily_spend), 6),
+            "monthly_remaining_usd": round(max(0.0, limits["monthly_limit_usd"] - monthly_spend), 6),
+        }
+
+    async def check_spend_caps(self, db: AsyncSession, provider: AIProvider) -> tuple[bool, str | None]:
+        limits = await self.get_budget_limits(db)
+
+        global_monthly = await self.get_monthly_spend(db)
+        if global_monthly >= limits["monthly_limit_usd"]:
+            return False, f"Global monthly budget cap (${limits['monthly_limit_usd']:.2f}) reached."
+
+        provider_monthly_cap = None
+        if isinstance(provider.config, dict) and provider.config.get("monthly_limit_usd") is not None:
+            try:
+                provider_monthly_cap = float(provider.config["monthly_limit_usd"])
+            except (TypeError, ValueError):
+                provider_monthly_cap = None
+        if provider_monthly_cap is not None and provider_monthly_cap >= 0:
+            provider_monthly = await self.get_monthly_spend(db, provider.id)
+            if provider_monthly >= provider_monthly_cap:
+                return False, f"Provider {provider.id} reached monthly budget cap (${provider_monthly_cap:.2f})."
+
+        global_daily = await self.get_daily_spend(db)
+        if global_daily >= limits["daily_limit_usd"]:
+            return False, f"Global daily budget cap (${limits['daily_limit_usd']:.2f}) reached."
+
+        provider_daily = await self.get_daily_spend(db, provider.id)
+        if provider_daily >= provider.daily_limit_usd:
+            return False, f"Provider {provider.id} reached daily budget cap (${provider.daily_limit_usd:.2f})."
+
+        return True, None
+
+    @staticmethod
+    def _select_model(provider: AIProvider, requested_model: str | None) -> str:
+        if requested_model:
+            if not provider.available_models or requested_model in provider.available_models:
+                return requested_model
+        return provider.default_model
+
+    async def _resolve_employee_session_context(
+        self,
+        db: AsyncSession,
+        req: ProviderRequest,
+    ) -> tuple[dict[str, Any], ProviderSession | None]:
+        """Resolve per-employee ProviderSession.id & account_id into request metadata without overwriting explicit overrides."""
+        merged_meta: dict[str, Any] = dict(req.metadata or {})
+        session: ProviderSession | None = None
+        agent: Agent | None = None
+
+        if req.agent_id:
+            merged_meta.setdefault("agent_id", req.agent_id)
+            agent = await db.get(Agent, req.agent_id)
+
+        explicit_session_id = merged_meta.get("session_id")
+        if explicit_session_id:
+            session = await db.get(ProviderSession, str(explicit_session_id))
+        elif agent and agent.provider_session_id:
+            session = await db.get(ProviderSession, agent.provider_session_id)
+        elif req.agent_id:
+            sess_res = await db.execute(
+                select(ProviderSession)
+                .where(ProviderSession.agent_id == req.agent_id, ProviderSession.status != "closed")
+                .order_by(ProviderSession.created_at.desc())
+                .limit(1)
+            )
+            session = sess_res.scalar_one_or_none()
+
+        if session is not None:
+            merged_meta.setdefault("session_id", session.id)
+            if session.account_id:
+                merged_meta.setdefault("account_id", session.account_id)
+            if session.conversation_id:
+                merged_meta.setdefault("conversation_id", session.conversation_id)
+            if session.project_id:
+                merged_meta.setdefault("project_id", session.project_id)
+        elif agent and agent.provider_account_id:
+            merged_meta.setdefault("account_id", agent.provider_account_id)
+
+        return merged_meta, session
 
     async def route_and_execute(
         self,
@@ -57,23 +187,57 @@ class ProviderRouter:
         )
         providers = list(res.scalars().all())
         if preferred_provider_id:
-            providers.sort(key=lambda p: 0 if p.id == preferred_provider_id else p.priority)
+            providers.sort(key=lambda p: (0 if p.id == preferred_provider_id else 1, p.priority))
+
+        session_meta, employee_session = await self._resolve_employee_session_context(db, req)
 
         last_err = "No enabled AI providers available."
+        budget_blocked = False
+        non_offline_failure = False
+        offline_fallback_candidate: tuple[AIProvider, str, str] | None = None
+
         for p in providers:
-            daily_spend = await self.get_daily_spend(db, p.id)
-            if daily_spend >= p.daily_limit_usd and not req.dry_run:
-                last_err = f"Provider {p.id} reached daily budget cap (${p.daily_limit_usd:.2f})."
+            cred_ok, cred_err = validate_credential_ref(p.credential_ref)
+            if not cred_ok:
+                p.health_status = "degraded"
+                p.last_checked_at = utcnow()
+                await db.commit()
+                last_err = f"Provider {p.id}: {cred_err}"
+                non_offline_failure = True
                 continue
 
+            if not req.dry_run:
+                within_budget, budget_err = await self.check_spend_caps(db, p)
+                if not within_budget:
+                    last_err = budget_err or last_err
+                    budget_blocked = True
+                    non_offline_failure = True
+                    continue
+
+            effective_model = self._select_model(p, req.model)
+            attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
             adapter = build_adapter(
                 p.provider_type,
                 p.id,
                 p.endpoint_url,
                 p.credential_ref,
-                req.model or p.default_model,
+                effective_model,
             )
-            response = await adapter.generate(req)
+            response = await adapter.generate(attempt_req)
+
+            # Ensure response metadata preserves resolved employee session context
+            for key in ("session_id", "account_id", "conversation_id"):
+                if key in session_meta and key not in response.metadata:
+                    response.metadata[key] = session_meta[key]
+
+            is_dry_or_diag = bool(req.dry_run or response.metadata.get("dry_run"))
+            recorded_cost = 0.0 if is_dry_or_diag else response.estimated_cost_usd
+            confirmed_cost = (
+                recorded_cost
+                if (response.success and response.metadata.get("confirmed_usage") and not is_dry_or_diag)
+                else None
+            )
+
             db.add(
                 ProviderUsageLog(
                     provider_id=p.id,
@@ -82,15 +246,31 @@ class ProviderRouter:
                     model_name=response.model,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
-                    estimated_cost_usd=response.estimated_cost_usd,
+                    estimated_cost_usd=recorded_cost,
+                    confirmed_cost_usd=confirmed_cost,
                     latency_ms=response.latency_ms,
                     success=response.success,
                     error_message=response.error_message,
                 )
             )
-            p.health_status = "healthy" if response.success else "degraded"
+            if response.metadata.get("bridge_offline"):
+                p.health_status = "offline"
+            else:
+                p.health_status = "healthy" if response.success else "degraded"
             p.latency_ms = response.latency_ms
             p.last_checked_at = utcnow()
+
+            if employee_session is not None and not is_dry_or_diag:
+                if response.success:
+                    employee_session.message_count += 1
+                    employee_session.last_message_at = utcnow()
+                    employee_session.last_error = None
+                    employee_session.health_score = min(100.0, employee_session.health_score + 5.0)
+                elif not response.metadata.get("bridge_offline"):
+                    employee_session.error_count += 1
+                    employee_session.last_error = response.error_message
+                    employee_session.health_score = max(0.0, employee_session.health_score - 10.0)
+
             await db.commit()
 
             await event_bus.emit(
@@ -99,12 +279,45 @@ class ProviderRouter:
                     "provider_id": p.id,
                     "model": response.model,
                     "success": response.success,
-                    "cost_usd": response.estimated_cost_usd,
+                    "cost_usd": recorded_cost,
+                    "session_id": session_meta.get("session_id"),
+                    "account_id": session_meta.get("account_id"),
                 },
             )
             if response.success:
                 return response
+
             last_err = response.error_message or last_err
+            if response.metadata.get("bridge_offline"):
+                if offline_fallback_candidate is None:
+                    offline_fallback_candidate = (p, effective_model, last_err)
+            else:
+                non_offline_failure = True
+
+        if req.allow_diagnostic_fallback and offline_fallback_candidate is not None and not non_offline_failure:
+            offline_provider, offline_model, offline_reason = offline_fallback_candidate
+            in_tok = BaseProviderAdapter.estimate_tokens(req.system_prompt + req.prompt)
+            diag_content = (
+                f"[{offline_provider.id} | safe-diagnostic] Local bridge unavailable ({offline_reason}). "
+                "Running in safe zero-spend diagnostic mode until the bridge daemon is started."
+            )
+            return ProviderResponse(
+                provider_id=offline_provider.id,
+                model=offline_model,
+                content=diag_content,
+                input_tokens=in_tok,
+                output_tokens=BaseProviderAdapter.estimate_tokens(diag_content),
+                estimated_cost_usd=0.0,
+                latency_ms=0.0,
+                success=True,
+                metadata={
+                    "mode": "bridge_offline_diagnostic",
+                    "dry_run": True,
+                    "bridge_offline": True,
+                    "original_error": offline_reason,
+                    **{k: session_meta[k] for k in ("session_id", "account_id", "conversation_id") if k in session_meta},
+                },
+            )
 
         return ProviderResponse(
             provider_id="none",
@@ -116,6 +329,7 @@ class ProviderRouter:
             latency_ms=0.0,
             success=False,
             error_message=last_err,
+            metadata={"budget_exceeded": budget_blocked},
         )
 
 
