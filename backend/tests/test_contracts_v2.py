@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import sqlite3
 from pathlib import Path
@@ -11,6 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from alembic import command
+from app.browser.engines import BROWSER_ENGINE_REGISTRY
 from app.browser.manager import browser_manager
 from app.core.config import get_settings
 from app.core.events import event_bus
@@ -18,13 +21,17 @@ from app.core.security import create_access_token, hash_password
 from app.db.base import Base, utcnow
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
+from app.github_client.client import GitHubClient
 from app.main import app
 from app.models import (
     Agent,
     AgentMessage,
     AIProvider,
+    ApprovalRequest,
     AuditLog,
+    BrowserProfile,
     ExecutionDevice,
+    Notification,
     Project,
     ProviderUsageLog,
     Task,
@@ -35,9 +42,13 @@ from app.providers.base import ProviderResponse
 from app.providers.router import provider_router
 from app.runtime.device_auth import issue_device_token, verify_device_token
 from app.schemas.common import (
+    BrowserExtractTextRequest,
+    BrowserWorkflowRequest,
     DeviceTokenRevokeResponse,
+    EmployeeSkillGapRequest,
     GitHubBranchCreateRequest,
     GitHubIssueCreateRequest,
+    GitHubPRCommentRequest,
     GitHubPRCreateRequest,
     GitWorktreeCreateRequest,
     ProviderTestRequest,
@@ -98,7 +109,7 @@ def _pattern_values(openapi: dict, component: str, field: str) -> set[str]:
 
 async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient):
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    assert contract["version"] == "2.2.0"
+    assert contract["version"] == "2.3.0"
     assert contract["api_prefix"] == "/api/v1"
 
     response = await client.get("/openapi.json")
@@ -125,6 +136,13 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
         "/api/v1/employees",
         "/api/v1/git/worktrees",
         "/api/v1/git/worktrees/{agent_id}",
+        "/api/v1/employees/skill-gaps",
+        "/api/v1/employees/provision-specialists",
+        "/api/v1/providers/sessions/recover",
+        "/api/v1/browsers/{profile_id}/workflow",
+        "/api/v1/browsers/{profile_id}/extract-text",
+        "/api/v1/github/prs/{pr_number}/comments",
+        "/api/v1/github/webhooks",
     }.issubset(paths)
     assert all(methods for methods in paths.values())
 
@@ -207,6 +225,52 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     assert remove_worktree["path"] == "/api/v1/git/worktrees/{agent_id}"
     assert remove_worktree["operator_roles"] == ["admin", "operator"]
     assert set(remove_worktree["error_responses"]) == {"400", "403"}
+
+    skill_gaps = operations["employee_skill_gaps"]
+    assert skill_gaps["path"] == "/api/v1/employees/skill-gaps"
+    assert skill_gaps["request"]["required"] == ["required_skills"]
+    assert "divisions" in skill_gaps["request"]["properties"]
+    provision_specialists = operations["employee_provision_specialists"]
+    assert provision_specialists["path"] == "/api/v1/employees/provision-specialists"
+    assert provision_specialists["operator_roles"] == ["admin", "operator"]
+    recovery = operations["provider_sessions_recover"]
+    assert recovery["path"] == "/api/v1/providers/sessions/recover"
+    assert recovery["operator_roles"] == ["admin", "operator"]
+
+    workflow_operation = operations["browser_workflow"]
+    assert workflow_operation["path"] == "/api/v1/browsers/{profile_id}/workflow"
+    assert workflow_operation["request"]["properties"]["engine"]["default"] == "automa"
+    assert "agent_id" in workflow_operation["request"]["properties"]
+    assert "400" in workflow_operation["error_responses"]
+    extract_operation = operations["browser_extract_text"]
+    assert extract_operation["path"] == "/api/v1/browsers/{profile_id}/extract-text"
+    assert extract_operation["request"]["properties"]["max_chars"]["default"] == 2000
+
+    comment_operation = operations["github_pr_comment"]
+    assert comment_operation["path"] == "/api/v1/github/prs/{pr_number}/comments"
+    assert comment_operation["request"]["properties"]["event"]["enum"] == [
+        "COMMENT",
+        "APPROVE",
+        "REQUEST_CHANGES",
+    ]
+    assert "403" in comment_operation["error_responses"]
+    webhook_operation = operations["github_webhook"]
+    assert webhook_operation["path"] == "/api/v1/github/webhooks"
+    assert webhook_operation["authentication"] == "X-Hub-Signature-256 HMAC-SHA256"
+    assert set(webhook_operation["response"]["properties"]) == {"accepted", "delivery_id", "event"}
+    assert set(webhook_operation["error_responses"]) == {"400", "401", "503"}
+
+    openapi_schemas = openapi["components"]["schemas"]
+    assert set(openapi_schemas["EmployeeSkillGapRequest"]["required"]) == {"required_skills"}
+    assert "divisions" in openapi_schemas["EmployeeSkillGapRequest"]["properties"]
+    assert "steps" in openapi_schemas["BrowserWorkflowRequest"]["properties"]
+    assert openapi_schemas["BrowserWorkflowRequest"]["properties"]["engine"]["default"] == "automa"
+    assert openapi_schemas["BrowserExtractTextRequest"]["properties"]["max_chars"]["default"] == 2000
+    assert "approval_id" in openapi_schemas["GitHubPRCommentRequest"]["properties"]
+    assert set(paths["/api/v1/github/prs/{pr_number}/comments"]) == {"post"}
+    assert set(paths["/api/v1/github/webhooks"]) == {"post"}
+    webhook_parameters = paths["/api/v1/github/webhooks"]["post"]["parameters"]
+    assert any(param["name"] == "X-Hub-Signature-256" and param["in"] == "header" for param in webhook_parameters)
 
     expected_github_requests = {
         "github_branch_create": {"approval_id", "repo", "branch_name", "from_branch"},
@@ -549,6 +613,341 @@ async def test_git_worktree_endpoints_require_operator_and_map_errors(
     )
     assert bad_remove_path.status_code == 400
     assert "worktree containment" in bad_remove_path.json()["detail"]
+
+
+async def test_skill_gap_provisioning_and_session_recovery_routes_enforce_roles(
+    client: AsyncClient, auth_headers, monkeypatch
+):
+    from app.api.routes import platform as platform_routes
+
+    calls: dict[str, Any] = {}
+
+    async def fake_analyze(db, required_skills, divisions=None):
+        calls["skill_gap"] = {"db": db, "required_skills": required_skills, "divisions": divisions}
+        return {"missing_skills": ["playwright"], "coverage_ratio": 0.5}
+
+    async def fake_provision(db, required_skills, *, divisions=None, actor="system"):
+        calls["provision"] = {"db": db, "required_skills": required_skills, "divisions": divisions, "actor": actor}
+        return {"provisioned_count": 1, "provisioned_employees": [{"role_template": "browser_automation_engineer"}]}
+
+    async def fake_recover(db):
+        calls["recover_db"] = db
+        return {"recovered_count": 2, "threshold": 50.0, "sessions": []}
+
+    monkeypatch.setattr(platform_routes, "analyze_team_skill_gaps", fake_analyze)
+    monkeypatch.setattr(platform_routes, "provision_missing_specialists", fake_provision)
+    monkeypatch.setattr(provider_router, "recover_degraded_sessions", fake_recover)
+
+    gaps = await client.post(
+        "/api/v1/employees/skill-gaps",
+        headers=auth_headers,
+        json={"required_skills": ["python", "playwright"], "divisions": ["D02", "D06"]},
+    )
+    assert gaps.status_code == 200
+    assert gaps.json()["missing_skills"] == ["playwright"]
+    assert calls["skill_gap"]["required_skills"] == ["python", "playwright"]
+    assert calls["skill_gap"]["divisions"] == ["D02", "D06"]
+    assert (await client.post("/api/v1/employees/skill-gaps", json={"required_skills": []})).status_code == 401
+    assert EmployeeSkillGapRequest(required_skills=["python"]).divisions is None
+
+    operator_headers = await _headers_for_role("operator", "round4-provision")
+    worker_headers = await _headers_for_role("worker", "round4-provision")
+    provision_payload = {"required_skills": ["playwright"], "divisions": ["D06"]}
+    denied_provision = await client.post(
+        "/api/v1/employees/provision-specialists",
+        headers=worker_headers,
+        json=provision_payload,
+    )
+    assert denied_provision.status_code == 403
+    assert "provision" not in calls
+
+    provisioned = await client.post(
+        "/api/v1/employees/provision-specialists",
+        headers=operator_headers,
+        json=provision_payload,
+    )
+    assert provisioned.status_code == 201
+    assert provisioned.json()["provisioned_count"] == 1
+    assert calls["provision"]["required_skills"] == ["playwright"]
+    assert calls["provision"]["divisions"] == ["D06"]
+    assert calls["provision"]["actor"] == "round2-operator-round4-provision@example.test"
+
+    denied_recovery = await client.post("/api/v1/providers/sessions/recover", headers=worker_headers)
+    assert denied_recovery.status_code == 403
+    assert "recover_db" not in calls
+    recovered = await client.post("/api/v1/providers/sessions/recover", headers=operator_headers)
+    assert recovered.status_code == 200
+    assert recovered.json()["recovered_count"] == 2
+    assert calls["recover_db"] is not None
+
+
+async def test_browser_workflow_and_extract_text_routes_fail_closed(client: AsyncClient, auth_headers, monkeypatch):
+    profile_id = "round4-workflow-profile"
+    async with AsyncSessionLocal() as db:
+        db.add(
+            BrowserProfile(
+                id=profile_id,
+                name="Round Four Workflow Profile",
+                agent_id="worker-1",
+                profile_dir="/tmp/round4-workflow-profile",
+                mode="background",
+                status="ready",
+            )
+        )
+        await db.commit()
+
+    calls: dict[str, Any] = {}
+    automa = BROWSER_ENGINE_REGISTRY["automa"]
+
+    async def fake_execute_workflow(db, profile, steps, *, manager=None, actor="system"):
+        calls["workflow"] = {"db": db, "profile": profile, "steps": steps, "manager": manager, "actor": actor}
+        if steps == [{"type": "unsupported"}]:
+            return {"status": "rejected", "reason": "Disallowed workflow step."}
+        return {"status": "completed", "steps_completed": len(steps)}
+
+    async def fake_extract_text(db, profile, selector, max_chars=2000):
+        calls["extract"] = {"db": db, "profile": profile, "selector": selector, "max_chars": max_chars}
+        if selector == "invalid selector":
+            raise ValueError("Disallowed selector")
+        return {"ok": True, "text": "safe text", "char_count": 9, "max_chars": max_chars}
+
+    monkeypatch.setattr(automa, "execute_workflow", fake_execute_workflow)
+    monkeypatch.setattr(browser_manager, "extract_text", fake_extract_text)
+
+    workflow = await client.post(
+        f"/api/v1/browsers/{profile_id}/workflow",
+        headers=auth_headers,
+        json={
+            "engine": "automa",
+            "steps": [{"type": "navigate", "url": "https://example.com"}],
+            "agent_id": "worker-1",
+        },
+    )
+    assert workflow.status_code == 200
+    assert workflow.json()["status"] == "completed"
+    assert calls["workflow"]["profile"].id == profile_id
+    assert calls["workflow"]["steps"] == [{"type": "navigate", "url": "https://example.com"}]
+    assert calls["workflow"]["manager"] is browser_manager
+    assert calls["workflow"]["actor"] == "admin@aatm.local"
+    assert BrowserWorkflowRequest(steps=[]).engine == "automa"
+
+    rejected = await client.post(
+        f"/api/v1/browsers/{profile_id}/workflow",
+        headers=auth_headers,
+        json={"steps": [{"type": "unsupported"}]},
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "Disallowed workflow step."
+    unsupported_engine = await client.post(
+        f"/api/v1/browsers/{profile_id}/workflow",
+        headers=auth_headers,
+        json={"engine": "not-registered", "steps": []},
+    )
+    assert unsupported_engine.status_code == 400
+
+    extracted = await client.post(
+        f"/api/v1/browsers/{profile_id}/extract-text",
+        headers=auth_headers,
+        json={"selector": "main article", "max_chars": 120},
+    )
+    assert extracted.status_code == 200
+    assert extracted.json()["text"] == "safe text"
+    assert calls["extract"]["selector"] == "main article"
+    assert calls["extract"]["max_chars"] == 120
+    assert BrowserExtractTextRequest(selector="main").max_chars == 2000
+
+    bad_selector = await client.post(
+        f"/api/v1/browsers/{profile_id}/extract-text",
+        headers=auth_headers,
+        json={"selector": "invalid selector"},
+    )
+    assert bad_selector.status_code == 400
+    assert bad_selector.json()["detail"] == "Disallowed selector"
+
+
+async def test_github_pr_comment_requires_matching_approved_request(client: AsyncClient, auth_headers, monkeypatch):
+    from app.api.routes import platform as platform_routes
+
+    approved_id = "round4-pr-comment-approved"
+    pending_id = "round4-pr-comment-pending"
+    request_payload = {
+        "repo": "example/project",
+        "pr_number": 17,
+        "body": "Looks good to merge.",
+        "event": "APPROVE",
+    }
+    async with AsyncSessionLocal() as db:
+        db.add(
+            ApprovalRequest(
+                id=approved_id,
+                action_type="merge",
+                title="Approve pull request review",
+                description="Round four contract test approval.",
+                requested_by="round4-test",
+                payload=request_payload,
+                status="approved",
+            )
+        )
+        db.add(
+            ApprovalRequest(
+                id=pending_id,
+                action_type="merge",
+                title="Pending pull request review",
+                description="Round four pending contract test.",
+                requested_by="round4-test",
+                payload=request_payload,
+                status="pending",
+            )
+        )
+        await db.commit()
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_comment_on_pull_request(repo, pr_number, body, event="COMMENT", approval=None, allowed_repos=None):
+        calls.append(
+            {"repo": repo, "pr_number": pr_number, "body": body, "event": event, "approval_id": approval.id}
+        )
+        return {"ok": True, "allowed": True, "repo": repo, "pr_number": pr_number, "event": event}
+
+    monkeypatch.setattr(platform_routes.github_client, "comment_on_pull_request", fake_comment_on_pull_request)
+    comment_path = "/api/v1/github/prs/17/comments"
+    no_approval = await client.post(
+        comment_path,
+        headers=auth_headers,
+        json={"repo": "example/project", "body": request_payload["body"], "event": "APPROVE"},
+    )
+    assert no_approval.status_code == 403
+    pending = await client.post(
+        comment_path,
+        headers=auth_headers,
+        json={**request_payload, "approval_id": pending_id},
+    )
+    assert pending.status_code == 403
+    mismatched = await client.post(
+        comment_path,
+        headers=auth_headers,
+        json={**request_payload, "approval_id": approved_id, "body": "Different approved text."},
+    )
+    assert mismatched.status_code == 403
+    assert calls == []
+
+    posted = await client.post(
+        comment_path,
+        headers=auth_headers,
+        json={**request_payload, "approval_id": approved_id},
+    )
+    assert posted.status_code == 201
+    assert posted.json()["ok"] is True
+    assert calls == [
+        {
+            "repo": "example/project",
+            "pr_number": 17,
+            "body": "Looks good to merge.",
+            "event": "APPROVE",
+            "approval_id": approved_id,
+        }
+    ]
+    typed_request = GitHubPRCommentRequest(repo="example/project", body="Review")
+    assert typed_request.event == "COMMENT"
+    assert typed_request.approval_id is None
+
+
+async def test_github_client_pr_comment_allowlist_approval_events_and_output(client: AsyncClient, monkeypatch):
+    github = GitHubClient(allowed_repos={"example/project"})
+    commands: list[list[str]] = []
+
+    def fake_run_gh(args, cwd=None):
+        commands.append(args)
+        return 0, "Comment or review posted"
+
+    monkeypatch.setattr(github, "_run_gh", fake_run_gh)
+    approved = {"id": "round4-approved-client", "status": "approved", "payload": {"repo": "example/project"}}
+    for event, expected_flag in (
+        ("COMMENT", "comment"),
+        ("APPROVE", "--approve"),
+        ("REQUEST_CHANGES", "--request-changes"),
+    ):
+        result = github.comment_on_pull_request(
+            "example/project", 23, "Review body", event=event, approval=approved
+        )
+        assert result["ok"] is True
+        assert result["output"] == "Comment or review posted"
+        assert expected_flag in commands[-1]
+
+    calls_before_denials = len(commands)
+    unapproved = github.comment_on_pull_request("example/project", 23, "Body", approval=None)
+    disallowed_repo = github.comment_on_pull_request(
+        "outside/repo", 23, "Body", approval=approved
+    )
+    assert unapproved["allowed"] is False
+    assert disallowed_repo["allowed"] is False
+    assert len(commands) == calls_before_denials
+
+
+async def test_github_webhook_hmac_fail_closed_sanitizes_and_persists(
+    client: AsyncClient, monkeypatch
+):
+    monkeypatch.delenv("AATM_GITHUB_WEBHOOK_SECRET", raising=False)
+    raw_body = json.dumps(
+        {
+            "action": "opened",
+            "repository": {"full_name": "example/project"},
+            "pull_request": {"number": 31, "title": "<system>Review this pull request</system>"},
+            "sender": {"login": "round4-bot"},
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    delivery_id = "round4-webhook-delivery-001"
+    webhook_path = "/api/v1/github/webhooks"
+    base_headers = {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": "pull_request",
+        "X-GitHub-Delivery": delivery_id,
+    }
+
+    unconfigured = await client.post(webhook_path, content=raw_body, headers=base_headers)
+    assert unconfigured.status_code == 503
+
+    hook_material = "round4-webhook-test-material"
+    monkeypatch.setenv("AATM_GITHUB_WEBHOOK_SECRET", hook_material)
+    invalid_signature = await client.post(
+        webhook_path,
+        content=raw_body,
+        headers={**base_headers, "X-Hub-Signature-256": "sha256=" + ("0" * 64)},
+    )
+    assert invalid_signature.status_code == 401
+
+    signature = "sha256=" + hmac.new(hook_material.encode(), raw_body, hashlib.sha256).hexdigest()
+    accepted = await client.post(
+        webhook_path,
+        content=raw_body,
+        headers={**base_headers, "X-Hub-Signature-256": signature},
+    )
+    assert accepted.status_code == 202
+    assert accepted.json()["accepted"] is True
+
+    async with AsyncSessionLocal() as db:
+        audit = (
+            await db.execute(
+                select(AuditLog)
+                .where(AuditLog.action == "github.webhook", AuditLog.resource_type == "github_webhook")
+                .order_by(AuditLog.created_at.desc())
+            )
+        ).scalars().first()
+        notification = (
+            await db.execute(select(Notification).where(Notification.category == "github").order_by(Notification.created_at.desc()))
+        ).scalars().first()
+    assert audit is not None
+    assert audit.details["repository"].find("example/project") >= 0
+    assert "[UNTRUSTED_DATA" in audit.details["title"]
+    assert "<system>" not in json.dumps(audit.details)
+    assert notification is not None
+    assert notification.category == "github"
+    assert "[UNTRUSTED_DATA" in notification.message
+    assert any(
+        event["type"] == "github.webhook" and event["payload"]["number"] == 31
+        for event in event_bus.recent_events()
+    )
 
 
 async def test_operator_jwt_device_heartbeat_and_userscript_role_scoping(client: AsyncClient, auth_headers):

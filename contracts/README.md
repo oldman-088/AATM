@@ -1,6 +1,6 @@
 # AATM Shared Architecture & API Contracts
 
-The canonical machine-readable contract is [`schemas.json`](schemas.json), currently **v2.2.0**. Workers and integrations should keep their request validation, responses, and generated API documentation aligned with it.
+The canonical machine-readable contract is [`schemas.json`](schemas.json), currently **v2.3.0**. Workers and integrations should keep their request validation, responses, and generated API documentation aligned with it.
 
 ## Shared envelopes and routing
 
@@ -53,6 +53,22 @@ The canonical machine-readable contract is [`schemas.json`](schemas.json), curre
 
 - `Agent.reports_to` is a nullable supervisor agent ID. New non-manager employees default to `manager-0` unless `reports_to` is supplied; PATCH requests may set it to `null` to clear the relationship.
 - `POST /api/v1/git/worktrees` creates a per-agent worktree and `DELETE /api/v1/git/worktrees/{agent_id}` removes it. Both require an authenticated `admin` or `operator`. Creation accepts `agent_id`, `branch_name`, optional `base_ref` (default `HEAD`), and optional `approval_id`; invalid paths, branches, or base refs return 400, while role and approval failures return 403.
+
+## Skill gaps, specialist provisioning, and session recovery
+
+- `POST /api/v1/employees/skill-gaps` accepts `required_skills` and optional `divisions`; it analyzes current team coverage.
+- `POST /api/v1/employees/provision-specialists` accepts the same request and requires an authenticated `admin` or `operator`; it provisions recommended specialists for uncovered requirements.
+- `POST /api/v1/providers/sessions/recover` requires an authenticated `admin` or `operator` and recovers degraded provider sessions.
+
+## Browser workflows and text extraction
+
+- `POST /api/v1/browsers/{profile_id}/workflow` accepts an engine (default `automa`), a list of workflow step objects, and an optional `agent_id`. The engine must be registered; disallowed or invalid workflow steps fail closed with HTTP 400.
+- `POST /api/v1/browsers/{profile_id}/extract-text` accepts a selector and `max_chars` (default 2000). Extraction is policy-checked and applies the browser manager's sensitive-text redaction.
+
+## GitHub pull-request reviews and webhooks
+
+- `POST /api/v1/github/prs/{pr_number}/comments` accepts `repo`, `body`, optional `approval_id`, and an event of `COMMENT`, `APPROVE`, or `REQUEST_CHANGES` (default `COMMENT`). The approved request payload must match the repository, PR number, event, and exact body; approval failures return 403. The client also enforces the repository allowlist.
+- `POST /api/v1/github/webhooks` verifies `X-Hub-Signature-256` as HMAC-SHA256 over the exact raw request bytes. Set `AATM_GITHUB_WEBHOOK_SECRET` for the current Settings configuration; a deployment-specific Settings object exposing `GITHUB_WEBHOOK_SECRET` is also honored. An unconfigured key returns 503, and an invalid signature returns 401. Persisted audit and notification fields are quarantined as untrusted text.
 
 ## Credential references and approved GitHub writes
 

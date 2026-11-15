@@ -57,6 +57,11 @@ class EmployeeCreate(BaseModel):
     device_id: str = "device-local"
 
 
+class EmployeeSkillGapRequest(BaseModel):
+    required_skills: list[str]
+    divisions: list[str] | None = None
+
+
 class AgentUpdate(BaseModel):
     status: str | None = None
     provider_id: str | None = None
@@ -191,6 +196,17 @@ class BrowserNavigateRequest(BaseModel):
     title: str | None = None
 
 
+class BrowserWorkflowRequest(BaseModel):
+    engine: str = "automa"
+    steps: list[dict[str, Any]]
+    agent_id: str | None = None
+
+
+class BrowserExtractTextRequest(BaseModel):
+    selector: str = Field(min_length=1)
+    max_chars: int = 2000
+
+
 class UserscriptCreate(BaseModel):
     name: str = Field(min_length=2, max_length=140)
     description: str = ""
@@ -310,6 +326,12 @@ class GitHubIssueCreateRequest(_GitHubWriteApprovalRequest):
     body: str = ""
     labels: list[str] = Field(default_factory=list)
     assignees: list[str] = Field(default_factory=list)
+
+
+class GitHubPRCommentRequest(_GitHubWriteApprovalRequest):
+    approval_id: str | None = Field(default=None, min_length=1)
+    body: str = Field(min_length=1, max_length=65_536)
+    event: str = Field(default="COMMENT", pattern="^(COMMENT|APPROVE|REQUEST_CHANGES)$")
 
 
 class GitWorktreeCreateRequest(BaseModel):
