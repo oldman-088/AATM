@@ -675,7 +675,7 @@ export function GitWorkflowsView({ gitData, approvals, agents, onReload }: { git
             target === 'branch' ? `${branchName} ← ${fromBranch} (${repo})` : target === 'comment' ? `${repo} #${prNumber}` : target === 'pr'
               ? `Create PR ${headBranch || repository.current_branch} -> ${baseBranch} in ${repo}`
               : `Create issue "${title}" in ${repo}`,
-          payload: target === 'branch' ? { kind: 'branch', repo, branch_name: branchName, from_branch: fromBranch } : target === 'comment' ? { kind: 'comment', repo, pr_number: Number(prNumber), body: bodyText } : { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
+          payload: target === 'branch' ? { kind: 'branch', repo, branch_name: branchName, from_branch: fromBranch } : target === 'comment' ? { kind: 'comment', repo, pr_number: Number(prNumber), event: 'COMMENT', body: bodyText } : { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
         }),
       })
       setApprovalId(created?.id || '')
@@ -699,7 +699,7 @@ export function GitWorkflowsView({ gitData, approvals, agents, onReload }: { git
     try {
       const payload =
         target === 'comment'
-          ? { approval_id: approvalId.trim(), repo, body: bodyText }
+          ? { approval_id: approvalId.trim(), repo, event: 'COMMENT', body: bodyText }
           : target === 'branch'
           ? { approval_id: approvalId.trim(), repo, branch_name: branchName, from_branch: fromBranch }
           : target === 'pr'
