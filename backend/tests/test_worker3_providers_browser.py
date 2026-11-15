@@ -20,7 +20,7 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AIProvider, BrowserProfile, BrowserSession, ProviderUsageLog, SystemSetting
+from app.models import AIProvider, BrowserProfile, BrowserSession, ProviderSession, ProviderUsageLog, SystemSetting
 from app.providers.adapters import AnthropicClaudeAdapter, ArenaLocalBridgeAdapter
 from app.providers.base import ProviderRequest, validate_credential_ref
 from app.providers.router import ProviderRouter
@@ -34,6 +34,7 @@ class _MockBridgeServer:
         self.expected_api_key = expected_api_key
         self.empty_choices = False
         self.received_headers: list[dict[str, str]] = []
+        self.received_payloads: list[dict[str, Any]] = []
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.base_url: str = ""
@@ -66,6 +67,7 @@ class _MockBridgeServer:
                 raw = self.rfile.read(length) if length else b"{}"
                 payload = json.loads(raw.decode("utf-8"))
                 parent.received_headers.append({k.lower(): v for k, v in self.headers.items()})
+                parent.received_payloads.append(payload)
 
                 if self.path == "/v1/chat/completions":
                     if parent.expected_bearer and self.headers.get("Authorization") != f"Bearer {parent.expected_bearer}":
@@ -209,6 +211,53 @@ async def test_arena_local_bridge_live_auth_and_offline(monkeypatch):
     off_gen = await offline_adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
     assert off_gen.success is False
     assert off_gen.metadata.get("bridge_offline") is True
+
+
+async def test_provider_router_forwards_employee_session_and_account_metadata(db_session, monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-meta-secret")
+    with _MockBridgeServer(expected_bearer="bridge-meta-secret") as srv:
+        bridge = await db_session.get(AIProvider, "arena-local-bridge")
+        bridge.endpoint_url = srv.base_url
+        await db_session.commit()
+
+        router = ProviderRouter()
+        resp = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Check session forwarding", agent_id="worker-3", dry_run=False),
+            preferred_provider_id="arena-local-bridge",
+        )
+        assert resp.success is True
+        assert resp.metadata["session_id"] == "sess-worker-3"
+        assert resp.metadata["account_id"] == "acct-arena-primary"
+
+        # Verify both headers and JSON metadata carried ProviderSession.id & account_id
+        assert srv.received_headers[-1]["x-aatm-session-id"] == "sess-worker-3"
+        assert srv.received_headers[-1]["x-aatm-account-id"] == "acct-arena-primary"
+        assert srv.received_headers[-1]["x-aatm-agent-id"] == "worker-3"
+        assert srv.received_payloads[-1]["session_id"] == "sess-worker-3"
+        assert srv.received_payloads[-1]["account_id"] == "acct-arena-primary"
+        assert srv.received_payloads[-1]["metadata"]["session_id"] == "sess-worker-3"
+        assert srv.received_payloads[-1]["metadata"]["account_id"] == "acct-arena-primary"
+
+        # Verify ProviderSession telemetry incremented
+        sess = await db_session.get(ProviderSession, "sess-worker-3")
+        assert sess.message_count == 1
+        assert sess.last_message_at is not None
+
+        # Verify explicit ProviderRequest.metadata overrides are preserved
+        explicit = await router.route_and_execute(
+            db_session,
+            ProviderRequest(
+                prompt="Explicit override check",
+                agent_id="worker-3",
+                dry_run=False,
+                metadata={"session_id": "sess-custom-override", "account_id": "acct-custom"},
+            ),
+            preferred_provider_id="arena-local-bridge",
+        )
+        assert explicit.success is True
+        assert srv.received_headers[-1]["x-aatm-session-id"] == "sess-custom-override"
+        assert srv.received_headers[-1]["x-aatm-account-id"] == "acct-custom"
 
 
 async def test_anthropic_safe_diagnostic_and_live_confirmed_usage(db_session, monkeypatch):

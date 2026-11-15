@@ -31,6 +31,7 @@ class ProviderRequest:
     task_id: str | None = None
     dry_run: bool = False
     allow_diagnostic_fallback: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

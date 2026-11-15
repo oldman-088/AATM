@@ -1,4 +1,5 @@
 import time
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -121,6 +122,27 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
             )
 
         base_url = normalized_or_err
+        req_meta = dict(req.metadata or {})
+        session_id = req_meta.get("session_id")
+        account_id = req_meta.get("account_id")
+        conversation_id = req_meta.get("conversation_id")
+        agent_id = req.agent_id or req_meta.get("agent_id")
+        project_id = req_meta.get("project_id")
+
+        session_meta: dict[str, Any] = {}
+        if session_id:
+            session_meta["session_id"] = str(session_id)
+        if account_id:
+            session_meta["account_id"] = str(account_id)
+        if conversation_id:
+            session_meta["conversation_id"] = str(conversation_id)
+        if agent_id:
+            session_meta["agent_id"] = str(agent_id)
+        if project_id:
+            session_meta["project_id"] = str(project_id)
+        if req.task_id:
+            session_meta["task_id"] = str(req.task_id)
+
         if req.dry_run:
             out_tok = 64
             projected = compute_cost(model, in_tok, out_tok)
@@ -132,7 +154,12 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 output_tokens=out_tok,
                 estimated_cost_usd=0.0,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
-                metadata={"dry_run": True, "projected_cost_usd": projected, "endpoint": base_url},
+                metadata={
+                    "dry_run": True,
+                    "projected_cost_usd": projected,
+                    "endpoint": base_url,
+                    **session_meta,
+                },
             )
 
         url = base_url + "/v1/chat/completions"
@@ -140,21 +167,38 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
         token = self.resolve_credential()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        if session_id:
+            headers["X-AATM-Session-Id"] = str(session_id)
+        if account_id:
+            headers["X-AATM-Account-Id"] = str(account_id)
+        if agent_id:
+            headers["X-AATM-Agent-Id"] = str(agent_id)
+        if conversation_id:
+            headers["X-AATM-Conversation-Id"] = str(conversation_id)
+
+        messages: list[dict[str, str]] = []
+        if req.system_prompt:
+            messages.append({"role": "system", "content": req.system_prompt})
+        messages.append({"role": "user", "content": req.prompt})
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature,
+        }
+        if session_id:
+            payload["session_id"] = str(session_id)
+        if account_id:
+            payload["account_id"] = str(account_id)
+        if agent_id:
+            payload["user"] = str(agent_id)
+        if session_meta:
+            payload["metadata"] = session_meta
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": req.system_prompt},
-                            {"role": "user", "content": req.prompt},
-                        ],
-                        "max_tokens": req.max_tokens,
-                        "temperature": req.temperature,
-                    },
-                )
+                resp = await client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 choices = data.get("choices")
@@ -179,6 +223,13 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                     if usage.get("completion_tokens") is not None
                     else self.estimate_tokens(text)
                 )
+                resp_meta: dict[str, Any] = {
+                    "endpoint": base_url,
+                    "confirmed_usage": bool(usage),
+                    **session_meta,
+                }
+                if isinstance(data.get("session"), dict):
+                    resp_meta["bridge_session"] = data["session"]
                 return ProviderResponse(
                     provider_id=self.provider_id,
                     model=model,
@@ -187,7 +238,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                     output_tokens=real_out,
                     estimated_cost_usd=compute_cost(model, real_in, real_out),
                     latency_ms=round((time.perf_counter() - t0) * 1000, 2),
-                    metadata={"endpoint": base_url, "confirmed_usage": bool(usage)},
+                    metadata=resp_meta,
                 )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response is not None else "unknown"
@@ -201,7 +252,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 success=False,
                 error_message=f"Arena Local Bridge HTTP error ({status_code}) at {base_url}",
-                metadata={"bridge_offline": False, "http_status": status_code},
+                metadata={"bridge_offline": False, "http_status": status_code, **session_meta},
             )
         except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
             return ProviderResponse(
@@ -214,7 +265,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 success=False,
                 error_message=f"Arena Local Bridge offline at {base_url}: {type(exc).__name__}",
-                metadata={"bridge_offline": True},
+                metadata={"bridge_offline": True, **session_meta},
             )
         except Exception as exc:
             return ProviderResponse(
@@ -227,8 +278,33 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 success=False,
                 error_message=f"Arena Local Bridge error at {base_url}: {type(exc).__name__}",
-                metadata={"bridge_offline": False},
+                metadata={"bridge_offline": False, **session_meta},
             )
+
+    async def get_session(self, session_id: str, account_id: str | None = None) -> dict[str, Any] | None:
+        """Inspect a per-employee session context from the Arena Local Bridge daemon."""
+        if not self.credential_ref_valid:
+            return None
+        ok, normalized_or_err = _validate_http_endpoint(self._base_url())
+        if not ok:
+            return None
+        headers: dict[str, str] = {}
+        token = self.resolve_credential()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if account_id:
+            headers["X-AATM-Account-Id"] = str(account_id)
+        url = f"{normalized_or_err}/v1/sessions/{session_id}"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                data = resp.json()
+                return data if isinstance(data, dict) else None
+        except Exception:
+            return None
 
 
 class ArenaAgentAdapter(BaseProviderAdapter):

@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.models import AIProvider, ProviderUsageLog, SystemSetting
+from app.models import Agent, AIProvider, ProviderSession, ProviderUsageLog, SystemSetting
 from app.providers.adapters import build_adapter
 from app.providers.base import (
     BaseProviderAdapter,
@@ -134,6 +135,47 @@ class ProviderRouter:
                 return requested_model
         return provider.default_model
 
+    async def _resolve_employee_session_context(
+        self,
+        db: AsyncSession,
+        req: ProviderRequest,
+    ) -> tuple[dict[str, Any], ProviderSession | None]:
+        """Resolve per-employee ProviderSession.id & account_id into request metadata without overwriting explicit overrides."""
+        merged_meta: dict[str, Any] = dict(req.metadata or {})
+        session: ProviderSession | None = None
+        agent: Agent | None = None
+
+        if req.agent_id:
+            merged_meta.setdefault("agent_id", req.agent_id)
+            agent = await db.get(Agent, req.agent_id)
+
+        explicit_session_id = merged_meta.get("session_id")
+        if explicit_session_id:
+            session = await db.get(ProviderSession, str(explicit_session_id))
+        elif agent and agent.provider_session_id:
+            session = await db.get(ProviderSession, agent.provider_session_id)
+        elif req.agent_id:
+            sess_res = await db.execute(
+                select(ProviderSession)
+                .where(ProviderSession.agent_id == req.agent_id, ProviderSession.status != "closed")
+                .order_by(ProviderSession.created_at.desc())
+                .limit(1)
+            )
+            session = sess_res.scalar_one_or_none()
+
+        if session is not None:
+            merged_meta.setdefault("session_id", session.id)
+            if session.account_id:
+                merged_meta.setdefault("account_id", session.account_id)
+            if session.conversation_id:
+                merged_meta.setdefault("conversation_id", session.conversation_id)
+            if session.project_id:
+                merged_meta.setdefault("project_id", session.project_id)
+        elif agent and agent.provider_account_id:
+            merged_meta.setdefault("account_id", agent.provider_account_id)
+
+        return merged_meta, session
+
     async def route_and_execute(
         self,
         db: AsyncSession,
@@ -146,6 +188,8 @@ class ProviderRouter:
         providers = list(res.scalars().all())
         if preferred_provider_id:
             providers.sort(key=lambda p: (0 if p.id == preferred_provider_id else 1, p.priority))
+
+        session_meta, employee_session = await self._resolve_employee_session_context(db, req)
 
         last_err = "No enabled AI providers available."
         budget_blocked = False
@@ -171,7 +215,7 @@ class ProviderRouter:
                     continue
 
             effective_model = self._select_model(p, req.model)
-            attempt_req = replace(req, model=effective_model)
+            attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
             adapter = build_adapter(
                 p.provider_type,
                 p.id,
@@ -180,6 +224,11 @@ class ProviderRouter:
                 effective_model,
             )
             response = await adapter.generate(attempt_req)
+
+            # Ensure response metadata preserves resolved employee session context
+            for key in ("session_id", "account_id", "conversation_id"):
+                if key in session_meta and key not in response.metadata:
+                    response.metadata[key] = session_meta[key]
 
             is_dry_or_diag = bool(req.dry_run or response.metadata.get("dry_run"))
             recorded_cost = 0.0 if is_dry_or_diag else response.estimated_cost_usd
@@ -210,6 +259,18 @@ class ProviderRouter:
                 p.health_status = "healthy" if response.success else "degraded"
             p.latency_ms = response.latency_ms
             p.last_checked_at = utcnow()
+
+            if employee_session is not None and not is_dry_or_diag:
+                if response.success:
+                    employee_session.message_count += 1
+                    employee_session.last_message_at = utcnow()
+                    employee_session.last_error = None
+                    employee_session.health_score = min(100.0, employee_session.health_score + 5.0)
+                elif not response.metadata.get("bridge_offline"):
+                    employee_session.error_count += 1
+                    employee_session.last_error = response.error_message
+                    employee_session.health_score = max(0.0, employee_session.health_score - 10.0)
+
             await db.commit()
 
             await event_bus.emit(
@@ -219,6 +280,8 @@ class ProviderRouter:
                     "model": response.model,
                     "success": response.success,
                     "cost_usd": recorded_cost,
+                    "session_id": session_meta.get("session_id"),
+                    "account_id": session_meta.get("account_id"),
                 },
             )
             if response.success:
@@ -252,6 +315,7 @@ class ProviderRouter:
                     "dry_run": True,
                     "bridge_offline": True,
                     "original_error": offline_reason,
+                    **{k: session_meta[k] for k in ("session_id", "account_id", "conversation_id") if k in session_meta},
                 },
             )
 
