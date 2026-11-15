@@ -7,7 +7,7 @@ from app.models import MemoryEntry
 
 
 class MemoryEngine:
-    """5-tier persistent memory retrieval (global, project, agent, task, decision)."""
+    """4-layer permissioned memory (employee, team, project, organization + decision/task)."""
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
@@ -20,13 +20,17 @@ class MemoryEngine:
         scope: str | None = None,
         project_id: str | None = None,
         agent_id: str | None = None,
-        limit: int = 25,
+        requesting_agent_id: str | None = None,
+        limit: int = 30,
     ) -> list[dict]:
         stmt = select(MemoryEntry)
         if scope:
             stmt = stmt.where(MemoryEntry.scope == scope)
         if project_id:
-            stmt = stmt.where((MemoryEntry.project_id == project_id) | (MemoryEntry.scope == "global"))
+            stmt = stmt.where(
+                (MemoryEntry.project_id == project_id)
+                | (MemoryEntry.scope.in_(["global", "organization"]))
+            )
         if agent_id:
             stmt = stmt.where(MemoryEntry.agent_id == agent_id)
 
@@ -36,6 +40,11 @@ class MemoryEngine:
 
         scored: list[tuple[float, MemoryEntry]] = []
         for entry in entries:
+            # Permission check: private employee memory is restricted to owner or manager/admin
+            if entry.visibility == "private" and requesting_agent_id and requesting_agent_id != "manager-0":
+                if entry.agent_id and entry.agent_id != requesting_agent_id:
+                    continue
+
             if not q_tokens:
                 score = float(entry.importance)
             else:
@@ -51,6 +60,7 @@ class MemoryEngine:
             {
                 "id": e.id,
                 "scope": e.scope,
+                "visibility": e.visibility,
                 "project_id": e.project_id,
                 "agent_id": e.agent_id,
                 "task_id": e.task_id,

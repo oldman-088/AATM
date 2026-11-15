@@ -30,12 +30,28 @@ class ProjectCreate(BaseModel):
     tech_stack: list[str] = Field(default_factory=list)
 
 
+class EmployeeCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    role_template_id: str | None = None
+    specialty: str | None = None
+    skills: list[str] | None = None
+    divisions: list[str] | None = None
+    permissions: list[str] | None = None
+    provider_id: str = "arena-agent"
+    allocation_mode: str = Field(default="hybrid", pattern="^(one_per_employee|shared|hybrid)$")
+    preferred_account_id: str | None = None
+    create_browser_profile: bool = True
+    autonomy_mode: str = Field(default="semi_autonomous", pattern="^(supervised|semi_autonomous|highly_autonomous)$")
+    device_id: str = "device-local"
+
+
 class AgentUpdate(BaseModel):
     status: str | None = None
     provider_id: str | None = None
     model_name: str | None = None
     is_enabled: bool | None = None
     permissions: list[str] | None = None
+    autonomy_mode: str | None = None
 
 
 class TaskCreate(BaseModel):
@@ -44,8 +60,11 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=2, max_length=240)
     description: str = ""
     priority: str = Field(default="medium", pattern="^(critical|high|medium|low)$")
+    execution_mode: str = Field(default="automatic", pattern="^(manual|automatic|collaborative)$")
     assigned_agent_id: str | None = None
+    collaborator_ids: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    expected_deliverables: list[str] = Field(default_factory=list)
     idempotency_key: str | None = None
     estimated_minutes: int = 45
 
@@ -53,10 +72,12 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     status: str | None = None
     priority: str | None = None
+    execution_mode: str | None = None
     assigned_agent_id: str | None = None
     progress_percent: int | None = Field(default=None, ge=0, le=100)
     result_summary: str | None = None
     error_message: str | None = None
+    review_status: str | None = None
 
 
 class ProviderCreateOrUpdate(BaseModel):
@@ -70,6 +91,15 @@ class ProviderCreateOrUpdate(BaseModel):
     priority: int = 10
     is_enabled: bool = True
     daily_limit_usd: float = 20.0
+
+
+class ProviderAccountCreate(BaseModel):
+    provider_id: str = "arena-agent"
+    label: str
+    account_identifier: str
+    allocation_mode: str = Field(default="hybrid", pattern="^(one_per_employee|shared|hybrid)$")
+    max_employees: int = Field(default=5, ge=1, le=50)
+    credential_ref: str | None = "env:ARENA_SESSION_TOKEN"
 
 
 class ProviderTestRequest(BaseModel):
@@ -97,8 +127,70 @@ class BrowserNavigateRequest(BaseModel):
     title: str | None = None
 
 
+class UserscriptCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=140)
+    description: str = ""
+    match_patterns: list[str]
+    allowed_roles: list[str] = Field(default_factory=lambda: ["worker", "manager"])
+    allowed_agent_ids: list[str] = Field(default_factory=list)
+    code: str = Field(min_length=5)
+
+
+class AgentMessageSend(BaseModel):
+    task_id: str | None = None
+    project_id: str | None = None
+    sender_id: str = "manager-0"
+    recipient_id: str
+    instructions: str = Field(min_length=2)
+    priority: str = "high"
+    expected_deliverables: list[str] = Field(default_factory=lambda: ["deliverable_report.md"])
+    auto_execute: bool = True
+
+
+class WorkspaceWriteRequest(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=300)
+    content: str
+    project_id: str | None = None
+    task_id: str | None = None
+
+
+class WorkspaceExecRequest(BaseModel):
+    command: list[str]
+    project_id: str | None = None
+    task_id: str | None = None
+
+
+class SDLCRequest(BaseModel):
+    project_name: str = Field(min_length=2, max_length=120)
+    idea: str = Field(min_length=5)
+
+
+class DeviceRegisterRequest(BaseModel):
+    id: str = Field(min_length=2, max_length=64)
+    name: str
+    device_type: str = Field(default="remote_server", pattern="^(local|remote_server|edge_device)$")
+    host_address: str
+    os_name: str = "Ubuntu 24.04"
+    cpu_cores: int = 4
+    ram_gb: float = 8.0
+    capabilities: list[str] = Field(default_factory=lambda: ["python", "playwright"])
+    max_concurrent_tasks: int = 4
+
+
+class EmergencyStopRequest(BaseModel):
+    scope: str = Field(default="global", pattern="^(global|employee|task|browser)$")
+    target_id: str | None = None
+    reason: str = "Operator triggered emergency stop"
+
+
+class SanitizeRequest(BaseModel):
+    text: str
+    source: str = "external"
+
+
 class MemoryCreate(BaseModel):
-    scope: str = Field(pattern="^(global|project|agent|task|decision)$")
+    scope: str = Field(pattern="^(employee|team|project|organization|global|agent|task|decision)$")
+    visibility: str = Field(default="project", pattern="^(private|team|project|organization)$")
     project_id: str | None = None
     agent_id: str | None = None
     task_id: str | None = None

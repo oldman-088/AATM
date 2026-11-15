@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.models import Agent, ApprovalRequest, AuditLog, ChatMessage, Notification, Task
+from app.employees.catalog import ensure_employee_workspace
+from app.models import Agent, AgentMessage, ApprovalRequest, AuditLog, ChatMessage, Notification, Task
 
 PRIORITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
@@ -65,9 +66,15 @@ class TaskScheduler:
         await db.commit()
 
     async def run_orchestration_cycle(self, db: AsyncSession) -> dict[str, Any]:
-        """Assign ready queued tasks to idle enabled workers respecting dependencies & concurrency."""
+        """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
         settings = get_settings()
-        agents_res = await db.execute(select(Agent).where(Agent.role == "worker", Agent.is_enabled.is_(True)))
+        agents_res = await db.execute(
+            select(Agent).where(
+                Agent.role == "worker",
+                Agent.is_enabled.is_(True),
+                Agent.is_emergency_stopped.is_(False),
+            )
+        )
         workers = list(agents_res.scalars().all())
         idle_workers = [w for w in workers if w.status == "idle"]
         working_count = sum(1 for w in workers if w.status == "working")
@@ -86,28 +93,56 @@ class TaskScheduler:
             if not await self.dependencies_satisfied(db, task):
                 continue
 
-            # Prefer pre-assigned worker if idle, else match by division or first idle
             chosen: Agent | None = None
-            if task.assigned_agent_id:
+            if task.execution_mode == "manual":
+                if not task.assigned_agent_id:
+                    continue
                 chosen = next((w for w in idle_workers if w.id == task.assigned_agent_id), None)
-            if not chosen:
-                chosen = next((w for w in idle_workers if task.division_code in (w.divisions or [])), None)
-            if not chosen:
-                chosen = idle_workers[0]
+            else:
+                if task.assigned_agent_id:
+                    chosen = next((w for w in idle_workers if w.id == task.assigned_agent_id), None)
+                if not chosen:
+                    # Automatic selection: score by division match, performance & lower failures
+                    def _score(w: Agent) -> tuple[int, float, int]:
+                        div_match = 1 if task.division_code in (w.divisions or []) else 0
+                        return (div_match, w.performance_score, -w.tasks_failed)
 
-            if not await self.acquire_lock(db, task, chosen.id):
+                    chosen = max(idle_workers, key=_score)
+
+            if not chosen or not await self.acquire_lock(db, task, chosen.id):
                 continue
 
+            ws = ensure_employee_workspace(chosen.id)
             task.assigned_agent_id = chosen.id
             task.status = "in_progress"
             task.started_at = task.started_at or utcnow()
             task.checkpoints = list(task.checkpoints or []) + [
-                {"ts": utcnow().isoformat(), "worker": chosen.id, "note": "Dispatched by TaskScheduler"}
+                {"ts": utcnow().isoformat(), "worker": chosen.id, "mode": task.execution_mode, "note": "Dispatched by TaskScheduler"}
             ]
 
             chosen.status = "working"
             chosen.current_task_id = task.id
             chosen.last_heartbeat = utcnow()
+
+            # Deliver structured AATM Agent Message automatically
+            db.add(
+                AgentMessage(
+                    task_id=task.id,
+                    project_id=task.project_id,
+                    sender_id="manager-0",
+                    recipient_id=chosen.id,
+                    channel_type="task",
+                    instructions=f"[{task.execution_mode.upper()}] {task.title}: {task.description}",
+                    priority=task.priority,
+                    required_tools=["workspace_fs", "python_runner"],
+                    workspace_info={"workspace_path": str(ws), "branch": chosen.git_branch},
+                    expected_deliverables=task.expected_deliverables or [],
+                    permissions=chosen.permissions or [],
+                    execution_status="running",
+                    delivery_status="acknowledged",
+                    acked_at=utcnow(),
+                )
+            )
 
             idle_workers.remove(chosen)
             available_slots -= 1
@@ -119,7 +154,7 @@ class TaskScheduler:
                     action="task.dispatched",
                     resource_type="task",
                     resource_id=task.id,
-                    details={"worker_id": chosen.id, "division": task.division_code},
+                    details={"worker_id": chosen.id, "division": task.division_code, "mode": task.execution_mode},
                 )
             )
 

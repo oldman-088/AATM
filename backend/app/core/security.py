@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,6 +11,13 @@ import jwt
 from app.core.config import get_settings
 
 ALGORITHM = "HS256"
+
+INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.IGNORECASE),
+    re.compile(r"system\s*:\s*you\s+are\s+now", re.IGNORECASE),
+    re.compile(r"bypass\s+(security|auth|captcha|guardrails)", re.IGNORECASE),
+    re.compile(r"exfiltrate\s+(secrets|tokens|keys|passwords)", re.IGNORECASE),
+]
 
 
 def hash_password(password: str) -> str:
@@ -49,7 +57,6 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
 
 def resolve_credential_ref(ref: str | None) -> str | None:
-    """Resolve credential reference safely (e.g., 'env:ANTHROPIC_API_KEY') without exposing in API."""
     if not ref:
         return None
     if ref.startswith("env:"):
@@ -66,3 +73,23 @@ def mask_credential_ref(ref: str | None) -> str:
         present = bool(os.environ.get(env_name))
         return f"{ref} ({'configured' if present else 'not set'})"
     return "masked-ref"
+
+
+def detect_prompt_injection(text: str) -> list[str]:
+    hits: list[str] = []
+    for pat in INJECTION_PATTERNS:
+        if pat.search(text or ""):
+            hits.append(pat.pattern)
+    return hits
+
+
+def sanitize_untrusted_content(text: str, source: str = "external") -> dict[str, Any]:
+    """Isolate untrusted external content so it cannot be interpreted as trusted system instructions."""
+    hits = detect_prompt_injection(text)
+    cleaned = text.replace("```system", "```untrusted").replace("<system>", "[untrusted-tag]")
+    return {
+        "source": source,
+        "injection_detected": bool(hits),
+        "matched_patterns": hits,
+        "quarantined_text": f"[UNTRUSTED_DATA source={source}]\n{cleaned}\n[/UNTRUSTED_DATA]",
+    }

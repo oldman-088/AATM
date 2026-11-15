@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.security import hash_password
+from app.employees.catalog import ensure_employee_workspace
 from app.models import (
     Agent,
     AIProvider,
@@ -10,13 +11,17 @@ from app.models import (
     AuditLog,
     BrowserProfile,
     ChatMessage,
+    ExecutionDevice,
     GitWorkflowRecord,
     MemoryEntry,
     Notification,
     Project,
+    ProviderAccount,
+    ProviderSession,
     SystemSetting,
     Task,
     User,
+    Userscript,
 )
 
 
@@ -349,6 +354,87 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 key="concurrency",
                 value={"max_workers": settings.MAX_CONCURRENT_WORKERS, "max_browsers": settings.MAX_CONCURRENT_BROWSERS, "stalled_task_minutes": settings.STALLED_TASK_MINUTES},
                 description="Hardware-aware concurrency limits",
+            )
+        )
+    if not await db.get(SystemSetting, "autonomy"):
+        db.add(
+            SystemSetting(
+                key="autonomy",
+                value={"mode": "semi_autonomous", "prompt_injection_guard": True, "require_approval_for_protected_merge": True},
+                description="Global autonomy policy and safety controls",
+            )
+        )
+
+    # 10. Execution Device, Provider Accounts/Sessions, Userscripts & Workspaces
+    if not await db.get(ExecutionDevice, "device-local"):
+        import os
+        import platform
+
+        db.add(
+            ExecutionDevice(
+                id="device-local",
+                name="Primary AATM Control Node",
+                device_type="local",
+                host_address="127.0.0.1",
+                os_name=platform.system(),
+                cpu_cores=os.cpu_count() or 2,
+                ram_gb=4.0,
+                capabilities=["fastapi", "python", "node", "playwright", "git"],
+                status="online",
+                max_concurrent_tasks=settings.MAX_CONCURRENT_WORKERS,
+            )
+        )
+
+    if not await db.get(ProviderAccount, "acct-arena-primary"):
+        db.add(
+            ProviderAccount(
+                id="acct-arena-primary",
+                provider_id="arena-agent",
+                label="Primary Arena Organization Account",
+                account_identifier="aatm-org@arena.ai",
+                allocation_mode="hybrid",
+                max_employees=20,
+                credential_ref="env:ARENA_SESSION_TOKEN",
+                status="active",
+            )
+        )
+        await db.flush()
+
+    for aid in ("manager-0", "worker-1", "worker-2", "worker-3", "worker-4"):
+        ws = ensure_employee_workspace(aid)
+        ag = await db.get(Agent, aid)
+        if ag:
+            ag.workspace_path = str(ws)
+            ag.provider_account_id = ag.provider_account_id or "acct-arena-primary"
+            if not ag.provider_session_id:
+                sid = f"sess-{aid}"
+                if not await db.get(ProviderSession, sid):
+                    db.add(
+                        ProviderSession(
+                            id=sid,
+                            account_id="acct-arena-primary",
+                            agent_id=aid,
+                            project_id=project.id,
+                            browser_profile_id=ag.browser_profile_id,
+                            status="active",
+                        )
+                    )
+                ag.provider_session_id = sid
+
+    if not await db.get(Userscript, "us-aatm-telemetry"):
+        db.add(
+            Userscript(
+                id="us-aatm-telemetry",
+                name="AATM Authorized Page Inspector",
+                namespace="aatm.tampermonkey",
+                version="1.0.0",
+                description="Extracts structured page headings & DOM health diagnostics on authorized localhost/docs pages.",
+                match_patterns=["http://localhost:*/*", "https://fastapi.tiangolo.com/*"],
+                allowed_roles=["worker", "manager"],
+                allowed_agent_ids=["worker-2", "worker-3", "worker-4"],
+                code="// ==UserScript==\n// @name AATM Authorized Page Inspector\n// @match http://localhost:*/*\n// ==/UserScript==\nconsole.info('AATM Inspector Ready:', document.title);",
+                is_enabled=True,
+                audit_status="approved",
             )
         )
 

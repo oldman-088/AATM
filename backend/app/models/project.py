@@ -29,9 +29,11 @@ class MemoryEntry(Base):
     __tablename__ = "memory_entries"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    scope: Mapped[str] = mapped_column(String(24), nullable=False, index=True)  # global|project|agent|task|decision
+    # Scopes: employee | team | project | organization | global | agent | task | decision
+    scope: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    visibility: Mapped[str] = mapped_column(String(24), default="project", nullable=False)  # private|team|project|organization
     project_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("projects.id"), nullable=True, index=True)
-    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)

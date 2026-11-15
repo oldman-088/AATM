@@ -81,6 +81,7 @@ async def create_memory(
 ):
     entry = MemoryEntry(
         scope=body.scope,
+        visibility=body.visibility,
         project_id=body.project_id,
         agent_id=body.agent_id,
         task_id=body.task_id,

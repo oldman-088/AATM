@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import app.models  # noqa: F401
-from app.api.routes import auth, governance, infra, orchestration, projects
+from app.api.routes import auth, governance, infra, orchestration, platform, projects
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import Base
@@ -72,6 +72,7 @@ app.include_router(projects.router, prefix=API_PREFIX)
 app.include_router(orchestration.router, prefix=API_PREFIX)
 app.include_router(infra.router, prefix=API_PREFIX)
 app.include_router(governance.router, prefix=API_PREFIX)
+app.include_router(platform.router, prefix=API_PREFIX)
 
 
 @app.websocket("/ws/events")
