@@ -509,6 +509,9 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
   const [host, setHost] = useState('10.0.0.20')
   const [osName, setOsName] = useState('Ubuntu 24.04')
   const [pinged, setPinged] = useState<string | null>(null)
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
+  const [rotated, setRotated] = useState<{ deviceId: string; deviceName: string; token: string } | null>(null)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const registerDevice = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -538,12 +541,58 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
     onReload()
   }
 
+  /**
+   * Revokes the device credential and surfaces the rotated token exactly once
+   * (the backend never returns it again, so it is kept only in transient state).
+   */
+  const revokeToken = async (device: any) => {
+    setConfirmRevoke(null)
+    setRevokeError(null)
+    try {
+      const res = await apiFetch<any>(`/devices/${device.id}/revoke`, { method: 'POST' })
+      const token = res?.new_token || res?.token || res?.device_token || res?.rotated_token
+      setRotated({ deviceId: device.id, deviceName: device.name, token: token || '' })
+      onReload()
+    } catch (err: any) {
+      setRevokeError(err?.message || t.enterprise.revokeFailed)
+    }
+  }
+
   return (
     <Card className="space-y-3">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
         <Laptop className="h-4 w-4 text-sky-400" />
         {t.enterprise.devicesTitle}
       </h3>
+      {revokeError && (
+        <div className="rounded border border-rose-500/40 bg-rose-950/30 p-2 text-xs text-rose-200">{revokeError}</div>
+      )}
+
+      {rotated && (
+        <div className="space-y-1 rounded-lg border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs text-amber-100">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold">
+              {t.enterprise.revokeSuccess} {rotated.deviceName}
+            </span>
+            <Button size="sm" variant="secondary" onClick={() => setRotated(null)}>
+              {t.common.cancel}
+            </Button>
+          </div>
+          {rotated.token ? (
+            <>
+              <div className="font-semibold">{t.enterprise.rotatedToken}</div>
+              <code
+                data-testid="rotated-device-token"
+                className="block break-all rounded bg-slate-950/70 p-2 font-mono text-[11px] text-emerald-200"
+              >
+                {rotated.token}
+              </code>
+              <div className="text-[11px] text-amber-200/80">{t.enterprise.rotatedTokenHint}</div>
+            </>
+          ) : null}
+        </div>
+      )}
+
       <form onSubmit={registerDevice} className="grid gap-2 sm:grid-cols-4">
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t.enterprise.nodeNamePlaceholder} />
         <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder={t.enterprise.hostPlaceholder} />
@@ -559,12 +608,26 @@ export function MultiDeviceNodesPanel({ devices, onReload }: { devices: any[]; o
                 {d.host_address} • {d.os_name} • {d.cpu_cores} vCPU
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               {pinged === d.id && <Badge variant="info">{t.enterprise.heartbeatSent}</Badge>}
               <Badge variant={d.status === 'online' ? 'success' : 'warning'}>{d.status}</Badge>
               <Button size="sm" variant="secondary" onClick={() => sendHeartbeat(d.id)}>
                 {t.enterprise.heartbeat}
               </Button>
+              {confirmRevoke === d.id ? (
+                <>
+                  <Button size="sm" variant="danger" onClick={() => revokeToken(d)}>
+                    {t.enterprise.revokeConfirm}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirmRevoke(null)}>
+                    {t.common.cancel}
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" variant="danger" onClick={() => setConfirmRevoke(d.id)}>
+                  {t.enterprise.revokeToken}
+                </Button>
+              )}
             </div>
           </div>
         ))}

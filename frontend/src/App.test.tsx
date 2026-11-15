@@ -268,3 +268,178 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     await settle()
   })
 })
+
+describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    installWebSocketMock()
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+  })
+
+  afterEach(async () => {
+    await settle()
+  })
+
+  it('requests a pending approval and then opens an approval-gated pull request', async () => {
+    const { calls } = installFetchMock()
+    render(<App />)
+
+    fireEvent.click(navButton('GitHub Integration'))
+
+    fireEvent.change(await screen.findByPlaceholderText('Pull request title'), {
+      target: { value: 'feat(frontend): sprint v2.2 governance controls' },
+    })
+
+    // 1) operator has no approval yet -> request one from governance
+    fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
+
+    await waitFor(() => {
+      const approval = calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')
+      expect(approval).toBeDefined()
+      expect(approval?.body).toMatchObject({ action_type: 'merge' })
+      expect(approval?.authorization).toBe('Bearer test-jwt')
+    })
+
+    // the quick action must populate the approval id field for the operator
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('Approval UUID')).toHaveValue('appr-1')
+    )
+    expect(await screen.findByText(/Approval requested: appr-1/)).toBeInTheDocument()
+
+    // 2) submit the write, referencing the approval
+    fireEvent.click(screen.getByRole('button', { name: /Create Pull Request/ }))
+
+    await waitFor(() => {
+      const pr = calls.find((c) => c.path === '/api/v1/github/prs' && c.method === 'POST')
+      expect(pr).toBeDefined()
+      expect(pr?.body).toMatchObject({
+        approval_id: 'appr-1',
+        repo: 'oldman-088/AATM',
+        title: 'feat(frontend): sprint v2.2 governance controls',
+        head: 'arena/51325356-aatm',
+        base: 'main',
+      })
+      expect(pr?.authorization).toBe('Bearer test-jwt')
+    })
+
+    expect(await screen.findByText(/pull\/12/)).toBeInTheDocument()
+    await settle()
+  })
+
+  it('creates an approval-gated GitHub issue with deploy-class approval', async () => {
+    const { calls } = installFetchMock()
+    render(<App />)
+
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.click(await screen.findByRole('button', { name: /^Issue$/ }))
+    fireEvent.change(await screen.findByPlaceholderText('Issue title'), {
+      target: { value: 'RTL audit follow-ups' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
+    await waitFor(() => {
+      const approval = calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')
+      expect(approval?.body).toMatchObject({ action_type: 'deploy' })
+    })
+
+    await waitFor(() => expect(screen.getByPlaceholderText('Approval UUID')).toHaveValue('appr-1'))
+    fireEvent.click(screen.getByRole('button', { name: /Create Issue/ }))
+
+    await waitFor(() => {
+      const issue = calls.find((c) => c.path === '/api/v1/github/issues' && c.method === 'POST')
+      expect(issue?.body).toMatchObject({
+        approval_id: 'appr-1',
+        repo: 'oldman-088/AATM',
+        title: 'RTL audit follow-ups',
+      })
+      // issues are not branch-scoped
+      expect(issue?.body).not.toHaveProperty('head')
+      expect(issue?.body).not.toHaveProperty('base')
+    })
+
+    expect(await screen.findByText(/issues\/34/)).toBeInTheDocument()
+    await settle()
+  })
+
+  it('blocks GitHub writes until an approval id is present', async () => {
+    const { calls } = installFetchMock()
+    render(<App />)
+
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.change(await screen.findByPlaceholderText('Pull request title'), {
+      target: { value: 'Needs governance approval' },
+    })
+
+    const submit = screen.getByRole('button', { name: /Create Pull Request/ })
+    expect(submit).toBeDisabled()
+    fireEvent.click(submit)
+    expect(calls.find((c) => c.path === '/api/v1/github/prs')).toBeUndefined()
+    await settle()
+  })
+
+  it('renders daily & monthly provider budget headroom from settings and usage logs', async () => {
+    const now = new Date()
+    const logs = [{ created_at: now.toISOString(), estimated_cost_usd: 3.5 }]
+    let monthlySpend = 3.5
+    if (now.getDate() > 1) {
+      logs.push({
+        created_at: new Date(now.getFullYear(), now.getMonth(), 1, 9, 0, 0).toISOString(),
+        estimated_cost_usd: 4.25,
+      })
+      monthlySpend = 7.75
+    }
+
+    installFetchMock({
+      '/api/v1/providers': [
+        {
+          id: 'arena-agent',
+          name: 'Arena Agent',
+          provider_type: 'arena',
+          default_model: 'arena-agent',
+          credential_status: 'configured',
+          health_status: 'healthy',
+          daily_limit_usd: 20,
+        },
+      ],
+      '/api/v1/providers/usage': {
+        summary: { total_input_tokens: 1200, total_output_tokens: 800, total_estimated_cost_usd: 7.75 },
+        logs,
+      },
+    })
+    render(<App />)
+
+    fireEvent.click(navButton('Arena & AI Providers'))
+
+    expect(await screen.findByText('Provider Budget & Headroom')).toBeInTheDocument()
+    // daily: $3.50 spent against the $25 settings limit -> $21.50 headroom
+    expect(screen.getByText('$3.50 / $25.00')).toBeInTheDocument()
+    expect(screen.getByText('$21.50')).toBeInTheDocument()
+    // monthly: spend within the current month against the $400 limit
+    expect(
+      screen.getByText(`$${monthlySpend.toFixed(2)} / $400.00`)
+    ).toBeInTheDocument()
+    expect(screen.getByText(`$${(400 - monthlySpend).toFixed(2)}`)).toBeInTheDocument()
+    // governance threshold surfaced next to the limits
+    expect(screen.getByText('$5.00')).toBeInTheDocument()
+    await settle()
+  })
+
+  it('falls back to provider caps when the budgets setting is unavailable', async () => {
+    const failing = installFetchMock({
+      '/api/v1/settings': () => {
+        throw new Error('settings unavailable')
+      },
+      '/api/v1/providers': [
+        { id: 'p1', name: 'P1', provider_type: 'openai', default_model: 'gpt', credential_status: 'set', health_status: 'healthy', daily_limit_usd: 20 },
+        { id: 'p2', name: 'P2', provider_type: 'anthropic', default_model: 'claude', credential_status: 'set', health_status: 'healthy', daily_limit_usd: 10 },
+      ],
+    })
+    render(<App />)
+
+    fireEvent.click(navButton('Arena & AI Providers'))
+    expect(await screen.findByText(/\$0\.02 \/ \$30\.00/)).toBeInTheDocument()
+    // the budgets setting was requested, failed, and the UI degraded to summed provider caps
+    expect(failing.calls.some((c) => c.path === '/api/v1/settings')).toBe(true)
+    await settle()
+  })
+})

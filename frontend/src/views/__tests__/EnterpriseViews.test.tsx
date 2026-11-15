@@ -319,3 +319,75 @@ describe('Enterprise panels — i18n, RTL & backend wiring', () => {
     }
   })
 })
+
+describe('Sprint v2.2 — device token revocation', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+  })
+
+  const devices = [
+    {
+      id: 'node-1',
+      name: 'GPU Worker',
+      host_address: '10.0.0.20',
+      os_name: 'Ubuntu 24.04',
+      cpu_cores: 16,
+      status: 'online',
+    },
+  ]
+
+  it('revokes a device token through authenticated apiFetch and shows the rotated token once', async () => {
+    const revokeMock = installFetchMock()
+    const { unmount } = renderWithLocale(<MultiDeviceNodesPanel devices={devices} onReload={noop} />)
+
+    // two-step confirmation guard: nothing is revoked on the first click
+    fireEvent.click(screen.getByRole('button', { name: /Revoke Token/ }))
+    expect(screen.queryByTestId('rotated-device-token')).not.toBeInTheDocument()
+    expect(revokeMock.calls.find((c) => c.path.includes('/revoke'))).toBeUndefined()
+
+    fireEvent.click(screen.getByRole('button', { name: /Confirm revoke/ }))
+
+    await waitFor(() => {
+      const post = revokeMock.calls.find((c) => c.path === '/api/v1/devices/node-1/revoke')
+      expect(post?.method).toBe('POST')
+      expect(post?.authorization).toBe('Bearer test-jwt')
+    })
+
+    const token = await screen.findByTestId('rotated-device-token')
+    expect(token).toHaveTextContent('aatm_dev_rotated_token_9f2c')
+    expect(screen.getByText(/Rotated device token \(shown once\)/)).toBeInTheDocument()
+
+    // dismissing the callout clears the one-time secret from the DOM
+    fireEvent.click(screen.getByRole('button', { name: /Cancel/ }))
+    expect(screen.queryByTestId('rotated-device-token')).not.toBeInTheDocument()
+
+    unmount()
+  })
+
+  it('surfaces a localized revocation error when the backend rejects the request', async () => {
+    const failing = installFetchMock()
+    failing.mock.mockImplementation(async (input: any) => {
+      if (String(input).includes('/revoke')) {
+        return { ok: false, status: 403, json: async () => ({ detail: 'Device token already revoked' }) }
+      }
+      return { ok: true, status: 200, json: async () => [] }
+    })
+
+    renderWithLocale(<MultiDeviceNodesPanel devices={devices} onReload={noop} />)
+    fireEvent.click(screen.getByRole('button', { name: /Revoke Token/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Confirm revoke/ }))
+
+    expect(await screen.findByText('Device token already revoked')).toBeInTheDocument()
+  })
+
+  it('renders the revocation control in Arabic and Persian (RTL)', async () => {
+    for (const lang of ['ar', 'fa'] as const) {
+      installFetchMock()
+      const { unmount } = renderWithLocale(<MultiDeviceNodesPanel devices={devices} onReload={noop} />, lang)
+      expect(document.documentElement.dir).toBe('rtl')
+      expect(screen.getByRole('button', { name: lang === 'ar' ? /إبطال الرمز/ : /ابطال توکن/ })).toBeInTheDocument()
+      unmount()
+    }
+  })
+})

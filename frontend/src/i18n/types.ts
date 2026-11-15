@@ -129,6 +129,15 @@ export interface Translations {
     usageSummary: string
     totalCost: string
     totalTokens: string
+    budgetTitle: string
+    dailyLimit: string
+    monthlyLimit: string
+    spentToday: string
+    spentThisMonth: string
+    remainingHeadroom: string
+    approvalThreshold: string
+    budgetUnavailable: string
+    budgetSource: string
   }
   projects: {
     title: string
@@ -151,6 +160,27 @@ export interface Translations {
     requestMerge: string
     worktrees: string
     recentCommits: string
+    writeTitle: string
+    writeHint: string
+    targetPr: string
+    targetIssue: string
+    repository: string
+    repositoryPlaceholder: string
+    prTitlePlaceholder: string
+    issueTitlePlaceholder: string
+    bodyPlaceholder: string
+    headBranch: string
+    baseBranch: string
+    approvalId: string
+    approvalIdPlaceholder: string
+    requestApproval: string
+    submitPr: string
+    submitIssue: string
+    approvalCreated: string
+    approvalRequired: string
+    writeSuccess: string
+    writeFailed: string
+    approvalPendingHint: string
   }
   qa: {
     title: string
@@ -237,6 +267,12 @@ export interface Translations {
     registerNode: string
     heartbeat: string
     heartbeatSent: string
+    revokeToken: string
+    revokeConfirm: string
+    revokeSuccess: string
+    rotatedToken: string
+    rotatedTokenHint: string
+    revokeFailed: string
     guardTitle: string
     guardPlaceholder: string
     sanitize: string

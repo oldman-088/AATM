@@ -89,10 +89,48 @@ export const fixtures: Record<string, RouteValue> = {
   '/api/v1/providers': [],
   '/api/v1/providers/usage': {
     summary: { total_input_tokens: 1200, total_output_tokens: 800, total_estimated_cost_usd: 0.02 },
+    logs: [],
   },
+  '/api/v1/settings': {
+    budgets: {
+      value: { daily_limit_usd: 25, monthly_limit_usd: 400, require_approval_above_usd: 5 },
+      description: 'AI provider spend controls and approval thresholds',
+      updated_at: '2026-11-01T00:00:00Z',
+    },
+  },
+  '/api/v1/github/prs': (path: string, init: RequestInit) => {
+    if ((init.method || 'GET').toUpperCase() === 'POST') {
+      const body = JSON.parse(String(init.body || '{}'))
+      return {
+        number: 12,
+        html_url: 'https://github.com/oldman-088/AATM/pull/12',
+        approval_id: body.approval_id,
+        title: body.title,
+      }
+    }
+    return []
+  },
+  '/api/v1/github/issues': (path: string, init: RequestInit) => {
+    if ((init.method || 'GET').toUpperCase() === 'POST') {
+      const body = JSON.parse(String(init.body || '{}'))
+      return {
+        number: 34,
+        html_url: 'https://github.com/oldman-088/AATM/issues/34',
+        approval_id: body.approval_id,
+        title: body.title,
+      }
+    }
+    return []
+  },
+
   '/api/v1/accounts': [],
   '/api/v1/sessions': [],
-  '/api/v1/devices': [],
+  '/api/v1/devices': (path: string, init: RequestInit) => {
+    if (path.includes('/revoke')) {
+      return { id: path.split('/devices/')[1]?.split('/')[0], status: 'revoked', new_token: 'aatm_dev_rotated_token_9f2c' }
+    }
+    return []
+  },
   '/api/v1/devices/heartbeat': { status: 'online' },
   '/api/v1/git/status': {
     repository: { current_branch: 'arena/51325356-aatm', recent_commits: ['83c14f4 chore: snapshot'] },
@@ -102,7 +140,13 @@ export const fixtures: Record<string, RouteValue> = {
     security_scan: { status: 'passed', files_scanned: 42, findings: [] },
     intelligence: { recommendations: ['No blocking findings'] },
   },
-  '/api/v1/approvals': [],
+  '/api/v1/approvals': (path: string, init: RequestInit) => {
+    if ((init.method || 'GET').toUpperCase() === 'POST') {
+      const body = JSON.parse(String(init.body || '{}'))
+      return { id: 'appr-1', status: 'pending', action_type: body.action_type, title: body.title }
+    }
+    return []
+  },
   '/api/v1/audit': [],
   '/api/v1/notifications': [],
   '/api/v1/memory': [],
