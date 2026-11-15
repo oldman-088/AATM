@@ -30,6 +30,19 @@ from app.qa.engine import FORBIDDEN_ARTIFACT_RULES, qa_engine
 from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
 
 
+@pytest.fixture(scope="session", autouse=True)
+async def _preserve_alembic_version_stamp():
+    yield
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+        )
+        await conn.execute(text("DELETE FROM alembic_version"))
+        await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('ee92483cefa3')"))
+
+
 @pytest.fixture(scope="module")
 async def client():
     async with engine.begin() as conn:
@@ -704,3 +717,265 @@ async def test_e2e_offline_device_tasks_are_reclaimed(client, auth_headers, proj
 
     stored = next(t for t in (await client.get("/api/v1/tasks")).json() if t["id"] == task["id"])
     assert stored["status"] == "queued", "a task owned by a dead node must be requeued"
+
+
+# --------------------------------------------------------------------------------------
+# 7. Approval-gated GitHub write helpers (create_branch, create_pull_request, create_issue)
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("protected_branch", ["main", "master", "production"])
+async def test_e2e_github_write_protected_branch_refusal_without_approval(monkeypatch, project_id, protected_branch):
+    import subprocess as _subprocess
+
+    from app.git_workflows.manager import git_workflow_manager
+    from app.github_client.client import github_client
+    from app.models import ApprovalRequest
+
+    calls: list[list[str]] = []
+
+    def _forbid_subprocess(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", _forbid_subprocess)
+
+    pending_approval = ApprovalRequest(
+        id=f"app-pending-{protected_branch}",
+        project_id=project_id,
+        action_type="merge",
+        title=f"Pending approval for {protected_branch}",
+        description="Not yet approved.",
+        requested_by="worker-4",
+        status="pending",
+    )
+
+    # 1. Protected branch creation without approval or with pending approval must be refused.
+    for candidate_approval in (None, pending_approval):
+        br_client = github_client.create_branch(
+            branch_name=protected_branch,
+            base_branch="main",
+            repo="oldman-088/AATM",
+            approval=candidate_approval,
+        )
+        assert br_client["allowed"] is False
+        assert br_client["ok"] is False
+        assert br_client["is_protected_target"] is True
+        assert protected_branch in br_client["reason"]
+
+        br_mgr = git_workflow_manager.create_branch(
+            branch_name=protected_branch,
+            base_branch="main",
+            repo="oldman-088/AATM",
+            approval=candidate_approval,
+        )
+        assert br_mgr["allowed"] is False
+        assert br_mgr["ok"] is False
+        assert br_mgr["is_protected_target"] is True
+
+        # 2. Pull request targeting a protected base branch without approved ApprovalRequest must be refused.
+        pr_client = github_client.create_pull_request(
+            repo="oldman-088/AATM",
+            title=f"Target {protected_branch} PR",
+            head="feature/sprint-v2-1",
+            base=protected_branch,
+            approval=candidate_approval,
+        )
+        assert pr_client["allowed"] is False
+        assert pr_client["ok"] is False
+        assert pr_client["is_protected_target"] is True
+        assert protected_branch in pr_client["reason"]
+
+        pr_mgr = git_workflow_manager.create_pull_request(
+            repo="oldman-088/AATM",
+            title=f"Target {protected_branch} PR",
+            head="feature/sprint-v2-1",
+            base=protected_branch,
+            approval=candidate_approval,
+        )
+        assert pr_mgr["allowed"] is False
+        assert pr_mgr["ok"] is False
+
+    assert calls == [], "gh CLI must never be invoked when protected-branch guardrails refuse the write"
+
+
+async def test_e2e_github_write_repo_allowlist_and_validation(monkeypatch, project_id):
+    import subprocess as _subprocess
+
+    from app.github_client.client import github_client
+    from app.models import ApprovalRequest
+
+    calls: list[list[str]] = []
+
+    def _forbid_subprocess(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", _forbid_subprocess)
+
+    approved = ApprovalRequest(
+        id="app-approved-allowlist",
+        project_id=project_id,
+        action_type="merge",
+        title="Approved request",
+        description="Approved",
+        requested_by="worker-4",
+        status="approved",
+    )
+
+    for bad_repo in ("untrusted-org/rogue-repo", "not-a-repo-slug", "../escape/repo", "-flag/injection"):
+        assert github_client.create_branch("feature/x", repo=bad_repo, approval=approved)["allowed"] is False
+        assert (
+            github_client.create_pull_request(
+                repo=bad_repo,
+                title="PR",
+                head="feature/x",
+                base="main",
+                approval=approved,
+            )["allowed"]
+            is False
+        )
+        assert github_client.create_issue(repo=bad_repo, title="Issue", approval=approved)["allowed"] is False
+
+    for bad_branch in ("../../etc/passwd", "-f", "branch..bad", "branch.lock"):
+        assert github_client.create_branch(bad_branch, repo="oldman-088/AATM", approval=approved)["allowed"] is False
+
+    assert calls == [], "disallowed or invalid repos/branches must be rejected before invoking gh"
+
+
+async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(monkeypatch, project_id):
+    import subprocess as _subprocess
+
+    from app.git_workflows.manager import git_workflow_manager
+    from app.github_client.client import github_client, sanitize_cli_output
+    from app.models import ApprovalRequest
+
+    calls: list[list[str]] = []
+
+    def _mock_subprocess_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["gh", "api"] and "--jq" in cmd:
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="9d63854af0a7226a9d1e0114a59af3f1d87f21af\n",
+                stderr="",
+            )
+        if cmd[:2] == ["gh", "api"] and "POST" in cmd:
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"ref": "refs/heads/feature/v2-1", "object": {"sha": "9d63854af0a7226a9d1e0114a59af3f1d87f21af"}}',
+                stderr="",
+            )
+        if cmd[:3] == ["gh", "pr", "create"]:
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="https://github.com/oldman-088/AATM/pull/42\n",
+                stderr="",
+            )
+        if cmd[:3] == ["gh", "issue", "create"]:
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="https://github.com/oldman-088/AATM/issues/17\n",
+                stderr="",
+            )
+        return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", _mock_subprocess_run)
+
+    approved = ApprovalRequest(
+        id="app-e2e-gh-approved-01",
+        project_id=project_id,
+        action_type="merge",
+        title="Approve Sprint v2.1 GitHub PR & Issue",
+        description="Executive approval for GitHub branch, PR, and issue creation.",
+        requested_by="worker-4",
+        status="approved",
+    )
+
+    # 1. Issue creation without approval is refused; with approval it executes `gh issue create`.
+    unapproved_issue = git_workflow_manager.create_issue(
+        repo="oldman-088/AATM",
+        title="Unapproved issue attempt",
+        body="Should be blocked",
+        approval=None,
+    )
+    assert unapproved_issue["allowed"] is False
+    assert unapproved_issue["ok"] is False
+    assert calls == []
+
+    issue_res = git_workflow_manager.create_issue(
+        repo="oldman-088/AATM",
+        title="Track Sprint v2.1 Verification",
+        body="Automated QA verification issue.",
+        labels=["qa", "sprint-v2.1"],
+        assignees=["worker-4"],
+        approval=approved,
+    )
+    assert issue_res["allowed"] is True
+    assert issue_res["ok"] is True
+    assert issue_res["approval_id"] == "app-e2e-gh-approved-01"
+    assert issue_res["url"] == "https://github.com/oldman-088/AATM/issues/17"
+    assert any(c[:3] == ["gh", "issue", "create"] for c in calls)
+
+    # 2. Branch creation (feature branch + protected branch with approval) wraps `gh api`.
+    br_res = git_workflow_manager.create_branch(
+        branch_name="feature/v2-1",
+        base_branch="main",
+        repo="oldman-088/AATM",
+        approval=approved,
+    )
+    assert br_res["allowed"] is True
+    assert br_res["ok"] is True
+    assert br_res["ref"] == "refs/heads/feature/v2-1"
+    assert br_res["sha"] == "9d63854af0a7226a9d1e0114a59af3f1d87f21af"
+
+    # 3. Approval-gated PR targeting protected branch `main` executes `gh pr create` once approved.
+    pr_res = await git_workflow_manager.create_pull_request(
+        repo="oldman-088/AATM",
+        title="feat(v2.1): approval-gated GitHub write helpers",
+        head="feature/v2-1",
+        base="main",
+        body="Implements approval-gated branch, PR, and issue helpers.",
+        draft=True,
+        approval=approved,
+    )
+    assert pr_res["allowed"] is True
+    assert pr_res["ok"] is True
+    assert pr_res["is_protected_target"] is True
+    assert pr_res["approval_id"] == "app-e2e-gh-approved-01"
+    assert pr_res["url"] == "https://github.com/oldman-088/AATM/pull/42"
+    pr_cmd = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
+    assert "--repo" in pr_cmd and "oldman-088/AATM" in pr_cmd
+    assert "--base" in pr_cmd and "main" in pr_cmd
+    assert "--head" in pr_cmd and "feature/v2-1" in pr_cmd
+    assert "--draft" in pr_cmd
+
+    # 4. CLI failure output is sanitized so credentials/tokens never leak.
+    gh_secret = _sample_secret("github")
+    ant_secret = _sample_secret("anthropic")
+
+    def _mock_leaking_error(cmd, *args, **kwargs):
+        auth_url = "https://" + "bot:" + gh_secret + "@" + "github.com/oldman-088/AATM.git"
+        return _subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr=f"HTTP 401: token {gh_secret} rejected for {auth_url} (key={ant_secret})",
+        )
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", _mock_leaking_error)
+    err_res = github_client.create_pull_request(
+        repo="oldman-088/AATM",
+        title="PR with error",
+        head="feature/v2-1",
+        base="main",
+        approval=approved,
+    )
+    assert err_res["ok"] is False
+    assert gh_secret not in err_res["error"]
+    assert ant_secret not in err_res["error"]
+    assert "[REDACTED]" in err_res["error"]
+    assert gh_secret not in sanitize_cli_output(f"Authorization: Bearer {gh_secret}")
+
