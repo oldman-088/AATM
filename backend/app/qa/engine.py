@@ -75,7 +75,7 @@ EXCLUDED_SCAN_DIRS: frozenset[str] = frozenset(
         ".venv", "venv", "env", "node_modules", ".git", ".hg", ".svn", "dist", "build",
         "out", "coverage", ".next", ".nuxt", ".cache", ".pytest_cache", ".ruff_cache",
         ".mypy_cache", "__pycache__", ".tox", ".idea", ".vscode",
-        "data", "backups", "logs",
+        "data", "worktrees", "backups", "logs",
     }
 )
 
@@ -170,14 +170,14 @@ class QAAndIntelligenceEngine:
         }
 
     # ---------------------------------------------------------------- secret scanning
-    def run_security_scan(self) -> dict[str, Any]:
+    def run_security_scan(self, repo_root: Path | str | None = None) -> dict[str, Any]:
         """Scan the working tree and the git index for committed secrets and forbidden artifacts.
 
         Findings never contain the matched secret value - only the file, line and rule id -
         so that the scan output is safe to store in the audit trail.
         """
         settings = get_settings()
-        root = settings.REPO_ROOT
+        root = Path(repo_root).resolve() if repo_root else settings.REPO_ROOT
         findings: list[dict[str, Any]] = []
         suppressed: list[dict[str, Any]] = []
         files_scanned = 0
@@ -196,7 +196,12 @@ class QAAndIntelligenceEngine:
         for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
-            if any(part in EXCLUDED_SCAN_DIRS for part in path.parts):
+            try:
+                rel_path = path.relative_to(root)
+                rel = str(rel_path)
+            except ValueError:
+                continue
+            if any(part in EXCLUDED_SCAN_DIRS for part in rel_path.parts):
                 continue
             name = path.name.lower()
             # Dotfiles such as ".env" / ".env.production" have no extension suffix.
@@ -204,10 +209,6 @@ class QAAndIntelligenceEngine:
             if not is_env_file and not any(name.endswith(ext) for ext in SCAN_EXTENSIONS):
                 continue
 
-            try:
-                rel = str(path.relative_to(root))
-            except ValueError:
-                continue
             files_scanned += 1
             scanned_paths.add(rel)
 

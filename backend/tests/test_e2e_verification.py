@@ -1202,3 +1202,166 @@ async def test_e2e_smart_replacement_bridge_session_cleanup(
     assert cleanup_offline["bridge_reachable"] is False
 
 
+# --------------------------------------------------------------------------------------
+# 9. Round 2: Isolated Per-Agent Git Worktrees & Approval Payload Compatibility
+# --------------------------------------------------------------------------------------
+async def test_e2e_agent_git_worktree_lifecycle_isolation_and_hygiene(tmp_path):
+    import subprocess as _subprocess
+
+    from sqlalchemy import select
+
+    from app.git_workflows.manager import git_workflow_manager
+    from app.models import AuditLog
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    _subprocess.run(["git", "-C", str(repo), "config", "user.email", "qa@aatm.local"], check=True)
+    _subprocess.run(["git", "-C", str(repo), "config", "user.name", "AATM QA"], check=True)
+    (repo / "README.md").write_text("# Temporary Repo\n", encoding="utf-8")
+    _subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    _subprocess.run(["git", "-C", str(repo), "commit", "-m", "initial commit"], check=True, capture_output=True)
+
+    # 1. Path traversal / unsafe agent_id values must be rejected.
+    for bad_agent in ("../../etc/passwd", "../escape", "/abs/path", "-flag", "worker/sub", ""):
+        res_bad = git_workflow_manager.create_agent_worktree(bad_agent, "feature/test", repo_path=repo)
+        assert res_bad["allowed"] is False
+        assert res_bad["ok"] is False
+        rm_bad = git_workflow_manager.remove_agent_worktree(bad_agent, repo_path=repo)
+        assert rm_bad["allowed"] is False
+        assert rm_bad["ok"] is False
+
+    # 2. Invalid branch names and unapproved protected branches must be rejected.
+    for bad_branch in ("../../bad", "-f", "branch.lock", "main", "master", "production"):
+        res_br = git_workflow_manager.create_agent_worktree("worker-4", bad_branch, repo_path=repo)
+        assert res_br["allowed"] is False
+        assert res_br["ok"] is False
+
+    # 3. Create isolated worktrees for worker-4 and worker-1 with DB audit logging.
+    async with AsyncSessionLocal() as db:
+        wt_w4 = await git_workflow_manager.create_agent_worktree(
+            "worker-4",
+            "feature/w4-worktree",
+            base_ref="HEAD",
+            db=db,
+            repo_path=repo,
+        )
+        assert wt_w4["allowed"] is True
+        assert wt_w4["ok"] is True
+        w4_path = Path(wt_w4["worktree_path"])
+        assert w4_path == (repo / "data" / "worktrees" / "worker-4").resolve()
+        assert w4_path.is_dir()
+
+        wt_w1 = await git_workflow_manager.create_agent_worktree(
+            "worker-1",
+            "feature/w1-worktree",
+            base_ref="HEAD",
+            db=db,
+            repo_path=repo,
+        )
+        assert wt_w1["allowed"] is True
+        assert wt_w1["ok"] is True
+        w1_path = Path(wt_w1["worktree_path"])
+        assert w1_path == (repo / "data" / "worktrees" / "worker-1").resolve()
+
+        # Verify file isolation across worktrees and main repo.
+        (w4_path / "w4_only.py").write_text(f"TOKEN = '{_sample_secret('github')}'\n", encoding="utf-8")
+        assert not (repo / "w4_only.py").exists()
+        assert not (w1_path / "w4_only.py").exists()
+
+        # 4. Conflict prevention: duplicate agent worktree or duplicate checked-out branch is refused.
+        dup_agent = git_workflow_manager.create_agent_worktree("worker-4", "feature/another", repo_path=repo)
+        assert dup_agent["allowed"] is False
+        assert dup_agent["ok"] is False
+
+        dup_branch = git_workflow_manager.create_agent_worktree("worker-2", "feature/w4-worktree", repo_path=repo)
+        assert dup_branch["allowed"] is False
+        assert dup_branch["ok"] is False
+
+        # 5. QA Engine excludes transient local data/worktrees/ runtime files while flagging committed forbidden artifacts.
+        scan_clean = qa_engine.run_security_scan(repo_root=repo)
+        assert scan_clean["status"] == "passed", scan_clean["findings"]
+
+        (repo / ".env").write_text("S=1\n", encoding="utf-8")
+        _subprocess.run(["git", "-C", str(repo), "add", "-f", ".env"], check=True)
+        scan_flagged = qa_engine.run_security_scan(repo_root=repo)
+        assert scan_flagged["status"] == "warning"
+        assert any(f["rule"] == "env_file_committed" for f in scan_flagged["findings"])
+        _subprocess.run(["git", "-C", str(repo), "rm", "-f", ".env"], check=True, capture_output=True)
+
+        # 6. Clean teardown of worktrees and verification of AuditLog records.
+        rm_w4 = await git_workflow_manager.remove_agent_worktree("worker-4", db=db, repo_path=repo)
+        assert rm_w4["ok"] is True
+        assert rm_w4["removed"] is True
+        assert not w4_path.exists()
+
+        rm_w1 = await git_workflow_manager.remove_agent_worktree("worker-1", db=db, repo_path=repo)
+        assert rm_w1["ok"] is True
+        assert not w1_path.exists()
+
+        logs = (
+            await db.execute(select(AuditLog).where(AuditLog.resource_type == "git_worktree"))
+        ).scalars().all()
+        actions = {lg.action for lg in logs}
+        assert "git.worktree_create" in actions
+        assert "git.worktree_remove" in actions
+
+
+async def test_e2e_github_verify_approval_target_branch_and_base_payload_compatibility(
+    monkeypatch, project_id
+):
+    import subprocess as _subprocess
+
+    from app.git_workflows.manager import git_workflow_manager
+    from app.github_client.client import verify_approval
+    from app.models import ApprovalRequest
+
+    monkeypatch.setattr(
+        "app.github_client.client.subprocess.run",
+        lambda cmd, *a, **kw: _subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="https://github.com/oldman-088/AATM/pull/99\n",
+            stderr="",
+        ),
+    )
+
+    for payload_key in ("target_branch", "base", "base_branch", "target"):
+        approval = ApprovalRequest(
+            id=f"app-compat-{payload_key}",
+            project_id=project_id,
+            action_type="merge",
+            title=f"Approve PR via {payload_key}",
+            description="Payload compatibility verification",
+            requested_by="worker-4",
+            payload={payload_key: "main", "repo": "oldman-088/AATM"},
+            status="approved",
+        )
+        ok, _reason, resolved_id = verify_approval(approval, target_branch="main", repo="oldman-088/AATM")
+        assert ok is True
+        assert resolved_id == f"app-compat-{payload_key}"
+
+        pr_ok = git_workflow_manager.create_pull_request(
+            repo="oldman-088/AATM",
+            title="Compatible approval payload PR",
+            head="feature/compat-check",
+            base="main",
+            approval=approval,
+        )
+        assert pr_ok["allowed"] is True
+        assert pr_ok["ok"] is True
+
+        # Using an approval scoped to `main` for `production` must be rejected.
+        pr_mismatch = git_workflow_manager.create_pull_request(
+            repo="oldman-088/AATM",
+            title="Mismatched protected target PR",
+            head="feature/compat-check",
+            base="production",
+            approval=approval,
+        )
+        assert pr_mismatch["allowed"] is False
+        assert pr_mismatch["ok"] is False
+        assert "production" in pr_mismatch["reason"]
+
+
+
