@@ -288,6 +288,52 @@ export interface Translations {
     noTraces: string
     tracesUnavailable: string
     traceAgentFilter: string
+    workflowBuilder: string
+    workflowProfile: string
+    workflowEngine: string
+    workflowStep: string
+    workflowAdd: string
+    workflowUp: string
+    workflowDown: string
+    workflowRemove: string
+    workflowRun: string
+    workflowUrl: string
+    workflowSelector: string
+    workflowValue: string
+    workflowWait: string
+    workflowResults: string
+    workflowNoProfiles: string
+    skillTitle: string
+    requiredSkills: string
+    analyzeSkills: string
+    provisionSkills: string
+    confirmProvision: string
+    coveredSkills: string
+    missingSkills: string
+    provisionedCount: string
+    recoverAll: string
+    recoveredCount: string
+    worktreesTitle: string
+    worktreeAgent: string
+    worktreeBranch: string
+    worktreeBase: string
+    worktreeCreate: string
+    worktreeRemove: string
+    confirmRemove: string
+    worktreeApproval: string
+    commentMode: string
+    prNumber: string
+    commentBody: string
+    submitComment: string
+    navigateStep: string
+    clickStep: string
+    fillStep: string
+    extractStep: string
+    snapshotStep: string
+    waitStep: string
+    operationFailed: string
+    worktreeDone: string
+    workflowUnverified: string
     reportingHierarchy: string
     targetBranch: string
     branchName: string
