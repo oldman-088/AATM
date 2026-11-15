@@ -98,6 +98,10 @@ export const fixtures: Record<string, RouteValue> = {
       updated_at: '2026-11-01T00:00:00Z',
     },
   },
+  '/api/v1/github/branches': (_path: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body || '{}'))
+    return { ok: true, allowed: true, repo: body.repo, branch_name: body.branch_name, approval_id: body.approval_id }
+  },
   '/api/v1/github/prs': (path: string, init: RequestInit) => {
     if ((init.method || 'GET').toUpperCase() === 'POST') {
       const body = JSON.parse(String(init.body || '{}'))

@@ -420,12 +420,50 @@ describe('Round 2 organization and traces', () => {
     installFetchMock({ '/api/v1/traces': [{ id: 'trace-1', name: 'Build task', status: 'running', agent_id: 'worker-1' }] })
     renderWithLocale(<EmployeeCreatorAndOrgPanel agents={AGENTS} templates={TEMPLATES} onReload={noop} />)
     expect(screen.getByText('D03')).toBeInTheDocument()
-    expect(screen.getByText(/reporting relationships are not provided/)).toBeInTheDocument()
+    expect(screen.getByText(/no valid supervisor provided/)).toBeInTheDocument()
     expect(await screen.findByText(/Build task.*running.*worker-1/)).toBeInTheDocument()
   })
   it('handles an unavailable trace API', async () => {
     installFetchMock({ '/api/v1/traces': () => { throw new Error('unavailable') } })
     renderWithLocale(<EmployeeCreatorAndOrgPanel agents={AGENTS} templates={TEMPLATES} onReload={noop} />)
     expect(await screen.findByText('Trace service unavailable')).toBeInTheDocument()
+  })
+})
+
+
+describe('Round 3 hierarchy and filtered traces', () => {
+  it('nests reporting lines and leaves missing or cyclic supervisors in division fallback', async () => {
+    installFetchMock()
+    const agents = [
+      { id: 'manager-0', name: 'Director', role: 'manager' },
+      { id: 'lead', name: 'Lead', role: 'worker', reports_to: 'manager-0' },
+      { id: 'worker', name: 'Worker', role: 'worker', reports_to: 'lead' },
+      { id: 'orphan', name: 'Orphan', role: 'worker', reports_to: 'unknown', divisions: ['D03'] },
+      { id: 'cycle-a', name: 'Cycle A', role: 'worker', reports_to: 'cycle-b', divisions: ['D04'] },
+      { id: 'cycle-b', name: 'Cycle B', role: 'worker', reports_to: 'cycle-a', divisions: ['D04'] },
+    ]
+    const { container } = renderWithLocale(<EmployeeCreatorAndOrgPanel agents={agents} templates={TEMPLATES} onReload={noop} />)
+    const director = screen.getByText('Director', { selector: 'div' }).closest('.space-y-2')!
+    const lead = screen.getByText('Lead', { selector: 'div' }).closest('.space-y-2')!
+    expect(director).toContainElement(screen.getByText('Lead', { selector: 'div' }))
+    expect(lead).toContainElement(screen.getByText('Worker', { selector: 'div' }))
+    expect(screen.getByText('D03').parentElement).toContainElement(screen.getByText('Orphan', { selector: 'div' }))
+    expect(screen.getByText('D04').parentElement).toContainElement(screen.getByText('Cycle A', { selector: 'div' }))
+    expect(container.textContent).toContain('Cycle B')
+    expect(await screen.findByText('No traces available')).toBeInTheDocument()
+  })
+
+  it('filters server traces by encoded agent and renders real source fields', async () => {
+    const { calls } = installFetchMock({ '/api/v1/traces': (path: string) => path.includes('?')
+      ? { traces: [{ id: 'u1', model_name: 'model-x', success: false, timestamp: '2026-01-01T00:00:00Z', agent_id: 'worker-1' }] }
+      : { traces: [{ id: 'a1', action: 'task.run', severity: 'warning', timestamp: '2026-01-02T00:00:00Z' }] } })
+    renderWithLocale(<EmployeeCreatorAndOrgPanel agents={AGENTS} templates={TEMPLATES} onReload={noop} />)
+    expect(await screen.findByText(/task.run.*warning.*2026-01-02/)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Filter traces by agent'), { target: { value: 'worker-1' } })
+    expect(await screen.findByText(/model-x.*failed.*worker-1.*2026-01-01/)).toBeInTheDocument()
+    expect(calls.some((c) => c.path === '/api/v1/traces?agent_id=worker-1')).toBe(true)
+    fireEvent.change(screen.getByLabelText('Filter traces by agent'), { target: { value: '' } })
+    expect(await screen.findByText(/task.run.*warning/)).toBeInTheDocument()
+    expect(calls.filter((c) => c.path === '/api/v1/traces')).toHaveLength(2)
   })
 })

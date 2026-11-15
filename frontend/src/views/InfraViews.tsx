@@ -504,7 +504,7 @@ export function ProjectsMemoryView({
   )
 }
 
-type GitHubTarget = 'pr' | 'issue'
+type GitHubTarget = 'pr' | 'issue' | 'branch'
 
 export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: any; approvals: any[]; onReload: () => void }) {
   const { t } = useI18n()
@@ -517,6 +517,8 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
   const [bodyText, setBodyText] = useState('')
   const [headBranch, setHeadBranch] = useState('')
   const [baseBranch, setBaseBranch] = useState('main')
+  const [branchName, setBranchName] = useState('')
+  const [fromBranch, setFromBranch] = useState('main')
   const [approvalId, setApprovalId] = useState('')
   const [requestedApprovalId, setRequestedApprovalId] = useState('')
   const [writeFeedback, setWriteFeedback] = useState<{ kind: 'ok' | 'error' | 'info'; message: string; url?: string } | null>(null)
@@ -536,21 +538,22 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
   }
 
   /**
-   * Requests a pending merge-class approval for either GitHub write.
+   * Requests an approval bound to the specific GitHub operation.
    */
   const requestApproval = async () => {
+    if (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim())) return
     setRequesting(true)
     try {
       const created = await apiFetch<any>('/approvals', {
         method: 'POST',
         body: JSON.stringify({
-          action_type: 'merge',
-          title: title || (target === 'pr' ? 'GitHub pull request' : 'GitHub issue'),
+          action_type: target === 'branch' ? 'branch' : 'merge',
+          title: target === 'branch' ? `${t.enterprise.targetBranch}: ${branchName}` : title || (target === 'pr' ? 'GitHub pull request' : 'GitHub issue'),
           description:
-            target === 'pr'
+            target === 'branch' ? `${branchName} ← ${fromBranch} (${repo})` : target === 'pr'
               ? `Create PR ${headBranch || repository.current_branch} -> ${baseBranch} in ${repo}`
               : `Create issue "${title}" in ${repo}`,
-          payload: { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
+          payload: target === 'branch' ? { kind: 'branch', repo, branch_name: branchName, from_branch: fromBranch } : { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
         }),
       })
       setApprovalId(created?.id || '')
@@ -566,14 +569,16 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
 
   const submitWrite = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!title.trim() || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected') {
+    if (!(target === 'branch' ? branchName.trim() && fromBranch.trim() && repo.trim() : title.trim()) || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected') {
       setWriteFeedback({ kind: 'error', message: t.git.approvalRequired })
       return
     }
     setSubmitting(true)
     try {
       const payload =
-        target === 'pr'
+        target === 'branch'
+          ? { approval_id: approvalId.trim(), repo, branch_name: branchName, from_branch: fromBranch }
+          : target === 'pr'
           ? {
               approval_id: approvalId.trim(),
               repo,
@@ -583,16 +588,19 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
               base: baseBranch,
             }
           : { approval_id: approvalId.trim(), repo, title, body: bodyText }
-      const res = await apiFetch<any>(target === 'pr' ? '/github/prs' : '/github/issues', {
+      const res = await apiFetch<any>(target === 'pr' ? '/github/prs' : target === 'issue' ? '/github/issues' : '/github/branches', {
         method: 'POST',
         body: JSON.stringify(payload),
       })
       const number = res?.pr_number ?? res?.issue_number ?? res?.number
-      const ref = res?.url || res?.html_url || (number ? `#${number}` : '') || res?.id || ''
+      const ref = res?.url || res?.html_url || (number ? `#${number}` : '') || res?.branch_name || res?.id || ''
       const url = typeof res?.url === 'string' ? res.url : res?.html_url
       setWriteFeedback({ kind: 'ok', message: `${t.git.writeSuccess} ${ref}`.trim(), url: typeof url === 'string' && /^https:\/\//i.test(url) ? url : undefined })
       setTitle('')
       setBodyText('')
+      setBranchName('')
+      setApprovalId('')
+      setRequestedApprovalId('')
       onReload()
     } catch (err: any) {
       setWriteFeedback({ kind: 'error', message: err?.message || t.git.writeFailed })
@@ -654,16 +662,16 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
             {t.git.writeTitle}
           </h3>
           <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-            {(['pr', 'issue'] as const).map((kind) => (
+            {(['pr', 'issue', 'branch'] as const).map((kind) => (
               <button
                 key={kind}
                 type="button"
-                onClick={() => setTarget(kind)}
+                onClick={() => { setTarget(kind); setApprovalId(''); setRequestedApprovalId(''); setWriteFeedback(null) }}
                 className={`rounded px-2.5 py-1 text-xs font-medium ${
                   target === kind ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                {kind === 'pr' ? t.git.targetPr : t.git.targetIssue}
+                {kind === 'pr' ? t.git.targetPr : kind === 'issue' ? t.git.targetIssue : t.enterprise.targetBranch}
               </button>
             ))}
           </div>
@@ -700,12 +708,14 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
             />
           </div>
           {approvalId.trim() && <div role="status" className="text-xs text-slate-300">{t.enterprise.approvalStatus} {statusLabel}</div>}
-          <Input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder={target === 'pr' ? t.git.prTitlePlaceholder : t.git.issueTitlePlaceholder}
-            aria-label={target === 'pr' ? t.git.prTitlePlaceholder : t.git.issueTitlePlaceholder}
-          />
+          {target === 'branch' ? (
+            <div className="grid gap-2 md:grid-cols-2">
+              <Input value={branchName} onChange={(e) => setBranchName(e.target.value)} placeholder={t.enterprise.branchName} aria-label={t.enterprise.branchName} />
+              <Input value={fromBranch} onChange={(e) => setFromBranch(e.target.value)} placeholder={t.enterprise.fromBranch} aria-label={t.enterprise.fromBranch} />
+            </div>
+          ) : (
+            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={target === 'pr' ? t.git.prTitlePlaceholder : t.git.issueTitlePlaceholder} aria-label={target === 'pr' ? t.git.prTitlePlaceholder : t.git.issueTitlePlaceholder} />
+          )}
           {target === 'pr' && (
             <div className="grid gap-2 md:grid-cols-2">
               <Input
@@ -722,20 +732,20 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
               />
             </div>
           )}
-          <textarea
+          {target !== 'branch' && <textarea
             value={bodyText}
             onChange={(e) => setBodyText(e.target.value)}
             rows={3}
             placeholder={t.git.bodyPlaceholder}
             aria-label={t.git.bodyPlaceholder}
             className="w-full rounded-lg border border-slate-700 bg-slate-950/70 p-3 text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
-          />
+          />}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="secondary" onClick={requestApproval} disabled={requesting}>
+            <Button type="button" variant="secondary" onClick={requestApproval} disabled={requesting || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim()))}>
               {t.git.requestApproval}
             </Button>
-            <Button type="submit" disabled={submitting || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected'}>
-              {target === 'pr' ? t.git.submitPr : t.git.submitIssue}
+            <Button type="submit" disabled={submitting || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected' || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim()))}>
+              {target === 'pr' ? t.git.submitPr : target === 'issue' ? t.git.submitIssue : t.enterprise.submitBranch}
             </Button>
           </div>
         </form>
