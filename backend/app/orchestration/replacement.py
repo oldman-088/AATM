@@ -1,3 +1,4 @@
+import inspect
 import logging
 import shutil
 from typing import Any
@@ -8,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.browser.manager import browser_manager
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.employees.catalog import ensure_employee_workspace
+from app.employees.catalog import allocate_account_and_session, ensure_employee_workspace
+from app.git_workflows.manager import git_workflow_manager
 from app.models import (
     Agent,
     AgentMessage,
@@ -127,8 +129,12 @@ class ReplacementAndEmergencyService:
         if transferred_tasks:
             replacement.current_task_id = transferred_tasks[0]
 
+        replacement_session_allocated = await self._ensure_replacement_session(db, replacement)
+        replacement_session_id = replacement.provider_session_id
+
         bridge_cleanup = await self._cleanup_bridge_session(db, failing)
         stopped_browsers = await self._stop_employee_browsers(db, failing, actor=actor)
+        worktree_cleanup = await self._cleanup_employee_worktree(failing_agent_id)
 
         db.add(
             AuditLog(
@@ -138,11 +144,14 @@ class ReplacementAndEmergencyService:
                 resource_id=failing_agent_id,
                 details={
                     "replacement_id": replacement_id,
+                    "replacement_session_id": replacement_session_id,
+                    "replacement_session_allocated": replacement_session_allocated,
                     "transferred_tasks": transferred_tasks,
                     "transferred_files": transferred_files,
                     "reason": reason,
                     "bridge_session_cleanup": bridge_cleanup,
                     "stopped_browsers": stopped_browsers,
+                    "worktree_cleanup": worktree_cleanup,
                 },
                 severity="warning",
             )
@@ -166,19 +175,69 @@ class ReplacementAndEmergencyService:
             {
                 "from": failing_agent_id,
                 "to": replacement_id,
+                "replacement_session_id": replacement_session_id,
                 "tasks": transferred_tasks,
                 "bridge_session_cleanup": bridge_cleanup,
                 "stopped_browsers": stopped_browsers,
+                "worktree_cleanup": worktree_cleanup,
             },
         )
         return {
             "replaced_employee": failing_agent_id,
             "replacement_employee": replacement_id,
+            "replacement_session_id": replacement_session_id,
+            "replacement_session_allocated": replacement_session_allocated,
             "transferred_tasks": transferred_tasks,
             "transferred_files": transferred_files,
             "bridge_session_cleanup": bridge_cleanup,
             "stopped_browsers": stopped_browsers,
+            "worktree_cleanup": worktree_cleanup,
         }
+
+    async def _ensure_replacement_session(
+        self,
+        db: AsyncSession,
+        replacement: Agent,
+    ) -> dict[str, Any] | None:
+        """Ensure the replacement employee has an active ProviderSession, allocating one if missing or closed."""
+        existing_sess: ProviderSession | None = None
+        if replacement.provider_session_id:
+            existing_sess = await db.get(ProviderSession, replacement.provider_session_id)
+        if existing_sess is not None and existing_sess.status != "closed":
+            return None
+
+        provider_id = replacement.provider_id or "arena-agent"
+        acct_id, sess_id = await allocate_account_and_session(
+            db,
+            agent_id=replacement.id,
+            provider_id=provider_id,
+            preferred_account_id=replacement.provider_account_id,
+            browser_profile_id=replacement.browser_profile_id,
+        )
+        replacement.provider_account_id = acct_id
+        replacement.provider_session_id = sess_id
+        return {"account_id": acct_id, "session_id": sess_id, "provider_id": provider_id}
+
+    @staticmethod
+    async def _cleanup_employee_worktree(failing_agent_id: str) -> dict[str, Any]:
+        """Best-effort cleanup of any stale git worktree belonging to the replaced employee."""
+        try:
+            res = git_workflow_manager.remove_agent_worktree(failing_agent_id)
+            if inspect.isawaitable(res):
+                res = await res
+            return dict(res) if isinstance(res, dict) else {"ok": True, "removed": True, "agent_id": failing_agent_id}
+        except Exception as exc:  # noqa: BLE001 - best-effort worktree hygiene must never abort replacement
+            logger.warning(
+                "Best-effort worktree cleanup failed for agent=%s: %s",
+                failing_agent_id,
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "removed": False,
+                "agent_id": failing_agent_id,
+                "error": f"Worktree cleanup error: {type(exc).__name__}",
+            }
 
     async def _stop_employee_browsers(
         self,

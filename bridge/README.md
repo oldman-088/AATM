@@ -33,7 +33,7 @@ The `bridge/` package provides a compliant, loopback-bound reference implementat
 | `ARENA_BRIDGE_MAX_HISTORY` | `40` | Maximum messages retained per isolated employee session. |
 | `AATM_BRIDGE_STATE_FILE` | _(unset)_ | Optional JSON file path for atomic (`0600`) session-store persistence across daemon restarts (never stores secrets/tokens). |
 | `AATM_BRIDGE_SESSION_TTL_SECONDS` | _(unset)_ | Optional idle-session TTL in seconds; sessions inactive longer than this threshold are evicted automatically. |
-| `ARENA_BRIDGE_UPSTREAM_URL` | _(unset)_ | Optional official/local OpenAI-compatible base URL (e.g. local Ollama/vLLM/LiteLLM). |
+| `ARENA_BRIDGE_UPSTREAM_URL` | _(unset)_ | Optional official/local OpenAI-compatible base URL (e.g. local Ollama/vLLM/LiteLLM); streams SSE chunks incrementally when `stream: true`. |
 | `ARENA_BRIDGE_UPSTREAM_API_KEY` | _(unset)_ | Optional Bearer key for `ARENA_BRIDGE_UPSTREAM_URL` (env-only, never persisted). |
 
 ---

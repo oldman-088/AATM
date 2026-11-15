@@ -23,6 +23,7 @@ from app.browser.manager import (
     BrowserManager,
     browser_manager,
     detect_playwright_capabilities,
+    redact_extracted_text,
     validate_navigation_url,
     validate_selector,
 )
@@ -30,6 +31,7 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
+from app.employees.catalog import analyze_team_skill_gaps, provision_missing_specialists
 from app.models import (
     Agent,
     AIProvider,
@@ -1703,3 +1705,531 @@ async def test_worker_daemon_mid_task_keepalive_401_halts_immediately(
     assert device_token not in out
     assert any("TOKEN REVOKED (HTTP 401)" in rec.message for rec in caplog.records)
     assert all(device_token not in rec.message for rec in caplog.records)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Round 3: extract_text + BrowserUse/OpenBrowser + Skill Gaps + Replacement + Recovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_browser_extract_text_policy_redaction_and_fallback(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. Redaction helper scrubs tokens, cookies, session IDs, and JWTs while preserving safe prose
+    bearer_tok = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiJ1c2VyLTEifQ." + "c2lnbmF0dXJlMTIzNDU2"
+    raw_dom = (
+        f"Dashboard Ready. Authorization: Bearer {bearer_tok} "
+        "cookie: sessionid=sess_secret_val_9981; csrftoken=csrf_val_777 "
+        "access_token=tok_secret_value_abc12345"
+    )
+    masked, redacted_count = redact_extracted_text(raw_dom)
+    assert "Dashboard Ready." in masked
+    assert "<redacted>" in masked
+    assert redacted_count >= 3
+    assert bearer_tok not in masked
+    assert "sess_secret_val_9981" not in masked
+    assert "tok_secret_value_abc12345" not in masked
+
+    # 2. Headless fallback path + policy enforcement
+    profile = BrowserProfile(
+        id="bp-extract-test",
+        name="Extract Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "bp-extract"),
+        status="ready",
+    )
+    db_session.add(profile)
+    await db_session.commit()
+
+    mgr = BrowserManager()
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": False,
+            "chromium_path": None,
+            "engine_mode": "headless_fallback",
+        },
+    )
+
+    with pytest.raises(ValueError, match="must be running"):
+        await mgr.extract_text(db_session, profile, "main")
+
+    await mgr.launch_profile(db_session, profile, owner="worker-3", mode="background")
+
+    with pytest.raises(ValueError, match="Policy violation"):
+        await mgr.extract_text(db_session, profile, "#cf-turnstile")
+
+    fb = await mgr.extract_text(db_session, profile, "main", max_chars=250, actor="worker-3")
+    assert fb["ok"] is True
+    assert fb["engine_mode"] == "headless_fallback"
+    assert fb["text"] == ""
+    assert fb["redacted_count"] == 0
+
+    # 3. Live Playwright mock path: redaction + max_chars truncation + no raw secret in AuditLog
+    class _FakeLocator:
+        def __init__(self, text_val: str) -> None:
+            self._text_val = text_val
+
+        @property
+        def first(self) -> "_FakeLocator":
+            return self
+
+        async def inner_text(self, timeout: int = 5000) -> str:
+            return self._text_val
+
+    class _FakeExtractPage:
+        def __init__(self, text_val: str) -> None:
+            self.url = "https://example.com/status"
+            self._text_val = text_val
+
+        async def title(self) -> str:
+            return "Status Page"
+
+        def locator(self, selector: str) -> _FakeLocator:
+            return _FakeLocator(self._text_val)
+
+    class _FakeExtractContext:
+        def __init__(self, page: _FakeExtractPage) -> None:
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeExtractPw:
+        async def stop(self) -> None:
+            return None
+
+    mgr._active_contexts[profile.id] = (
+        _FakeExtractPw(),
+        _FakeExtractContext(_FakeExtractPage(raw_dom + " " + ("Z" * 120))),
+    )
+    live_res = await mgr.extract_text(db_session, profile, "article.status", max_chars=90, actor="worker-3")
+    assert live_res["ok"] is True
+    assert live_res["engine_mode"] == "playwright"
+    assert live_res["truncated"] is True
+    assert len(live_res["text"]) == 90
+    assert live_res["redacted_count"] >= 3
+    assert "sess_secret_val_9981" not in live_res["text"]
+    assert bearer_tok not in live_res["text"]
+
+    # Confirm AuditLog recorded browser.extract_text without raw sensitive content
+    audit_res = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "browser.extract_text",
+            AuditLog.resource_id == profile.id,
+        )
+    )
+    audits = list(audit_res.scalars().all())
+    assert len(audits) == 2
+    for row in audits:
+        dumped = json.dumps(row.details or {})
+        assert "sess_secret_val_9981" not in dumped
+        assert bearer_tok not in dumped
+        assert "text" not in (row.details or {})
+
+    await mgr.stop_profile(db_session, profile, actor="worker-3")
+
+
+@pytest.mark.asyncio
+async def test_browser_use_and_openbrowser_real_step_and_workflow_execution(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = BrowserProfile(
+        id="bp-real-engines",
+        name="Real Engines Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "bp-engines"),
+        status="ready",
+    )
+    db_session.add(profile)
+    await db_session.commit()
+
+    mgr = BrowserManager()
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": False,
+            "chromium_path": None,
+            "engine_mode": "headless_fallback",
+        },
+    )
+    await mgr.launch_profile(db_session, profile, owner="worker-3", mode="background")
+
+    class _FakeLoc:
+        def __init__(self, selector: str, log: list[tuple[str, str]]) -> None:
+            self._selector = selector
+            self._log = log
+
+        @property
+        def first(self) -> "_FakeLoc":
+            return self
+
+        async def click(self, timeout: int = 5000) -> None:
+            self._log.append(("click", self._selector))
+
+        async def fill(self, value: str, timeout: int = 5000) -> None:
+            self._log.append(("fill", self._selector))
+
+        async def inner_text(self, timeout: int = 5000) -> str:
+            self._log.append(("extract_text", self._selector))
+            return "Build Passed! sessionid=never_expose_441"
+
+    class _FakePage:
+        def __init__(self) -> None:
+            self.url = "about:blank"
+            self.calls: list[tuple[str, str]] = []
+
+        async def goto(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 20000) -> None:
+            self.url = url
+            self.calls.append(("goto", url))
+
+        async def click(self, selector: str, timeout: int = 5000) -> None:
+            self.calls.append(("click", selector))
+
+        async def fill(self, selector: str, value: str, timeout: int = 5000) -> None:
+            self.calls.append(("fill", selector))
+
+        async def title(self) -> str:
+            return "Build Portal"
+
+        def locator(self, selector: str) -> _FakeLoc:
+            return _FakeLoc(selector, self.calls)
+
+        async def screenshot(self, full_page: bool = False, type: str = "png") -> bytes:
+            self.calls.append(("screenshot", "page"))
+            return b"\x89PNG\r\n\x1a\nfake-png"
+
+    class _FakeCtx:
+        def __init__(self, page: _FakePage) -> None:
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class _FakePw:
+        async def stop(self) -> None:
+            return None
+
+    for engine_key in ("browser_use", "openbrowser"):
+        adapter = BROWSER_ENGINE_REGISTRY[engine_key]
+        caps = adapter.capabilities()
+        assert caps["supports_step_execution"] is True
+        assert "extract_text" in caps["supported_steps"]
+
+        fake_page = _FakePage()
+        mgr._active_contexts[profile.id] = (_FakePw(), _FakeCtx(fake_page))
+
+        # 1. Structured multi-step workflow via execute_workflow
+        wf_steps = [
+            {"type": "navigate", "url": "https://example.com/ci"},
+            {"type": "fill_input", "selector": "#search", "value": "release-v3"},
+            {"type": "click_element", "selector": "#run-btn"},
+            {"type": "extract_text", "selector": "#summary", "max_chars": 200},
+            {"type": "capture_snapshot", "label": f"{engine_key}-snap"},
+            {"type": "wait", "ms": 1},
+        ]
+        wf_res = await adapter.execute_workflow(db_session, profile, wf_steps, manager=mgr, actor="worker-3")
+        assert wf_res["status"] == "completed"
+        assert wf_res["engine"] == engine_key
+        assert wf_res["steps_completed"] == 6
+        extract_step = wf_res["trace"][3]
+        assert extract_step["type"] == "extract_text"
+        assert "Build Passed!" in extract_step["text"]
+        assert "never_expose_441" not in extract_step["text"]
+        assert ("goto", "https://example.com/ci") in fake_page.calls
+        assert ("fill", "#search") in fake_page.calls
+        assert ("click", "#run-btn") in fake_page.calls
+        assert ("extract_text", "#summary") in fake_page.calls
+
+        # 2. Direct execute_action with db+profile routes through BrowserManager
+        act_res = await adapter.execute_action(
+            profile.id,
+            "extract_text",
+            {"db": db_session, "profile": profile, "manager": mgr, "selector": "#summary", "actor": "worker-3"},
+        )
+        assert act_res["status"] == "completed"
+        assert act_res["engine"] == engine_key
+        assert act_res["steps_completed"] == 1
+        assert "Build Passed!" in act_res["trace"][0]["text"]
+
+        # 3. Fail-closed CAPTCHA selector rejection (zero steps executed)
+        bad_wf = await adapter.execute_workflow(
+            db_session,
+            profile,
+            [
+                {"type": "navigate", "url": "https://example.com/ci"},
+                {"type": "extract_text", "selector": "#g-recaptcha-response"},
+            ],
+            manager=mgr,
+            actor="worker-3",
+        )
+        assert bad_wf["status"] == "rejected"
+        assert bad_wf["steps_completed"] == 0
+
+    await mgr.stop_profile(db_session, profile, actor="worker-3")
+
+
+@pytest.mark.asyncio
+async def test_dynamic_team_skill_gap_analyzer_and_specialist_provisioning(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
+
+    required = ["postgresql", "alembic", "playwright", "quantum_ml"]
+    gap_before = await analyze_team_skill_gaps(db_session, required, divisions=["D02", "D06"])
+    assert gap_before["active_employee_count"] >= 1
+    for skill in ("postgresql", "alembic", "playwright", "quantum_ml"):
+        assert skill in gap_before["missing_skills"]
+
+    rec_ids = [r["template_id"] for r in gap_before["recommended_templates"]]
+    assert "database_engineer" in rec_ids
+    assert "browser_automation_engineer" in rec_ids
+    assert "quantum_ml" in gap_before["unmatched_skills"]
+
+    provisioned = await provision_missing_specialists(
+        db_session,
+        required,
+        divisions=["D02", "D06"],
+        provider_id="arena-agent",
+        actor="manager-0",
+    )
+    assert provisioned["provisioned_count"] >= 3
+    assert provisioned["after"]["missing_skills"] == []
+    assert provisioned["after"]["missing_divisions"] == []
+    assert provisioned["after"]["coverage_ratio"] == 1.0
+
+    # Verify provisioned agents have active ProviderSessions in DB
+    for emp_info in provisioned["provisioned_employees"]:
+        emp = await db_session.get(Agent, emp_info["id"])
+        assert emp is not None
+        assert emp.provider_session_id is not None
+        sess = await db_session.get(ProviderSession, emp.provider_session_id)
+        assert sess is not None
+        assert sess.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_replace_employee_allocates_replacement_session_and_cleans_stale_worktree(
+    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.git_workflows.manager import git_workflow_manager
+    from app.orchestration.replacement import ReplacementAndEmergencyService
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
+
+    # Create a failing specialist and a matching replacement candidate with NO ProviderSession
+    failing = Agent(
+        id="emp-fail-r3",
+        name="Failing R3 Specialist",
+        role="worker",
+        specialty="Rust Kernel Specialist",
+        divisions=["D99"],
+        skills=["rust_kernel_r3", "ebpf_r3"],
+        provider_id="arena-agent",
+        status="error",
+        is_enabled=True,
+        workspace_path=str(tmp_path / "workspaces" / "emp-fail-r3"),
+    )
+    replacement_cand = Agent(
+        id="emp-rep-r3",
+        name="Backup R3 Specialist",
+        role="worker",
+        specialty="Rust Kernel Backup",
+        divisions=["D99"],
+        skills=["rust_kernel_r3", "ebpf_r3"],
+        provider_id="arena-agent",
+        provider_account_id=None,
+        provider_session_id=None,
+        status="idle",
+        is_enabled=True,
+        workspace_path=str(tmp_path / "workspaces" / "emp-rep-r3"),
+    )
+    db_session.add_all([failing, replacement_cand])
+    await db_session.commit()
+
+    worktree_calls: list[str] = []
+
+    def _fake_remove_worktree(agent_id: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        worktree_calls.append(agent_id)
+        return {"ok": True, "removed": True, "agent_id": agent_id}
+
+    monkeypatch.setattr(git_workflow_manager, "remove_agent_worktree", _fake_remove_worktree)
+
+    svc = ReplacementAndEmergencyService()
+    res = await svc.replace_employee(db_session, failing.id, reason="heartbeat timeout", actor="manager-0")
+
+    assert res["replacement_employee"] == replacement_cand.id
+    assert res["replacement_session_allocated"] is not None
+    assert res["replacement_session_id"] is not None
+    assert worktree_calls == [failing.id]
+    assert res["worktree_cleanup"]["removed"] is True
+
+    # Confirm replacement agent now owns a real active ProviderSession in DB
+    refreshed_rep = await db_session.get(Agent, replacement_cand.id)
+    assert refreshed_rep is not None
+    assert refreshed_rep.provider_session_id == res["replacement_session_id"]
+    rep_sess = await db_session.get(ProviderSession, refreshed_rep.provider_session_id)
+    assert rep_sess is not None
+    assert rep_sess.status == "active"
+
+    # Confirm AuditLog recorded replacement_session_allocated and worktree_cleanup
+    audit_res = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "employee.replaced",
+            AuditLog.resource_id == failing.id,
+        )
+    )
+    audit = audit_res.scalar_one()
+    assert audit.details["replacement_session_id"] == res["replacement_session_id"]
+    assert audit.details["worktree_cleanup"]["removed"] is True
+
+    # Verify worktree cleanup failure is best-effort and NEVER aborts replacement
+    failing2 = Agent(
+        id="emp-fail-r3-b",
+        name="Failing R3 B",
+        role="worker",
+        specialty="Rust Kernel B",
+        divisions=["D99"],
+        skills=["rust_kernel_r3", "ebpf_r3"],
+        provider_id="arena-agent",
+        status="error",
+        is_enabled=True,
+        workspace_path=str(tmp_path / "workspaces" / "emp-fail-r3-b"),
+    )
+    db_session.add(failing2)
+    await db_session.commit()
+
+    def _boom_worktree(agent_id: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("git binary missing")
+
+    monkeypatch.setattr(git_workflow_manager, "remove_agent_worktree", _boom_worktree)
+    res2 = await svc.replace_employee(db_session, failing2.id, reason="crash", actor="manager-0")
+    assert res2["replacement_employee"] == replacement_cand.id
+    # Replacement already has an active session -> not re-allocated
+    assert res2["replacement_session_allocated"] is None
+    assert res2["worktree_cleanup"]["ok"] is False
+    assert "RuntimeError" in res2["worktree_cleanup"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_provider_router_recover_degraded_sessions_online_and_offline(db_session) -> None:
+    with _MockBridgeServer() as srv:
+        p_bridge = await db_session.get(AIProvider, "arena-local-bridge")
+        assert p_bridge is not None
+        p_bridge.endpoint_url = srv.base_url
+        p_bridge.credential_ref = None
+        p_bridge.is_enabled = True
+
+        acct_bridge = ProviderAccount(
+            id="acct-rec-bridge",
+            provider_id="arena-local-bridge",
+            label="Bridge Recovery Account",
+            account_identifier="bridge-rec@local",
+            status="active",
+        )
+        acct_agent = ProviderAccount(
+            id="acct-rec-agent",
+            provider_id="arena-agent",
+            label="Agent Recovery Account",
+            account_identifier="agent-rec@local",
+            status="active",
+        )
+        db_session.add_all([acct_bridge, acct_agent])
+
+        sess_deg_bridge = ProviderSession(
+            id="sess-deg-bridge-1",
+            account_id=acct_bridge.id,
+            agent_id="worker-3",
+            status="degraded",
+            health_score=25.0,
+            error_count=4,
+            last_error="HTTP 502",
+        )
+        sess_deg_agent = ProviderSession(
+            id="sess-deg-agent-1",
+            account_id=acct_agent.id,
+            agent_id="worker-2",
+            status="active",
+            health_score=42.0,
+            error_count=2,
+            last_error="Timeout",
+        )
+        sess_healthy = ProviderSession(
+            id="sess-healthy-keep",
+            account_id=acct_bridge.id,
+            agent_id="worker-1",
+            status="active",
+            health_score=95.0,
+            error_count=0,
+        )
+        db_session.add_all([sess_deg_bridge, sess_deg_agent, sess_healthy])
+        await db_session.commit()
+
+        # Seed bridge-side session so DELETE /v1/sessions/{id} deletes it cleanly
+        srv.sessions[sess_deg_bridge.id] = acct_bridge.id
+
+        router = ProviderRouter()
+        report = await router.recover_degraded_sessions(db_session, actor="ops-admin")
+        assert report["recovered_count"] == 2
+        recovered_ids = {s["session_id"] for s in report["sessions"]}
+        assert recovered_ids == {sess_deg_bridge.id, sess_deg_agent.id}
+        assert sess_deg_bridge.id not in srv.sessions
+
+        bridge_entry = next(s for s in report["sessions"] if s["session_id"] == sess_deg_bridge.id)
+        assert bridge_entry["bridge_reset"]["deleted"] is True
+
+        # Confirm DB rows updated accurately & healthy session untouched
+        for sid in (sess_deg_bridge.id, sess_deg_agent.id):
+            row = await db_session.get(ProviderSession, sid)
+            assert row is not None
+            assert row.health_score == 100.0
+            assert row.status == "active"
+            assert row.error_count == 0
+            assert row.last_error is None
+
+        keep_row = await db_session.get(ProviderSession, sess_healthy.id)
+        assert keep_row is not None
+        assert keep_row.health_score == 95.0
+
+        # Confirm AuditLog entries written
+        audit_res = await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "provider.session_recovered")
+        )
+        audits = list(audit_res.scalars().all())
+        assert {a.resource_id for a in audits} == {sess_deg_bridge.id, sess_deg_agent.id}
+
+        # Second call with no degraded sessions is a clean no-op
+        noop = await router.recover_degraded_sessions(db_session, actor="ops-admin")
+        assert noop["recovered_count"] == 0
+
+    # Offline bridge recovery still restores DB session cleanly without crashing
+    sess_deg_offline = ProviderSession(
+        id="sess-deg-offline",
+        account_id="acct-rec-bridge",
+        agent_id="worker-3",
+        status="degraded",
+        health_score=10.0,
+        error_count=5,
+        last_error="bridge down",
+    )
+    db_session.add(sess_deg_offline)
+    await db_session.commit()
+
+    p_bridge_off = await db_session.get(AIProvider, "arena-local-bridge")
+    assert p_bridge_off is not None
+    p_bridge_off.endpoint_url = "http://127.0.0.1:1"
+    await db_session.commit()
+
+    off_report = await ProviderRouter().recover_degraded_sessions(db_session, actor="ops-admin")
+    assert off_report["recovered_count"] == 1
+    assert off_report["sessions"][0]["bridge_reset"]["status"] == "bridge_offline"
+    refreshed_off = await db_session.get(ProviderSession, "sess-deg-offline")
+    assert refreshed_off is not None
+    assert refreshed_off.status == "active"
+    assert refreshed_off.health_score == 100.0
+

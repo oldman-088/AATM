@@ -27,10 +27,37 @@ SAFE_CHROMIUM_ARGS = [
 
 MAX_SELECTOR_LENGTH = 512
 MAX_FILL_VALUE_LENGTH = 50_000
+MAX_EXTRACT_CHARS = 20_000
 PROHIBITED_SELECTOR_RE = re.compile(
     r"(captcha|recaptcha|hcaptcha|turnstile|arkose|funcaptcha|geetest|cf-turnstile|g-recaptcha|h-captcha|px-captcha|datadome|challenge-form|javascript:|<script)",
     re.IGNORECASE,
 )
+
+SENSITIVE_TEXT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE), "Bearer <redacted>"),
+    (re.compile(r"\bAuthorization\s*:\s*[^\s,;\"']+(?:\s+[^\s,;\"']+)?", re.IGNORECASE), "Authorization: <redacted>"),
+    (
+        re.compile(
+            r"\b((?:cookie|set-cookie|sessionid|session_id|csrftoken|cf_clearance|access_token|refresh_token|id_token|api_key|apikey|jwt|auth_token|password|passwd|secret)\s*[=:]\s*)([^\s;,&\"']+)",
+            re.IGNORECASE,
+        ),
+        r"\1<redacted>",
+    ),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "<redacted>"),
+    (re.compile(r"\b(?:sk-(?:ant-|proj-)?|ghp_|gho_|github_pat_|xox[baprs]-|AIza|AKIA)[A-Za-z0-9_-]{12,}\b"), "<redacted>"),
+]
+
+
+def redact_extracted_text(text: str) -> tuple[str, int]:
+    """Mask sensitive token, cookie, JWT, and credential patterns in extracted DOM text."""
+    if not text:
+        return "", 0
+    redacted = text
+    total_hits = 0
+    for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
+        redacted, count = pattern.subn(replacement, redacted)
+        total_hits += count
+    return redacted, total_hits
 
 
 def validate_selector(selector: str) -> str:
@@ -817,6 +844,161 @@ class BrowserManager:
                 "lock_status": self.get_lock_status(profile),
                 "capabilities": caps,
                 "fallback_reason": fallback_reason,
+            }
+
+    async def extract_text(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        selector: str,
+        max_chars: int = 2000,
+        *,
+        actor: str = "system",
+        timeout_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        """Policy-checked DOM text extraction with sensitive token/cookie redaction and headless_fallback support."""
+        safe_selector = validate_selector(selector)
+        bounded_max = max(1, min(int(max_chars), MAX_EXTRACT_CHARS))
+
+        async with self._get_profile_lock(profile.id):
+            if profile.status != "running":
+                raise ValueError(
+                    f"Browser profile '{profile.id}' must be running before extracting text (status='{profile.status}')."
+                )
+
+            profile.last_heartbeat = utcnow()
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    if hasattr(page, "text_content"):
+                        raw_text = await page.text_content(safe_selector, timeout=timeout_ms)
+                    elif hasattr(page, "inner_text"):
+                        raw_text = await page.inner_text(safe_selector, timeout=timeout_ms)
+                    else:
+                        raw_text = await page.locator(safe_selector).first.inner_text(timeout=timeout_ms)
+                    text_str = str(raw_text or "")
+                    masked_text, redacted_count = redact_extracted_text(text_str)
+                    truncated = len(masked_text) > bounded_max
+                    final_text = masked_text[:bounded_max]
+                    note = (
+                        f"Live Playwright extract_text on '{safe_selector[:40]}' "
+                        f"({len(final_text)} chars, {redacted_count} redacted)."
+                    )
+                    profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.extract_text",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "selector": safe_selector,
+                                "char_count": len(final_text),
+                                "max_chars": bounded_max,
+                                "truncated": truncated,
+                                "redacted_count": redacted_count,
+                                "engine_mode": "playwright",
+                                "executed_live": True,
+                            },
+                        )
+                    )
+                    await db.commit()
+                    await db.refresh(profile)
+                    await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "extract_text"})
+                    return {
+                        "ok": True,
+                        "action": "extract_text",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "text": final_text,
+                        "char_count": len(final_text),
+                        "truncated": truncated,
+                        "redacted_count": redacted_count,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "detail": note,
+                    }
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    profile.last_snapshot_svg = render_browser_wall_svg(
+                        profile, note=f"Playwright extract_text error: {type(exc).__name__}"
+                    )
+                    db.add(
+                        AuditLog(
+                            actor=actor,
+                            action="browser.extract_text",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "selector": safe_selector,
+                                "engine_mode": "playwright",
+                                "error": err_msg,
+                            },
+                            severity="warning",
+                        )
+                    )
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "action": "extract_text",
+                        "profile_id": profile.id,
+                        "selector": safe_selector,
+                        "text": "",
+                        "char_count": 0,
+                        "truncated": False,
+                        "redacted_count": 0,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "current_url": profile.current_url,
+                        "page_title": profile.page_title,
+                        "error": err_msg,
+                    }
+
+            caps = detect_playwright_capabilities()
+            fallback_reason = (
+                "Chromium binary not installed on host; operating in headless_fallback diagnostic mode."
+                if not caps["chromium_installed"]
+                else "No live Playwright context attached to this profile; operating in headless_fallback diagnostic mode."
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note=f"[headless_fallback] extract_text validated for '{safe_selector[:42]}'.",
+            )
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="browser.extract_text",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "selector": safe_selector,
+                        "max_chars": bounded_max,
+                        "engine_mode": "headless_fallback",
+                        "executed_live": False,
+                    },
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit("browser.snapshot", {"profile_id": profile.id, "action": "extract_text"})
+            return {
+                "ok": True,
+                "action": "extract_text",
+                "profile_id": profile.id,
+                "selector": safe_selector,
+                "text": "",
+                "char_count": 0,
+                "truncated": False,
+                "redacted_count": 0,
+                "engine_mode": "headless_fallback",
+                "executed_live": False,
+                "fallback_reason": fallback_reason,
+                "current_url": profile.current_url,
+                "page_title": profile.page_title,
+                "capabilities": caps,
             }
 
     async def run_userscript(

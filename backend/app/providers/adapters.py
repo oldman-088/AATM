@@ -408,6 +408,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
         usage_data: dict[str, Any] = {}
         bridge_session: dict[str, Any] | None = None
         finish_reason = "stop"
+        stream_error: str | None = None
 
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -441,6 +442,8 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                         if not isinstance(frame, dict):
                             continue
 
+                        if isinstance(frame.get("error"), dict):
+                            stream_error = str(frame["error"].get("message") or frame["error"].get("type") or "Upstream stream error")
                         if isinstance(frame.get("usage"), dict):
                             usage_data = frame["usage"]
                         if isinstance(frame.get("session"), dict):
@@ -463,6 +466,23 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                                         done=False,
                                         metadata={"stream": True, "endpoint": base_url, **session_meta},
                                     )
+
+            if stream_error is not None or finish_reason == "error":
+                yield ProviderStreamChunk(
+                    provider_id=self.provider_id,
+                    model=model,
+                    delta="",
+                    done=True,
+                    finish_reason="error",
+                    input_tokens=in_tok,
+                    output_tokens=self.estimate_tokens("".join(collected_parts)) if collected_parts else 0,
+                    estimated_cost_usd=0.0,
+                    latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                    success=False,
+                    error_message=stream_error or "Arena Local Bridge reported stream error",
+                    metadata={"bridge_offline": False, "stream": True, "upstream_stream_error": True, **session_meta},
+                )
+                return
 
             full_text = "".join(collected_parts)
             real_in = (
