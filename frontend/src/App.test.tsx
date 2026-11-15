@@ -326,7 +326,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     await settle()
   })
 
-  it('creates an approval-gated GitHub issue with deploy-class approval', async () => {
+  it('creates an approval-gated GitHub issue with merge-class approval', async () => {
     const { calls } = installFetchMock()
     render(<App />)
 
@@ -339,7 +339,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
     await waitFor(() => {
       const approval = calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')
-      expect(approval?.body).toMatchObject({ action_type: 'deploy' })
+      expect(approval?.body).toMatchObject({ action_type: 'merge' })
     })
 
     await waitFor(() => expect(screen.getByPlaceholderText('Approval UUID')).toHaveValue('appr-1'))
@@ -422,6 +422,25 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     // governance threshold surfaced next to the limits
     expect(screen.getByText('$5.00')).toBeInTheDocument()
     await settle()
+  })
+
+  it('prefers the usage budget summary and its returned remaining headroom', async () => {
+    installFetchMock({
+      '/api/v1/providers/usage': {
+        summary: { total_input_tokens: 0, total_output_tokens: 0, total_estimated_cost_usd: 99 },
+        logs: [],
+        budget_summary: {
+          daily_limit_usd: 50, global_daily_spend_usd: 8, daily_remaining_usd: 42,
+          monthly_limit_usd: 500, global_monthly_spend_usd: 75, monthly_remaining_usd: 425,
+        },
+      },
+    })
+    render(<App />)
+    fireEvent.click(navButton('Arena & AI Providers'))
+    expect(await screen.findByText('$8.00 / $50.00')).toBeInTheDocument()
+    expect(screen.getByText('$42.00')).toBeInTheDocument()
+    expect(screen.getByText('$75.00 / $500.00')).toBeInTheDocument()
+    expect(screen.getByText('$425.00')).toBeInTheDocument()
   })
 
   it('falls back to provider caps when the budgets setting is unavailable', async () => {

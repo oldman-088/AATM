@@ -143,8 +143,8 @@ export function extractBudgetLimits(settings: Record<string, any> | null | undef
  * usage rows). Prefers explicit aggregates when the backend exposes them.
  */
 export function computeSpend(usage: any, now = new Date()): { daily: number; monthly: number } {
-  const explicitDaily = usage?.spend?.daily_usd ?? usage?.daily_spend_usd
-  const explicitMonthly = usage?.spend?.monthly_usd ?? usage?.monthly_spend_usd
+  const explicitDaily = usage?.budget_summary?.global_daily_spend_usd ?? usage?.budget_summary?.daily_spend_usd ?? usage?.budget_summary?.daily?.spent_usd ?? usage?.spend?.daily_usd ?? usage?.daily_spend_usd
+  const explicitMonthly = usage?.budget_summary?.global_monthly_spend_usd ?? usage?.budget_summary?.monthly_spend_usd ?? usage?.budget_summary?.monthly?.spent_usd ?? usage?.spend?.monthly_usd ?? usage?.monthly_spend_usd
   if (typeof explicitDaily === 'number' || typeof explicitMonthly === 'number') {
     return { daily: Number(explicitDaily || 0), monthly: Number(explicitMonthly || 0) }
   }
@@ -170,14 +170,16 @@ function HeadroomBar({
   limit,
   spent,
   remainingLabel,
+  remainingOverride,
 }: {
   label: string
   limit?: number
   spent: number
   remainingLabel: string
+  remainingOverride?: number
 }) {
   const hasLimit = typeof limit === 'number' && limit > 0
-  const remaining = hasLimit ? Math.max(0, (limit as number) - spent) : undefined
+  const remaining = typeof remainingOverride === 'number' ? remainingOverride : hasLimit ? Math.max(0, (limit as number) - spent) : undefined
   const pct = hasLimit ? Math.min(100, (spent / (limit as number)) * 100) : 0
   return (
     <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs">
@@ -215,8 +217,9 @@ export function BudgetHeadroom({
 }) {
   const { t } = useI18n()
   const spend = computeSpend(usage)
-  const dailyLimit = budget?.daily_limit_usd ?? (fallbackDailyLimit && fallbackDailyLimit > 0 ? fallbackDailyLimit : undefined)
-  const monthlyLimit = budget?.monthly_limit_usd
+  const summary = usage?.budget_summary
+  const dailyLimit = summary?.daily_limit_usd ?? summary?.daily?.limit_usd ?? budget?.daily_limit_usd ?? (fallbackDailyLimit && fallbackDailyLimit > 0 ? fallbackDailyLimit : undefined)
+  const monthlyLimit = summary?.monthly_limit_usd ?? summary?.monthly?.limit_usd ?? budget?.monthly_limit_usd
   const hasAnyLimit = typeof dailyLimit === 'number' || typeof monthlyLimit === 'number'
 
   return (
@@ -232,12 +235,14 @@ export function BudgetHeadroom({
             limit={dailyLimit}
             spent={spend.daily}
             remainingLabel={t.providers.remainingHeadroom}
+            remainingOverride={summary?.daily_remaining_usd ?? summary?.daily?.remaining_usd}
           />
           <HeadroomBar
             label={`${t.providers.monthlyLimit} · ${t.providers.spentThisMonth}`}
             limit={monthlyLimit}
             spent={spend.monthly}
             remainingLabel={t.providers.remainingHeadroom}
+            remainingOverride={summary?.monthly_remaining_usd ?? summary?.monthly?.remaining_usd}
           />
         </div>
       ) : (
@@ -512,8 +517,7 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
   }
 
   /**
-   * Requests a pending approval in AATM's governance taxonomy. PRs map to `merge`
-   * (protected-target write); issues map to `deploy` (outbound change request).
+   * Requests a pending merge-class approval for either GitHub write.
    */
   const requestApproval = async () => {
     setRequesting(true)
@@ -521,7 +525,7 @@ export function GitWorkflowsView({ gitData, onReload }: { gitData: any; onReload
       const created = await apiFetch<any>('/approvals', {
         method: 'POST',
         body: JSON.stringify({
-          action_type: target === 'pr' ? 'merge' : 'deploy',
+          action_type: 'merge',
           title: title || (target === 'pr' ? 'GitHub pull request' : 'GitHub issue'),
           description:
             target === 'pr'
