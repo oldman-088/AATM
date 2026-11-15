@@ -1,8 +1,8 @@
 # AATM — Verification Report (Worker 4: Orchestration, QA & Ops)
 
 **Report Date (UTC):** 2026-11-15
-**Branch:** `arena/e5fef882-aatm` (integrated W1 + W2 + W3 + W4)
-**Scope:** Divisions 01–12 — end-to-end verification, Round 2 integration,
+**Branch:** `arena/e5fef882-aatm` (integrated Round 3 W1 + W2 + W3 + W4)
+**Scope:** Divisions 01–12 — end-to-end verification, Rounds 1–3 integration,
 Multi-Device worker daemon, isolated per-agent Git worktrees, SSE bridge streaming, GitHub CI/templates, E2E test suite and deployment hardening.
 
 ---
@@ -11,17 +11,17 @@ Multi-Device worker daemon, isolated per-agent Git worktrees, SSE bridge streami
 
 | Gate | Command | Result |
 |---|---|---|
-| Database migrations | `alembic upgrade head` | **PASSED** — head `6c3ab8f4d2e1` |
+| Database migrations | `alembic upgrade head` | **PASSED** — head `629b77662bf2` |
 | Backend lint | `ruff check backend` | **PASSED** — 0 errors |
 | Bridge lint | `ruff check --config backend/pyproject.toml bridge` | **PASSED** — 0 errors |
-| Backend tests | `pytest -q` | **PASSED** — 82/82 (0 warnings) |
+| Backend tests | `pytest -q` | **PASSED** — 89/89 (0 warnings) |
 | ↳ E2E verification suite | `pytest tests/test_e2e_verification.py` | **PASSED** — 34/34 |
-| Bridge tests | `pytest -v bridge/tests/test_bridge.py` | **PASSED** — 8/8 |
-| Static secret scan | `python -m app.qa.engine` | **PASSED** — 0 findings (132 files) |
+| Bridge tests | `pytest -v bridge/tests/test_bridge.py` | **PASSED** — 10/10 |
+| Static secret scan | `python -m app.qa.engine` | **PASSED** — 0 findings (133 files) |
 | Frontend typecheck | `npm run lint` (`tsc --noEmit`) | **PASSED** — 0 errors |
-| Frontend unit tests | `npm run test` (vitest) | **PASSED** — 38/38 (2 files) |
+| Frontend unit tests | `npm run test` (vitest) | **PASSED** — 43/43 (2 files) |
 | Frontend production build | `npm run build` (vite) | **PASSED** (`1,584` modules) |
-| One-command pipeline | `scripts/ubuntu/verify.sh` | **PASSED** — 12/12 gates, exit 0 (`128` total tests) |
+| One-command pipeline | `scripts/ubuntu/verify.sh` | **PASSED** — 12/12 gates, exit 0 (`142` total tests) |
 | Live multi-device round trip | real uvicorn + daemon OS process | **PASSED** |
 
 ---
