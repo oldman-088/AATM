@@ -1,3 +1,4 @@
+import json
 import socket
 import sys
 import threading
@@ -240,3 +241,182 @@ async def test_e2e_provider_router_and_adapter_forward_employee_sessions_to_live
             assert db_s3.message_count == 1
             assert db_s1.last_message_at is not None
             assert db_s3.last_message_at is not None
+
+
+@pytest.mark.asyncio
+async def test_bridge_sessions_health_and_count_metrics_and_scoping(monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-metrics-token-2026")
+    auth = {"Authorization": "Bearer bridge-metrics-token-2026"}
+    bridge_app = create_app()
+    transport = ASGITransport(app=bridge_app)
+
+    async with AsyncClient(transport=transport, base_url="http://bridge.test") as client:
+        # Populate 2 sessions under acct-alpha (3 total turns) and 1 session under acct-beta (1 turn)
+        for sid, acct, agent, prompt in (
+            ("sess-a1", "acct-alpha", "worker-1", "Alpha one first"),
+            ("sess-a1", "acct-alpha", "worker-1", "Alpha one second"),
+            ("sess-a2", "acct-alpha", "worker-2", "Alpha two first"),
+            ("sess-b1", "acct-beta", "worker-3", "Beta one first"),
+        ):
+            r = await client.post(
+                "/v1/chat/completions",
+                headers={**auth, "X-AATM-Session-Id": sid, "X-AATM-Account-Id": acct, "X-AATM-Agent-Id": agent},
+                json={"model": "arena-bridge-default", "messages": [{"role": "user", "content": prompt}]},
+            )
+            assert r.status_code == 200
+
+        # Global GET /v1/sessions health & aggregate metrics
+        all_resp = await client.get("/v1/sessions", headers=auth)
+        assert all_resp.status_code == 200
+        all_data = all_resp.json()
+        assert all_data["status"] == "ok"
+        assert all_data["count"] == 3
+        assert all_data["active_sessions"] == 3
+        assert all_data["account_scope"] is None
+        m = all_data["metrics"]
+        assert m["total_sessions"] == 3
+        assert m["total_turns"] == 4
+        assert m["total_messages"] == 8
+        assert m["total_prompt_tokens"] >= 4
+        assert m["total_completion_tokens"] >= 4
+        assert m["unique_accounts"] == 2
+        assert m["unique_agents"] == 3
+        assert m["accounts_breakdown"] == {"acct-alpha": 2, "acct-beta": 1}
+        assert m["uptime_seconds"] >= 0.0
+
+        # Account-scoped GET /v1/sessions leaks zero cross-account metrics or sessions
+        beta_resp = await client.get("/v1/sessions", headers={**auth, "X-AATM-Account-Id": "acct-beta"})
+        assert beta_resp.status_code == 200
+        beta_data = beta_resp.json()
+        assert beta_data["status"] == "ok"
+        assert beta_data["account_scope"] == "acct-beta"
+        assert beta_data["count"] == 1
+        assert beta_data["active_sessions"] == 1
+        assert beta_data["metrics"]["total_sessions"] == 1
+        assert beta_data["metrics"]["total_turns"] == 1
+        assert beta_data["metrics"]["unique_accounts"] == 1
+        assert beta_data["metrics"]["accounts_breakdown"] == {"acct-beta": 1}
+        assert [s["session_id"] for s in beta_data["sessions"]] == ["sess-b1"]
+
+
+@pytest.mark.asyncio
+async def test_bridge_sse_streaming_and_account_isolation(monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-sse-token-2026")
+    auth = {"Authorization": "Bearer bridge-sse-token-2026"}
+    bridge_app = create_app()
+    transport = ASGITransport(app=bridge_app)
+
+    async with AsyncClient(transport=transport, base_url="http://bridge.test") as client:
+        # Health reports streaming capability
+        h = await client.get("/health", headers=auth)
+        assert h.status_code == 200
+        assert h.json()["streaming_supported"] is True
+
+        # Streamed completion under acct-stream-a
+        resp = await client.post(
+            "/v1/chat/completions",
+            headers={
+                **auth,
+                "X-AATM-Session-Id": "sess-stream-1",
+                "X-AATM-Account-Id": "acct-stream-a",
+                "X-AATM-Agent-Id": "worker-3",
+            },
+            json={
+                "model": "arena-bridge-default",
+                "stream": True,
+                "messages": [{"role": "user", "content": "Stream isolated bridge response"}],
+            },
+        )
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        assert resp.headers["x-aatm-session-id"] == "sess-stream-1"
+        assert resp.headers["x-aatm-account-id"] == "acct-stream-a"
+
+        data_lines = [
+            line[len("data: ") :]
+            for line in resp.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert data_lines[-1] == "[DONE]"
+        chunks = [json.loads(raw) for raw in data_lines[:-1]]
+        assert len(chunks) >= 3
+        assert all(c["object"] == "chat.completion.chunk" for c in chunks)
+        assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+        reassembled = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+        assert "sess-stream-1" in reassembled
+        assert "acct-stream-a" in reassembled
+        assert "Stream isolated bridge response" in reassembled
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[-1]["usage"]["total_tokens"] >= 2
+        assert chunks[-1]["session"]["turn_count"] == 1
+
+        # Verify streamed turn was recorded in isolated session store
+        sess_detail = await client.get(
+            "/v1/sessions/sess-stream-1",
+            headers={**auth, "X-AATM-Account-Id": "acct-stream-a"},
+        )
+        assert sess_detail.status_code == 200
+        assert sess_detail.json()["turn_count"] == 1
+
+        # Cross-account SSE streaming attempt is rejected with 403 BEFORE streaming starts
+        hijack = await client.post(
+            "/v1/chat/completions",
+            headers={
+                **auth,
+                "X-AATM-Session-Id": "sess-stream-1",
+                "X-AATM-Account-Id": "acct-stream-evil",
+            },
+            json={
+                "model": "arena-bridge-default",
+                "stream": True,
+                "messages": [{"role": "user", "content": "Cross-account hijack"}],
+            },
+        )
+        assert hijack.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_adapter_delete_session_e2e_on_live_bridge(monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "e2e-delete-token-2026")
+    with _LiveBridgeProcess() as srv:
+        adapter = ArenaLocalBridgeAdapter(
+            "arena-local-bridge",
+            srv.base_url,
+            "env:ARENA_BRIDGE_TOKEN",
+            "arena-bridge-default",
+        )
+        gen = await adapter.generate(
+            ProviderRequest(
+                prompt="Seed session prior to employee handoff",
+                agent_id="worker-3",
+                dry_run=False,
+                metadata={"session_id": "sess-handoff-01", "account_id": "acct-arena-primary"},
+            )
+        )
+        assert gen.success is True
+        assert await adapter.get_session("sess-handoff-01", account_id="acct-arena-primary") is not None
+
+        # Cross-account delete denied cleanly (403)
+        denied = await adapter.delete_session("sess-handoff-01", account_id="acct-other")
+        assert denied["deleted"] is False
+        assert denied["status"] == "forbidden"
+        assert denied["bridge_reachable"] is True
+
+        # Authorized delete succeeds and removes session context
+        deleted = await adapter.delete_session("sess-handoff-01", account_id="acct-arena-primary")
+        assert deleted["deleted"] is True
+        assert deleted["status"] == "deleted"
+        assert deleted["bridge_reachable"] is True
+        assert await adapter.get_session("sess-handoff-01", account_id="acct-arena-primary") is None
+
+        # Second delete is cleanly idempotent (not_found)
+        repeat = await adapter.delete_session("sess-handoff-01", account_id="acct-arena-primary")
+        assert repeat["deleted"] is False
+        assert repeat["status"] == "not_found"
+        assert repeat["bridge_reachable"] is True
+
+    # Offline bridge returns structured bridge_offline status instead of raising
+    offline_res = await adapter.delete_session("sess-handoff-01", account_id="acct-arena-primary")
+    assert offline_res["deleted"] is False
+    assert offline_res["status"] == "bridge_offline"
+    assert offline_res["bridge_reachable"] is False

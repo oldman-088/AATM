@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import threading
@@ -15,12 +16,25 @@ from app.browser.engines import (
     match_url_pattern,
     validate_userscript_policy,
 )
-from app.browser.manager import BrowserManager, detect_playwright_capabilities, validate_navigation_url
+from app.browser.manager import (
+    BrowserManager,
+    detect_playwright_capabilities,
+    validate_navigation_url,
+    validate_selector,
+)
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AIProvider, BrowserProfile, BrowserSession, ProviderSession, ProviderUsageLog, SystemSetting
+from app.models import (
+    AIProvider,
+    AuditLog,
+    BrowserProfile,
+    BrowserSession,
+    ProviderSession,
+    ProviderUsageLog,
+    SystemSetting,
+)
 from app.providers.adapters import AnthropicClaudeAdapter, ArenaLocalBridgeAdapter
 from app.providers.base import ProviderRequest, validate_credential_ref
 from app.providers.router import ProviderRouter
@@ -33,6 +47,7 @@ class _MockBridgeServer:
         self.expected_bearer = expected_bearer
         self.expected_api_key = expected_api_key
         self.empty_choices = False
+        self.sessions: dict[str, str] = {}
         self.received_headers: list[dict[str, str]] = []
         self.received_payloads: list[dict[str, Any]] = []
         self._server: HTTPServer | None = None
@@ -106,6 +121,33 @@ class _MockBridgeServer:
                     self.wfile.write(json.dumps(body).encode("utf-8"))
                     return
 
+                self.send_response(404)
+                self.end_headers()
+
+            def do_DELETE(self):  # noqa: N802
+                parent.received_headers.append({k.lower(): v for k, v in self.headers.items()})
+                if self.path.startswith("/v1/sessions/"):
+                    if parent.expected_bearer and self.headers.get("Authorization") != f"Bearer {parent.expected_bearer}":
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    sid = self.path.removeprefix("/v1/sessions/")
+                    if sid not in parent.sessions:
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+                    req_acct = self.headers.get("X-AATM-Account-Id")
+                    owner_acct = parent.sessions[sid]
+                    if req_acct and req_acct != owner_acct:
+                        self.send_response(403)
+                        self.end_headers()
+                        return
+                    del parent.sessions[sid]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"deleted": True, "session_id": sid}).encode("utf-8"))
+                    return
                 self.send_response(404)
                 self.end_headers()
 
@@ -676,3 +718,219 @@ async def test_browser_engine_adapters_capabilities_and_policy():
         {"steps": [{"type": "javascript", "url": "https://example.com/", "code": "console.log(document.cookie)"}]},
     )
     assert bad_wf["status"] == "rejected"
+
+    # Selector policy enforced on Playwright & Automa adapters, and raw input values are redacted
+    bad_sel = await BROWSER_ENGINE_REGISTRY["playwright"].execute_action(
+        "profile-1", "click_element", {"selector": "#g-recaptcha-response"}
+    )
+    assert bad_sel["status"] == "rejected"
+
+    fill_res = await BROWSER_ENGINE_REGISTRY["playwright"].execute_action(
+        "profile-1", "fill_input", {"selector": "input[name='query']", "value": "private-query-value-42"}
+    )
+    assert fill_res["status"] in ("executed", "headless_fallback")
+    assert fill_res["params"]["value"] == "<redacted>"
+    assert fill_res["params"]["value_length"] == len("private-query-value-42")
+
+    bad_wf_sel = await automa.execute_action(
+        "profile-1",
+        "run_workflow",
+        {"steps": [{"type": "click", "selector": "iframe[src*='cf-turnstile']"}]},
+    )
+    assert bad_wf_sel["status"] == "rejected"
+
+
+async def test_arena_bridge_adapter_delete_session_lifecycle(monkeypatch):
+    monkeypatch.setenv("TEST_DELETE_BRIDGE_TOKEN", "bridge-delete-test-token")
+
+    with _MockBridgeServer(expected_bearer="bridge-delete-test-token") as srv:
+        srv.sessions["sess-worker-3"] = "acct-alpha"
+        adapter = ArenaLocalBridgeAdapter(
+            "arena-local-bridge",
+            srv.base_url,
+            "env:TEST_DELETE_BRIDGE_TOKEN",
+            "arena-bridge-default",
+        )
+
+        # Invalid session_id format (path traversal blocked before network call)
+        bad_id = await adapter.delete_session("../etc/passwd", account_id="acct-alpha")
+        assert bad_id["deleted"] is False
+        assert bad_id["status"] == "invalid_session_id"
+        assert bad_id["bridge_reachable"] is False
+
+        # Cross-account delete rejected with 403 -> status=forbidden
+        forbidden = await adapter.delete_session("sess-worker-3", account_id="acct-evil")
+        assert forbidden["deleted"] is False
+        assert forbidden["status"] == "forbidden"
+        assert forbidden["bridge_reachable"] is True
+        assert "sess-worker-3" in srv.sessions
+
+        # Authorized delete succeeds -> status=deleted
+        deleted = await adapter.delete_session("sess-worker-3", account_id="acct-alpha")
+        assert deleted["deleted"] is True
+        assert deleted["status"] == "deleted"
+        assert deleted["bridge_reachable"] is True
+        assert "sess-worker-3" not in srv.sessions
+
+        # Second delete -> status=not_found (idempotent)
+        missing = await adapter.delete_session("sess-worker-3", account_id="acct-alpha")
+        assert missing["deleted"] is False
+        assert missing["status"] == "not_found"
+        assert missing["bridge_reachable"] is True
+
+        # Non-env credential_ref rejected by policy
+        bad_cred_adapter = ArenaLocalBridgeAdapter(
+            "arena-local-bridge", srv.base_url, "raw-inline-token-bad", "arena-bridge-default"
+        )
+        pol = await bad_cred_adapter.delete_session("sess-worker-3", account_id="acct-alpha")
+        assert pol["deleted"] is False
+        assert pol["status"] == "policy_error"
+
+    # Server stopped -> offline fallback without exception
+    offline = await adapter.delete_session("sess-worker-3", account_id="acct-alpha")
+    assert offline["deleted"] is False
+    assert offline["status"] == "bridge_offline"
+    assert offline["bridge_reachable"] is False
+
+
+async def test_browser_safe_actions_click_fill_snapshot_fallback_and_playwright_live(db_session, tmp_path, monkeypatch):
+    # Selector policy validation unit checks
+    assert validate_selector("#submit-button") == "#submit-button"
+    assert validate_selector('input[name="search"]') == 'input[name="search"]'
+    for bad_sel in (
+        "",
+        "   ",
+        "#g-recaptcha-response",
+        ".cf-turnstile iframe",
+        "div[data-hcaptcha-widget-id]",
+        "javascript:alert(1)",
+        "<script>alert(1)</script>",
+    ):
+        with pytest.raises(ValueError):
+            validate_selector(bad_sel)
+
+    mgr = BrowserManager()
+    bp = BrowserProfile(
+        id="profile-safe-actions",
+        name="Safe Actions Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "profile-safe-actions"),
+        mode="background",
+        status="ready",
+        current_url="about:blank",
+    )
+    db_session.add(bp)
+    await db_session.commit()
+
+    # Clicking or filling a stopped profile is rejected cleanly
+    with pytest.raises(ValueError, match="must be running"):
+        await mgr.click_element(db_session, bp, "#save-btn", actor="worker-3")
+    with pytest.raises(ValueError, match="must be running"):
+        await mgr.fill_input(db_session, bp, "input[name='note']", "hello", actor="worker-3")
+
+    # Force headless_fallback (Chromium absent) and start profile
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": False,
+            "chromium_path": None,
+            "engine_mode": "headless_fallback",
+        },
+    )
+    await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background")
+    await mgr.navigate_profile(db_session, bp, "https://fastapi.tiangolo.com/tutorial/")
+
+    # Prohibited CAPTCHA selector blocked even on a running profile
+    with pytest.raises(ValueError, match="Policy violation"):
+        await mgr.click_element(db_session, bp, "#recaptcha-anchor", actor="worker-3")
+    with pytest.raises(ValueError, match="Policy violation"):
+        await mgr.fill_input(db_session, bp, ".h-captcha textarea", "nope", actor="worker-3")
+
+    # 1. Headless fallback path: click_element, fill_input (redacted!), capture_snapshot
+    click_fb = await mgr.click_element(db_session, bp, "#nav-docs", actor="worker-3")
+    assert click_fb["ok"] is True
+    assert click_fb["engine_mode"] == "headless_fallback"
+    assert click_fb["executed_live"] is False
+    assert "fallback_reason" in click_fb
+
+    sensitive_val = "confidential-form-entry-987654"
+    fill_fb = await mgr.fill_input(db_session, bp, "input[name='notes']", sensitive_val, actor="worker-3")
+    assert fill_fb["ok"] is True
+    assert fill_fb["engine_mode"] == "headless_fallback"
+    assert fill_fb["executed_live"] is False
+    assert fill_fb["redacted"] is True
+    assert fill_fb["value_length"] == len(sensitive_val)
+    # Raw input text MUST NOT appear in SVG or AuditLog
+    assert sensitive_val not in (bp.last_snapshot_svg or "")
+    logs = (await db_session.execute(select(AuditLog).where(AuditLog.resource_id == bp.id))).scalars().all()
+    assert all(sensitive_val not in json.dumps(log.details) for log in logs)
+
+    snap_fb = await mgr.capture_snapshot(db_session, bp, actor="worker-3")
+    assert snap_fb["ok"] is True
+    assert snap_fb["engine_mode"] == "headless_fallback"
+    assert snap_fb["executed_live"] is False
+    assert snap_fb["format"] == "svg"
+    assert snap_fb["screenshot_base64"] is None
+    assert "<svg" in snap_fb["svg"]
+    assert snap_fb["lock_status"]["file_lock_present"] is True
+
+    # 2. Simulated live Playwright context path: verifies live click, fill, and PNG+SVG snapshot
+    class _FakePage:
+        def __init__(self) -> None:
+            self.url = "https://fastapi.tiangolo.com/tutorial/submitted"
+            self.clicked: list[str] = []
+            self.filled: list[tuple[str, str]] = []
+
+        async def click(self, selector: str, timeout: int = 5000) -> None:
+            self.clicked.append(selector)
+
+        async def fill(self, selector: str, value: str, timeout: int = 5000) -> None:
+            self.filled.append((selector, value))
+
+        async def title(self) -> str:
+            return "FastAPI Tutorial Live"
+
+        async def screenshot(self, full_page: bool = False, type: str = "png") -> bytes:
+            return b"\x89PNG\r\n\x1a\nFAKE_PNG_PAYLOAD"
+
+    class _FakeContext:
+        def __init__(self, page: _FakePage) -> None:
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class _FakePlaywright:
+        async def stop(self) -> None:
+            return None
+
+    fake_page = _FakePage()
+    mgr._active_contexts[bp.id] = (_FakePlaywright(), _FakeContext(fake_page))
+
+    live_click = await mgr.click_element(db_session, bp, "button.primary-submit", actor="worker-3")
+    assert live_click["ok"] is True
+    assert live_click["engine_mode"] == "playwright"
+    assert live_click["executed_live"] is True
+    assert fake_page.clicked == ["button.primary-submit"]
+    assert live_click["page_title"] == "FastAPI Tutorial Live"
+
+    live_val = "live-redacted-field-xyz"
+    live_fill = await mgr.fill_input(db_session, bp, "textarea#summary", live_val, actor="worker-3")
+    assert live_fill["ok"] is True
+    assert live_fill["engine_mode"] == "playwright"
+    assert live_fill["executed_live"] is True
+    assert live_fill["redacted"] is True
+    assert fake_page.filled == [("textarea#summary", live_val)]
+    assert live_val not in (bp.last_snapshot_svg or "")
+
+    live_snap = await mgr.capture_snapshot(db_session, bp, actor="worker-3", full_page=True)
+    assert live_snap["ok"] is True
+    assert live_snap["engine_mode"] == "playwright"
+    assert live_snap["executed_live"] is True
+    assert live_snap["format"] == "png+svg"
+    assert live_snap["screenshot_bytes"] == len(b"\x89PNG\r\n\x1a\nFAKE_PNG_PAYLOAD")
+    assert base64.b64decode(live_snap["screenshot_base64"]) == b"\x89PNG\r\n\x1a\nFAKE_PNG_PAYLOAD"
+    assert "<svg" in live_snap["svg"]
+
+    await mgr.stop_profile(db_session, bp, actor="worker-3")
