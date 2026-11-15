@@ -16,6 +16,7 @@ from app.schemas.common import (
     BrowserNavigateRequest,
     ProviderCreateOrUpdate,
     ProviderTestRequest,
+    ProviderUsageResponse,
     validate_credential_ref,
 )
 
@@ -164,7 +165,7 @@ async def test_provider(
     }
 
 
-@router.get("/providers/usage")
+@router.get("/providers/usage", response_model=ProviderUsageResponse)
 async def get_provider_usage(db: AsyncSession = Depends(get_db)):
     logs = list((await db.execute(select(ProviderUsageLog).order_by(ProviderUsageLog.created_at.desc()).limit(50))).scalars().all())
     tot_res = await db.execute(
