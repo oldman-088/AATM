@@ -1364,4 +1364,296 @@ async def test_e2e_github_verify_approval_target_branch_and_base_payload_compati
         assert "production" in pr_mismatch["reason"]
 
 
+# ---------------------------------------------------------------------------
+# 23. Round 3: QA Self-Healing Orphaned Worktree Pruning & POST /github/branches
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_e2e_self_healing_prunes_orphaned_worktrees_and_preserves_active(
+    client, auth_headers, tmp_path, monkeypatch
+):
+    """Verify `qa_engine.run_self_healing(db)` (via `POST /api/v1/qa/self-heal`)
+    automatically prunes git worktrees under `data/worktrees/` whose `agent_id`
+    either belongs to an `offline` / `replaced` employee or does not exist in
+    `agents`, while preserving active agents' worktrees.
+    """
+    import subprocess as _subprocess
+
+    from app.core.config import get_settings
+    from app.git_workflows.manager import git_workflow_manager
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+    _subprocess.run(
+        ["git", "config", "user.email", "aatm-test@aatm.local"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+    )
+    _subprocess.run(
+        ["git", "config", "user.name", "AATM Test"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+    )
+    (repo_dir / "README.md").write_text("# Self-Healing Worktree Pruning Test\n", encoding="utf-8")
+    _subprocess.run(["git", "add", "README.md"], cwd=str(repo_dir), check=True, capture_output=True)
+    _subprocess.run(
+        ["git", "commit", "-m", "initial commit"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+    )
+
+    # Create an employee and then replace it so the original employee transitions to status="offline".
+    emp_resp = await client.post(
+        "/api/v1/employees",
+        headers=auth_headers,
+        json={
+            "name": "Transient Worktree Worker",
+            "title": "Transient Engineer",
+            "role": "backend",
+            "department": "Engineering",
+            "system_prompt": "Test worker",
+        },
+    )
+    assert emp_resp.status_code == 201, emp_resp.text
+    offline_emp_id = emp_resp.json()["id"]
+
+    replace_resp = await client.post(
+        f"/api/v1/employees/{offline_emp_id}/replace",
+        headers=auth_headers,
+        json={"reason": "Replaced before self-healing sweep"},
+    )
+    assert replace_resp.status_code == 200, replace_resp.text
+    replacement_emp_id = replace_resp.json()["replacement_employee"]
+
+    # Create 3 isolated worktrees under repo_dir / "data" / "worktrees":
+    # 1) Active employee (replacement_emp_id) -> must be preserved
+    # 2) Replaced/offline employee (offline_emp_id) -> must be pruned
+    # 3) Non-existent ghost agent ("ghost-orphan-worker") -> must be pruned
+    wt_active = await git_workflow_manager.create_agent_worktree(
+        replacement_emp_id,
+        "feature/active-worker",
+        base_ref="main",
+        repo_path=repo_dir,
+    )
+    wt_offline = await git_workflow_manager.create_agent_worktree(
+        offline_emp_id,
+        "feature/offline-worker",
+        base_ref="main",
+        repo_path=repo_dir,
+    )
+    wt_ghost = await git_workflow_manager.create_agent_worktree(
+        "ghost-orphan-worker",
+        "feature/ghost-worker",
+        base_ref="main",
+        repo_path=repo_dir,
+    )
+    assert wt_active["ok"] is True
+    assert wt_offline["ok"] is True
+    assert wt_ghost["ok"] is True
+
+    active_path = Path(wt_active["worktree_path"])
+    offline_path = Path(wt_offline["worktree_path"])
+    ghost_path = Path(wt_ghost["worktree_path"])
+    assert active_path.is_dir()
+    assert offline_path.is_dir()
+    assert ghost_path.is_dir()
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "REPO_ROOT", repo_dir)
+    monkeypatch.setattr(settings, "DATA_DIR", repo_dir / "data")
+
+    heal_resp = await client.post("/api/v1/qa/self-heal", headers=auth_headers)
+    assert heal_resp.status_code == 200, heal_resp.text
+    heal_data = heal_resp.json()
+    assert "pruned_worktrees" in heal_data
+    assert offline_emp_id in heal_data["pruned_worktrees"]
+    assert "ghost-orphan-worker" in heal_data["pruned_worktrees"]
+    assert replacement_emp_id not in heal_data["pruned_worktrees"]
+
+    # Orphaned worktrees were removed from disk; active employee's worktree remains intact.
+    assert not offline_path.exists()
+    assert not ghost_path.exists()
+    assert active_path.is_dir()
+
+    # Clean up remaining active worktree
+    cleanup = await git_workflow_manager.remove_agent_worktree(
+        replacement_emp_id, repo_path=repo_dir
+    )
+    assert cleanup["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_e2e_github_branches_endpoint_enforces_branch_approval_and_payload_match(
+    client, auth_headers, project_id, monkeypatch
+):
+    """Verify `POST /api/v1/github/branches` enforces `action_type="branch"` approval
+    and exact payload matching (`repo`, `branch_name`, `from_branch`), rejecting
+    missing/wrong-type/pending/mismatched requests with 403 and succeeding (201)
+    with a mocked `gh` client once approved.
+    """
+    import subprocess as _subprocess
+
+    gh_calls: list[list[str]] = []
+
+    def _fake_gh_run(cmd, *args, **kwargs):
+        gh_calls.append(list(cmd))
+        joined = " ".join(cmd)
+        if "git/ref/heads/" in joined:
+            return _subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="deadbeefcafebabe1234567890\n", stderr=""
+            )
+        if "git/refs" in joined:
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"ref": "refs/heads/feature/round3-verified"}\n',
+                stderr="",
+            )
+        return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr("app.github_client.client.subprocess.run", _fake_gh_run)
+
+    # 1. Missing approval_id -> 403
+    missing_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": "nonexistent-approval-id",
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert missing_resp.status_code == 403
+
+    # 2. Approval with wrong action_type ("merge" instead of "branch"), even when approved -> 403
+    wrong_type_create = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "project_id": project_id,
+            "action_type": "merge",
+            "title": "Merge approval misused for branch create",
+            "description": "Should be rejected by /github/branches",
+            "requested_by": "worker-4",
+            "payload": {
+                "repo": "oldman-088/AATM",
+                "branch_name": "feature/round3-verified",
+                "from_branch": "main",
+            },
+        },
+    )
+    assert wrong_type_create.status_code == 201
+    wrong_type_id = wrong_type_create.json()["id"]
+    await client.post(
+        f"/api/v1/approvals/{wrong_type_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "review_note": "Approved merge"},
+    )
+    wrong_type_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": wrong_type_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert wrong_type_resp.status_code == 403
+
+    # 3. Create valid `action_type="branch"` approval; while still pending -> 403
+    branch_app_create = await client.post(
+        "/api/v1/approvals",
+        headers=auth_headers,
+        json={
+            "project_id": project_id,
+            "action_type": "branch",
+            "title": "Create branch feature/round3-verified from main",
+            "description": "Round 3 governed branch creation test",
+            "requested_by": "worker-4",
+            "payload": {
+                "repo": "oldman-088/AATM",
+                "branch_name": "feature/round3-verified",
+                "from_branch": "main",
+            },
+        },
+    )
+    assert branch_app_create.status_code == 201
+    branch_app_id = branch_app_create.json()["id"]
+
+    pending_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert pending_resp.status_code == 403
+
+    # Approve the branch creation request
+    decide_resp = await client.post(
+        f"/api/v1/approvals/{branch_app_id}/decide",
+        headers=auth_headers,
+        json={"decision": "approved", "review_note": "Approved branch creation"},
+    )
+    assert decide_resp.status_code == 200
+
+    # 4. Payload mismatch checks (mismatched branch_name, from_branch, or repo) -> 403
+    mismatch_branch = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/tampered-branch",
+            "from_branch": "main",
+        },
+    )
+    assert mismatch_branch.status_code == 403
+
+    mismatch_base = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "develop",
+        },
+    )
+    assert mismatch_base.status_code == 403
+
+    # Ensure zero `gh` calls occurred during all rejected attempts
+    assert gh_calls == []
+
+    # 5. Matching approved request -> 201 Created
+    ok_resp = await client.post(
+        "/api/v1/github/branches",
+        headers=auth_headers,
+        json={
+            "approval_id": branch_app_id,
+            "repo": "oldman-088/AATM",
+            "branch_name": "feature/round3-verified",
+            "from_branch": "main",
+        },
+    )
+    assert ok_resp.status_code == 201, ok_resp.text
+    ok_data = ok_resp.json()
+    assert ok_data["ok"] is True
+    assert ok_data["allowed"] is True
+    assert ok_data["branch_name"] == "feature/round3-verified"
+    assert ok_data["base_branch"] == "main"
+    assert ok_data["ref"] == "refs/heads/feature/round3-verified"
+    assert ok_data["approval_id"] == branch_app_id
+    assert len(gh_calls) == 2
+
+
+
 
