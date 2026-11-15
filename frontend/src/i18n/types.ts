@@ -51,6 +51,22 @@ export interface Translations {
     runCycle: string
     selfHeal: string
     noData: string
+    emergencyStop: string
+    resumeSystem: string
+    employees: string
+    deviceNodes: string
+    loadFailed: string
+    loginFailed: string
+    emergencyControlFailed: string
+    emergencyStopReason: string
+    by: string
+    vcpu: string
+    gbFree: string
+    agentLabel: string
+    crashes: string
+    shared: string
+    tasksLabel: string
+    previewHint: string
   }
   dashboard: {
     title: string
@@ -88,6 +104,13 @@ export interface Translations {
     priority: string
     complete: string
     failRetry: string
+    modeAuto: string
+    modeManual: string
+    modeCollaborative: string
+    priorityCritical: string
+    priorityHigh: string
+    priorityMedium: string
+    priorityLow: string
   }
   browsers: {
     title: string
@@ -114,6 +137,12 @@ export interface Translations {
     addMemory: string
     searchMemory: string
     scope: string
+    scopeEmployee: string
+    scopeTeam: string
+    scopeProject: string
+    scopeOrganization: string
+    scopeDecision: string
+    scopeGlobal: string
   }
   git: {
     title: string
@@ -144,5 +173,75 @@ export interface Translations {
     light: string
     notifications: string
     markRead: string
+  }
+  enterprise: {
+    employeeCreationTitle: string
+    employeesRegistered: string
+    employeeNamePlaceholder: string
+    allocationHybrid: string
+    allocationOnePerEmployee: string
+    allocationShared: string
+    autonomySupervised: string
+    autonomySemiAutonomous: string
+    autonomyHighlyAutonomous: string
+    createEmployee: string
+    employeeCreated: string
+    isolatedWorkspaceSession: string
+    replacementFailed: string
+    replaced: string
+    tasksTransferred: string
+    orgStructureTitle: string
+    score: string
+    replace: string
+    messagingTitle: string
+    messagingPlaceholder: string
+    deliverablePlaceholder: string
+    dispatch: string
+    workspacesTitle: string
+    workspaceFileTitle: string
+    filePathPlaceholder: string
+    saveFile: string
+    runWithPython: string
+    filesArtifacts: string
+    workspaceEmpty: string
+    accountsTitle: string
+    accountLabelPlaceholder: string
+    accountIdentifierPlaceholder: string
+    addAccount: string
+    max: string
+    sessionsTitle: string
+    account: string
+    health: string
+    recover: string
+    enginesTitle: string
+    userscriptsTitle: string
+    userscriptPolicyError: string
+    userscriptNamePlaceholder: string
+    matchPatternPlaceholder: string
+    userscriptCodePlaceholder: string
+    register: string
+    enabled: string
+    disabled: string
+    sdlcTitle: string
+    sdlcProjectPlaceholder: string
+    sdlcIdeaPlaceholder: string
+    sdlcExecuting: string
+    sdlcLaunch: string
+    delivered: string
+    team: string
+    pytestExitCode: string
+    devicesTitle: string
+    nodeNamePlaceholder: string
+    hostPlaceholder: string
+    osPlaceholder: string
+    registerNode: string
+    heartbeat: string
+    heartbeatSent: string
+    guardTitle: string
+    guardPlaceholder: string
+    sanitize: string
+    injectionDetected: string
+    quarantined: string
+    clean: string
   }
 }

@@ -72,7 +72,7 @@ export function ApprovalsAuditView({
   const decide = async (id: string, decision: 'approved' | 'rejected') => {
     await apiFetch(`/approvals/${id}/decide`, {
       method: 'POST',
-      body: JSON.stringify({ decision, review_note: `Executive decision: ${decision}` }),
+      body: JSON.stringify({ decision, review_note: `info: decision=${decision}` }),
     })
     onReload()
   }
@@ -117,7 +117,9 @@ export function ApprovalsAuditView({
             <div key={lg.id} className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/60 p-2">
               <div>
                 <span className="font-mono text-sky-400">{lg.action}</span>{' '}
-                <span className="text-slate-400">by {lg.actor}</span>
+                <span className="text-slate-400">
+                  {t.common.by} {lg.actor}
+                </span>
               </div>
               <span className="text-slate-500">{formatDate(lg.created_at)}</span>
             </div>

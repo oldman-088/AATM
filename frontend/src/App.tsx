@@ -52,7 +52,7 @@ type NavTab =
   | 'settings'
 
 function AATMWorkspace() {
-  const { t, language, setLanguage } = useI18n()
+  const { t, language, setLanguage, formatNumber } = useI18n()
   const { user, login, logout, syncPreferences } = useAuth()
 
   const [tab, setTab] = useState<NavTab>('dashboard')
@@ -144,7 +144,7 @@ function AATMWorkspace() {
       setMemories(mm)
       setErrorBanner(null)
     } catch (err: any) {
-      setErrorBanner(err?.message || 'Failed to load AATM telemetry')
+      setErrorBanner(err?.message || t.common.loadFailed)
     }
   }, [activeProjectId])
 
@@ -178,7 +178,7 @@ function AATMWorkspace() {
       setShowAuthModal(false)
       setErrorBanner(null)
     } catch (err: any) {
-      setErrorBanner(err?.message || 'Login failed')
+      setErrorBanner(err?.message || t.common.loginFailed)
     }
   }
 
@@ -191,12 +191,12 @@ function AATMWorkspace() {
       } else {
         await apiFetch('/emergency-stop', {
           method: 'POST',
-          body: JSON.stringify({ scope: 'global', reason: 'Operator clicked Emergency Stop in Command Center' }),
+          body: JSON.stringify({ scope: 'global', reason: t.common.emergencyStopReason }),
         })
       }
       loadAll()
     } catch (err: any) {
-      setErrorBanner(err?.message || 'Emergency control requires authentication')
+      setErrorBanner(err?.message || t.common.emergencyControlFailed)
     }
   }
 
@@ -284,15 +284,19 @@ function AATMWorkspace() {
           </div>
 
           <div className="hidden items-center gap-2 text-xs text-slate-400 md:flex">
-            <Badge variant="success">{agents.length} Employees</Badge>
-            <Badge variant="info">{devices.length} Device Node(s)</Badge>
+            <Badge variant="success">
+              {formatNumber(agents.length)} {t.common.employees}
+            </Badge>
+            <Badge variant="info">
+              {formatNumber(devices.length)} {t.common.deviceNodes}
+            </Badge>
             {!user && <span className="text-amber-400">{t.auth.authRequiredHint}</span>}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" variant={anyEmergencyStopped ? 'secondary' : 'danger'} onClick={toggleEmergencyStop}>
               <OctagonAlert className="h-4 w-4" />
-              {anyEmergencyStopped ? 'Resume System' : 'Emergency Stop'}
+              {anyEmergencyStopped ? t.common.resumeSystem : t.common.emergencyStop}
             </Button>
 
             <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
@@ -314,7 +318,7 @@ function AATMWorkspace() {
               size="sm"
               variant="secondary"
               onClick={() => handleThemeToggle(theme === 'dark' ? 'light' : 'dark')}
-              aria-label="Toggle Theme"
+              aria-label={t.settings.theme}
             >
               <SunMoon className="h-4 w-4" />
             </Button>

@@ -101,7 +101,7 @@ export function DashboardView({
               </div>
               <Progress value={d.progress_percent} className="mt-2" />
               <div className="mt-1.5 text-[11px] text-slate-500">
-                {formatNumber(d.completed_tasks)} / {formatNumber(d.total_tasks)} tasks
+                {formatNumber(d.completed_tasks)} / {formatNumber(d.total_tasks)} {t.common.tasksLabel}
               </div>
             </div>
           ))}
@@ -118,7 +118,7 @@ export function DashboardView({
           <div className="space-y-3 text-xs">
             <div>
               <div className="mb-1 flex justify-between text-slate-300">
-                <span>CPU ({resources.cpu_count} vCPU)</span>
+                <span>CPU ({resources.cpu_count} {t.common.vcpu})</span>
                 <span>{formatNumber(resources.cpu_percent)}%</span>
               </div>
               <Progress value={resources.cpu_percent} />
@@ -134,7 +134,7 @@ export function DashboardView({
             </div>
             <div>
               <div className="mb-1 flex justify-between text-slate-300">
-                <span>Disk ({resources.disk_free_gb} GB free)</span>
+                <span>Disk ({resources.disk_free_gb} {t.common.gbFree})</span>
                 <span>{formatNumber(resources.disk_percent)}%</span>
               </div>
               <Progress value={resources.disk_percent} />
@@ -417,16 +417,16 @@ export function TasksView({
             ))}
           </Select>
           <Select value={executionMode} onChange={(e) => setExecutionMode(e.target.value)}>
-            <option value="automatic">automatic</option>
-            <option value="manual">manual</option>
-            <option value="collaborative">collaborative</option>
+            <option value="automatic">{t.tasks.modeAuto}</option>
+            <option value="manual">{t.tasks.modeManual}</option>
+            <option value="collaborative">{t.tasks.modeCollaborative}</option>
           </Select>
           <div className="flex gap-2">
             <Select value={priority} onChange={(e) => setPriority(e.target.value)} className="flex-1">
-              <option value="critical">critical</option>
-              <option value="high">high</option>
-              <option value="medium">medium</option>
-              <option value="low">low</option>
+              <option value="critical">{t.tasks.priorityCritical}</option>
+              <option value="high">{t.tasks.priorityHigh}</option>
+              <option value="medium">{t.tasks.priorityMedium}</option>
+              <option value="low">{t.tasks.priorityLow}</option>
             </Select>
             <Button type="submit">{t.common.create}</Button>
           </div>

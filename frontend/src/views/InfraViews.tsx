@@ -45,7 +45,7 @@ export function BrowserWallView({
               <div>
                 <div className="font-semibold text-white">{bp.name}</div>
                 <div className="font-mono text-xs text-slate-400">
-                  {bp.id} • Agent: {bp.agent_id || 'shared'} • Crashes: {bp.crash_count}
+                  {bp.id} • {t.common.agentLabel}: {bp.agent_id || t.common.shared} • {t.common.crashes}: {bp.crash_count}
                 </div>
               </div>
               <Badge variant={bp.status === 'running' ? 'success' : bp.status === 'crashed' ? 'danger' : 'neutral'}>
@@ -60,7 +60,7 @@ export function BrowserWallView({
               />
             ) : (
               <div className="flex h-44 items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/60 text-xs text-slate-500">
-                {bp.current_url} — Launch profile to render Browser Wall live viewport
+                {bp.current_url} — {t.common.previewHint}
               </div>
             )}
 
@@ -277,17 +277,17 @@ export function ProjectsMemoryView({
           <form onSubmit={addMemory} className="space-y-2">
             <div className="flex gap-2">
               <Select value={memScope} onChange={(e) => setMemScope(e.target.value)}>
-                <option value="employee">employee</option>
-                <option value="team">team</option>
-                <option value="project">project</option>
-                <option value="organization">organization</option>
-                <option value="decision">decision</option>
-                <option value="global">global</option>
+                <option value="employee">{t.projects.scopeEmployee}</option>
+                <option value="team">{t.projects.scopeTeam}</option>
+                <option value="project">{t.projects.scopeProject}</option>
+                <option value="organization">{t.projects.scopeOrganization}</option>
+                <option value="decision">{t.projects.scopeDecision}</option>
+                <option value="global">{t.projects.scopeGlobal}</option>
               </Select>
-              <Input value={memTitle} onChange={(e) => setMemTitle(e.target.value)} placeholder="Title" />
+              <Input value={memTitle} onChange={(e) => setMemTitle(e.target.value)} placeholder={t.tasks.taskTitle} />
             </div>
             <div className="flex gap-2">
-              <Input value={memContent} onChange={(e) => setMemContent(e.target.value)} placeholder="Memory details..." />
+              <Input value={memContent} onChange={(e) => setMemContent(e.target.value)} placeholder={t.projects.memoryTitle} />
               <Button type="submit">{t.projects.addMemory}</Button>
             </div>
           </form>
