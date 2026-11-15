@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html.light {
+  color-scheme: light;
+}
+
+/* Ensure crisp scrollbar and RTL-friendly logical layout */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
