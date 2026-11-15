@@ -51,6 +51,7 @@ class WorkerConfig:
     token: str = ""
     workspace_root: Path = field(default_factory=lambda: Path("data/remote_workspaces"))
     poll_seconds: float = DEFAULT_POLL_SECONDS
+    keepalive_seconds: float | None = None
     max_concurrent: int = 2
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
     device_type: str = "remote_server"
@@ -59,6 +60,8 @@ class WorkerConfig:
     def from_env(cls) -> "WorkerConfig":
         root = Path(os.environ.get("AATM_WORKER_WORKSPACE", "data/remote_workspaces"))
         device_id = os.environ.get("AATM_DEVICE_ID", "device-remote")
+        raw_keepalive = os.environ.get("AATM_WORKER_KEEPALIVE_SECONDS", "").strip()
+        keepalive = float(raw_keepalive) if raw_keepalive else None
         return cls(
             server_url=os.environ.get("AATM_SERVER_URL", "http://127.0.0.1:8000").rstrip("/"),
             device_id=device_id,
@@ -66,6 +69,7 @@ class WorkerConfig:
             token=os.environ.get("AATM_DEVICE_TOKEN", os.environ.get("AATM_WORKER_TOKEN", "")),
             workspace_root=root / device_id,
             poll_seconds=float(os.environ.get("AATM_WORKER_POLL_SECONDS", DEFAULT_POLL_SECONDS)),
+            keepalive_seconds=keepalive,
             max_concurrent=int(os.environ.get("AATM_WORKER_MAX_CONCURRENT", 2)),
             device_type=os.environ.get("AATM_DEVICE_TYPE", "remote_server"),
         )
@@ -82,6 +86,7 @@ class WorkerDaemon:
         self.token_revoked: bool = False
         self.stop_reason: str | None = None
         self.cycles_completed: int = 0
+        self._revocation_error: httpx.HTTPStatusError | None = None
         if client is not None:
             client.headers.update(self._auth_headers())
 
@@ -197,23 +202,36 @@ class WorkerDaemon:
         summary: str,
         artifacts: list[dict[str, Any]] | None = None,
         error: str | None = None,
+        trace: list[dict[str, Any]] | None = None,
+        total_elapsed_ms: float | None = None,
+        keepalive_heartbeats: int = 0,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "worker_id": self.worker_id,
+            "success": success,
+            "summary": summary,
+            "artifacts": artifacts or [],
+            "error_message": error,
+            "trace": trace or [],
+            "keepalive_heartbeats": keepalive_heartbeats,
+        }
+        if total_elapsed_ms is not None:
+            payload["total_elapsed_ms"] = total_elapsed_ms
         resp = await self.client.post(
             f"/api/v1/devices/{self.config.device_id}/tasks/{task_id}/report",
-            json={
-                "worker_id": self.worker_id,
-                "success": success,
-                "summary": summary,
-                "artifacts": artifacts or [],
-                "error_message": error,
-            },
+            json=payload,
         )
         self._check_response("report", resp)
         return resp.json()
 
     # ------------------------------------------------------------------ execution
-    async def execute_task(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Execute a claimed task inside the isolated workspace and build the report."""
+    def _effective_keepalive_seconds(self) -> float:
+        if self.config.keepalive_seconds is not None and self.config.keepalive_seconds > 0:
+            return float(self.config.keepalive_seconds)
+        return min(max(0.5, float(self.config.poll_seconds)), 15.0)
+
+    async def _run_task_steps(self, task: dict[str, Any], trace: list[dict[str, Any]]) -> dict[str, Any]:
+        """Run isolated workspace task steps while recording structured timing & exit-code trace entries."""
         title = task.get("title", "Untitled task")
         description = task.get("description", "")
         deliverables = task.get("expected_deliverables") or ["deliverable_report.md"]
@@ -222,10 +240,26 @@ class WorkerDaemon:
 
         # 1. Write the primary deliverable.
         primary = deliverables[0]
+        step_t0 = time.perf_counter()
         try:
             target = self.resolve_path(primary)
         except WorkspaceSandboxError as exc:
-            return {"success": False, "summary": f"Rejected unsafe deliverable path: {exc}", "artifacts": []}
+            trace.append(
+                {
+                    "step": "write_deliverable",
+                    "action": "create",
+                    "status": "rejected",
+                    "exit_code": 1,
+                    "elapsed_ms": round((time.perf_counter() - step_t0) * 1000, 2),
+                    "detail": f"Rejected unsafe deliverable path: {exc}",
+                }
+            )
+            return {
+                "success": False,
+                "summary": f"Rejected unsafe deliverable path: {exc}",
+                "artifacts": [],
+                "trace": trace,
+            }
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             f"# {title}\n\n"
@@ -237,19 +271,127 @@ class WorkerDaemon:
             f"- Host: {platform.node()} ({platform.system()} {platform.release()})\n",
             encoding="utf-8",
         )
+        write_ms = round((time.perf_counter() - step_t0) * 1000, 2)
         artifacts.append({"relative_path": primary, "action": "create", "exit_code": 0})
         steps.append(f"Wrote deliverable '{primary}'")
+        trace.append(
+            {
+                "step": "write_deliverable",
+                "action": "create",
+                "status": "completed",
+                "exit_code": 0,
+                "elapsed_ms": write_ms,
+                "detail": f"Wrote '{primary}'",
+            }
+        )
 
         # 2. Run the project test-suite if one is present, so the report carries evidence.
         if (self.workspace_root / "pytest.ini").exists() or any(self.workspace_root.glob("test_*.py")):
-            test_result = self.run_tool(["pytest", "-q"])
+            test_result = await asyncio.to_thread(self.run_tool, ["pytest", "-q"])
+            exit_code = int(test_result["exit_code"])
             artifacts.append(
-                {"relative_path": ".", "action": "test", "exit_code": test_result["exit_code"]}
+                {"relative_path": ".", "action": "test", "exit_code": exit_code}
             )
-            steps.append(f"pytest exit={test_result['exit_code']}")
+            steps.append(f"pytest exit={exit_code}")
+            trace.append(
+                {
+                    "step": "pytest",
+                    "action": "test",
+                    "status": "completed" if exit_code == 0 else "failed",
+                    "exit_code": exit_code,
+                    "elapsed_ms": float(test_result.get("elapsed_ms", 0.0)),
+                    "detail": f"pytest exit={exit_code}",
+                }
+            )
 
         summary = "; ".join(steps) or "Deliverable written"
-        return {"success": True, "summary": summary, "artifacts": artifacts}
+        return {"success": True, "summary": summary, "artifacts": artifacts, "trace": trace}
+
+    async def execute_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Execute a claimed task inside the isolated workspace with an in-flight heartbeat keepalive loop."""
+        exec_t0 = time.perf_counter()
+        trace: list[dict[str, Any]] = []
+        keepalive_heartbeats = 0
+        keepalive_interval = self._effective_keepalive_seconds()
+        keepalive_401: httpx.HTTPStatusError | None = None
+
+        async def _keepalive_loop() -> None:
+            nonlocal keepalive_heartbeats, keepalive_401
+            while True:
+                await asyncio.sleep(keepalive_interval)
+                try:
+                    await self.heartbeat()
+                    keepalive_heartbeats += 1
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 401:
+                        keepalive_401 = exc
+                        self._revocation_error = exc
+                        self._record_token_revocation("heartbeat")
+                        return
+                    logger.warning(
+                        "[aatm-worker] keepalive heartbeat returned HTTP %s for device=%s",
+                        exc.response.status_code,
+                        self.config.device_id,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - transient heartbeat issue must not crash task execution
+                    logger.debug("[aatm-worker] transient keepalive heartbeat error: %s", type(exc).__name__)
+
+        work_task = asyncio.create_task(self._run_task_steps(task, trace))
+        keepalive_enabled = self._client is not None or bool(self.config.token)
+        keepalive_task = asyncio.create_task(_keepalive_loop()) if keepalive_enabled else None
+
+        try:
+            if keepalive_task is None:
+                result = await work_task
+            else:
+                done, _ = await asyncio.wait(
+                    {work_task, keepalive_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if keepalive_task in done and keepalive_401 is not None:
+                    if not work_task.done():
+                        work_task.cancel()
+                        try:
+                            await work_task
+                        except asyncio.CancelledError:
+                            pass
+                    total_ms = round((time.perf_counter() - exec_t0) * 1000, 2)
+                    trace.append(
+                        {
+                            "step": "keepalive_heartbeat",
+                            "action": "heartbeat",
+                            "status": "revoked",
+                            "exit_code": 401,
+                            "elapsed_ms": total_ms,
+                            "detail": "Halted mid-task: device token revoked (HTTP 401).",
+                        }
+                    )
+                    return {
+                        "success": False,
+                        "summary": "Task aborted mid-execution: device token revoked (HTTP 401).",
+                        "artifacts": [],
+                        "error": self.stop_reason or "Device token revoked (HTTP 401).",
+                        "trace": trace,
+                        "total_elapsed_ms": total_ms,
+                        "keepalive_heartbeats": keepalive_heartbeats,
+                        "halted_on_revocation": True,
+                    }
+                result = await work_task
+        finally:
+            if keepalive_task is not None and not keepalive_task.done():
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except asyncio.CancelledError:
+                    pass
+
+        total_ms = round((time.perf_counter() - exec_t0) * 1000, 2)
+        result.setdefault("trace", trace)
+        result["total_elapsed_ms"] = total_ms
+        result["keepalive_heartbeats"] = keepalive_heartbeats
+        return result
 
     # ------------------------------------------------------------------ main loop
     async def run_once(self) -> dict[str, Any] | None:
@@ -264,13 +406,28 @@ class WorkerDaemon:
         try:
             result = await self.execute_task(task)
         except Exception as exc:  # noqa: BLE001 - the daemon must never die on one task
-            result = {"success": False, "summary": "Worker raised an exception", "artifacts": [], "error": str(exc)}
+            result = {
+                "success": False,
+                "summary": "Worker raised an exception",
+                "artifacts": [],
+                "error": str(exc),
+                "trace": [],
+                "total_elapsed_ms": 0.0,
+                "keepalive_heartbeats": 0,
+            }
+        if self.token_revoked:
+            if self._revocation_error is not None:
+                raise self._revocation_error
+            return None
         await self.report(
             task_id=task.get("id", ""),
             success=bool(result.get("success")),
             summary=str(result.get("summary", "")),
             artifacts=result.get("artifacts", []),
             error=result.get("error"),
+            trace=result.get("trace", []),
+            total_elapsed_ms=result.get("total_elapsed_ms"),
+            keepalive_heartbeats=int(result.get("keepalive_heartbeats", 0)),
         )
         return task
 
@@ -315,6 +472,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[WorkerConfig, int | None
     parser.add_argument("--token", default=env.token)
     parser.add_argument("--workspace-root", default=str(env.workspace_root))
     parser.add_argument("--poll-seconds", type=float, default=env.poll_seconds)
+    parser.add_argument("--keepalive-seconds", type=float, default=env.keepalive_seconds)
     parser.add_argument("--max-concurrent", type=int, default=env.max_concurrent)
     parser.add_argument("--device-type", default=env.device_type)
     parser.add_argument("--max-cycles", type=int, default=None, help="Stop after N cycles (testing)")
@@ -328,6 +486,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[WorkerConfig, int | None
         token=args.token,
         workspace_root=Path(args.workspace_root),
         poll_seconds=args.poll_seconds,
+        keepalive_seconds=args.keepalive_seconds,
         max_concurrent=args.max_concurrent,
         device_type=args.device_type,
     )

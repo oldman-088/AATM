@@ -30,6 +30,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,7 +39,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-BRIDGE_VERSION = "2.2.0"
+BRIDGE_VERSION = "2.3.0"
 
 DEFAULT_MODELS = [
     "arena-bridge-default",
@@ -93,6 +94,7 @@ class BridgeSessionState:
     total_completion_tokens: int = 0
     created_at: str = field(default_factory=_utcnow_iso)
     last_active_at: str = field(default_factory=_utcnow_iso)
+    last_active_epoch: float = field(default_factory=time.time)
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -115,14 +117,133 @@ class BridgeSessionState:
         detail["history"] = list(self.messages)
         return detail
 
+    def to_record(self) -> dict[str, Any]:
+        rec = self.to_detail()
+        rec["last_active_epoch"] = self.last_active_epoch
+        return rec
+
+    @classmethod
+    def from_record(cls, raw: dict[str, Any]) -> "BridgeSessionState":
+        last_active_at = str(raw.get("last_active_at") or _utcnow_iso())
+        epoch_val = raw.get("last_active_epoch")
+        if isinstance(epoch_val, (int, float)):
+            last_epoch = float(epoch_val)
+        else:
+            try:
+                last_epoch = datetime.fromisoformat(last_active_at).timestamp()
+            except ValueError:
+                last_epoch = time.time()
+
+        raw_history = raw.get("history")
+        messages: list[dict[str, str]] = []
+        if isinstance(raw_history, list):
+            for entry in raw_history:
+                if isinstance(entry, dict) and entry.get("role") in ("system", "user", "assistant", "tool"):
+                    messages.append({"role": str(entry["role"]), "content": str(entry.get("content", ""))})
+
+        return cls(
+            session_id=str(raw["session_id"]),
+            account_id=str(raw["account_id"]) if raw.get("account_id") else None,
+            agent_id=str(raw["agent_id"]) if raw.get("agent_id") else None,
+            conversation_id=str(raw["conversation_id"]) if raw.get("conversation_id") else None,
+            project_id=str(raw["project_id"]) if raw.get("project_id") else None,
+            model=str(raw.get("model") or "arena-bridge-default"),
+            messages=messages,
+            turn_count=int(raw.get("turn_count") or 0),
+            total_prompt_tokens=int(raw.get("total_prompt_tokens") or 0),
+            total_completion_tokens=int(raw.get("total_completion_tokens") or 0),
+            created_at=str(raw.get("created_at") or _utcnow_iso()),
+            last_active_at=last_active_at,
+            last_active_epoch=last_epoch,
+        )
+
 
 class BridgeSessionStore:
-    """Async-safe per-employee session context store with cross-account isolation."""
+    """Async-safe per-employee session context store with cross-account isolation, optional persistence & TTL eviction."""
 
-    def __init__(self, max_history: int = 40) -> None:
+    def __init__(
+        self,
+        max_history: int = 40,
+        state_file: str | Path | None = None,
+        session_ttl_seconds: float | None = None,
+    ) -> None:
         self._lock = asyncio.Lock()
         self._sessions: dict[str, BridgeSessionState] = {}
         self.max_history = max(4, max_history)
+        self.state_file: Path | None = Path(state_file) if state_file else None
+        self.session_ttl_seconds: float | None = (
+            float(session_ttl_seconds) if session_ttl_seconds is not None and float(session_ttl_seconds) > 0 else None
+        )
+        self._evicted_sessions: int = 0
+        self._load_state_sync()
+        self._prune_expired_locked()
+
+    def _load_state_sync(self) -> None:
+        if self.state_file is None or not self.state_file.exists():
+            return
+        try:
+            raw_text = self.state_file.read_text(encoding="utf-8")
+            payload = json.loads(raw_text)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        items = payload.get("sessions")
+        if not isinstance(items, dict):
+            return
+        for sid, rec in items.items():
+            if not isinstance(rec, dict):
+                continue
+            rec_copy = dict(rec)
+            rec_copy.setdefault("session_id", str(sid))
+            try:
+                sess = BridgeSessionState.from_record(rec_copy)
+                self._sessions[sess.session_id] = sess
+            except Exception:
+                continue
+
+    def _persist_locked(self) -> None:
+        if self.state_file is None:
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": BRIDGE_VERSION,
+            "saved_at": _utcnow_iso(),
+            "sessions": {sid: sess.to_record() for sid, sess in self._sessions.items()},
+        }
+        tmp_path = self.state_file.with_suffix(self.state_file.suffix + f".{os.getpid()}.tmp")
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp_path, self.state_file)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _prune_expired_locked(self, now: float | None = None) -> int:
+        if self.session_ttl_seconds is None:
+            return 0
+        current = time.time() if now is None else now
+        expired_ids = [
+            sid
+            for sid, sess in self._sessions.items()
+            if (current - sess.last_active_epoch) > self.session_ttl_seconds
+        ]
+        if not expired_ids:
+            return 0
+        for sid in expired_ids:
+            del self._sessions[sid]
+        self._evicted_sessions += len(expired_ids)
+        self._persist_locked()
+        return len(expired_ids)
+
+    async def prune_expired(self, now: float | None = None) -> int:
+        async with self._lock:
+            return self._prune_expired_locked(now=now)
 
     async def get_or_create(
         self,
@@ -135,6 +256,7 @@ class BridgeSessionStore:
         model: str,
     ) -> BridgeSessionState:
         async with self._lock:
+            self._prune_expired_locked()
             existing = self._sessions.get(session_id)
             if existing is not None:
                 if existing.account_id and account_id and existing.account_id != account_id:
@@ -151,6 +273,9 @@ class BridgeSessionStore:
                 if not existing.project_id and project_id:
                     existing.project_id = project_id
                 existing.model = model
+                existing.last_active_at = _utcnow_iso()
+                existing.last_active_epoch = time.time()
+                self._persist_locked()
                 return existing
 
             created = BridgeSessionState(
@@ -162,6 +287,7 @@ class BridgeSessionStore:
                 model=model,
             )
             self._sessions[session_id] = created
+            self._persist_locked()
             return created
 
     async def record_turn(
@@ -192,10 +318,13 @@ class BridgeSessionStore:
             sess.total_completion_tokens += completion_tokens
             sess.model = model
             sess.last_active_at = _utcnow_iso()
+            sess.last_active_epoch = time.time()
+            self._persist_locked()
             return sess
 
     async def get(self, session_id: str, account_id: str | None = None) -> BridgeSessionState | None:
         async with self._lock:
+            self._prune_expired_locked()
             sess = self._sessions.get(session_id)
             if sess is None:
                 return None
@@ -208,6 +337,7 @@ class BridgeSessionStore:
 
     async def list_summaries(self, account_id: str | None = None) -> list[dict[str, Any]]:
         async with self._lock:
+            self._prune_expired_locked()
             items = []
             for sess in self._sessions.values():
                 if account_id and sess.account_id != account_id:
@@ -217,6 +347,7 @@ class BridgeSessionStore:
 
     async def delete(self, session_id: str, account_id: str | None = None) -> bool:
         async with self._lock:
+            self._prune_expired_locked()
             sess = self._sessions.get(session_id)
             if sess is None:
                 return False
@@ -226,15 +357,18 @@ class BridgeSessionStore:
                     detail="Cross-account session delete denied: session_id is bound to a different account_id.",
                 )
             del self._sessions[session_id]
+            self._persist_locked()
             return True
 
     async def count(self) -> int:
         async with self._lock:
+            self._prune_expired_locked()
             return len(self._sessions)
 
     async def metrics(self, account_id: str | None = None) -> dict[str, Any]:
         """Return aggregate session count & token telemetry strictly scoped to account_id when provided."""
         async with self._lock:
+            self._prune_expired_locked()
             scoped = [
                 sess
                 for sess in self._sessions.values()
@@ -266,6 +400,9 @@ class BridgeSessionStore:
                 "unique_agents": len(agents),
                 "accounts_breakdown": accounts_breakdown,
                 "max_history_per_session": self.max_history,
+                "persistence_enabled": self.state_file is not None,
+                "session_ttl_seconds": self.session_ttl_seconds,
+                "evicted_sessions": self._evicted_sessions if account_id is None else None,
             }
 
 
@@ -365,15 +502,40 @@ def _split_sse_chunks(content: str, chunk_size: int = 32) -> list[str]:
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
 
 
-def create_app(max_history: int | None = None) -> FastAPI:
+def _parse_optional_ttl_env() -> float | None:
+    raw = os.environ.get("AATM_BRIDGE_SESSION_TTL_SECONDS", "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+        return val if val > 0 else None
+    except ValueError:
+        return None
+
+
+def create_app(
+    max_history: int | None = None,
+    state_file: str | Path | None = None,
+    session_ttl_seconds: float | None = None,
+) -> FastAPI:
     hist_limit = max_history if max_history is not None else int(os.environ.get("ARENA_BRIDGE_MAX_HISTORY", "40"))
-    store = BridgeSessionStore(max_history=hist_limit)
+    resolved_state_file = (
+        state_file
+        if state_file is not None
+        else (os.environ.get("AATM_BRIDGE_STATE_FILE", "").strip() or None)
+    )
+    resolved_ttl = session_ttl_seconds if session_ttl_seconds is not None else _parse_optional_ttl_env()
+    store = BridgeSessionStore(
+        max_history=hist_limit,
+        state_file=resolved_state_file,
+        session_ttl_seconds=resolved_ttl,
+    )
     started_at = time.monotonic()
 
     bridge_app = FastAPI(
         title="AATM Arena Local Bridge (Reference Daemon)",
         version=BRIDGE_VERSION,
-        description="Compliant loopback bridge daemon for AATM Division 05 with Bearer auth, SSE streaming & per-employee session isolation.",
+        description="Compliant loopback bridge daemon for AATM Division 05 with Bearer auth, SSE streaming, optional persistence/TTL & per-employee session isolation.",
     )
     bridge_app.state.session_store = store
 
@@ -388,6 +550,8 @@ def create_app(max_history: int | None = None) -> FastAPI:
             "mode": "upstream_proxy" if upstream else "local_reference",
             "auth_required": token_configured,
             "streaming_supported": True,
+            "persistence_enabled": store.state_file is not None,
+            "session_ttl_seconds": store.session_ttl_seconds,
             "models": list(DEFAULT_MODELS),
             "active_sessions": await store.count(),
             "uptime_seconds": round(time.monotonic() - started_at, 2),

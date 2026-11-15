@@ -420,3 +420,171 @@ async def test_adapter_delete_session_e2e_on_live_bridge(monkeypatch):
     assert offline_res["deleted"] is False
     assert offline_res["status"] == "bridge_offline"
     assert offline_res["bridge_reachable"] is False
+
+
+@pytest.mark.asyncio
+async def test_bridge_state_persistence_and_idle_ttl_eviction(monkeypatch, tmp_path):
+    token_val = "bridge-persist-token-2026"
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", token_val)
+    auth = {"Authorization": f"Bearer {token_val}"}
+    state_file = tmp_path / "bridge_state.json"
+
+    # 1. Write isolated sessions to a persistent bridge store
+    app_a = create_app(state_file=state_file, session_ttl_seconds=300.0)
+    async with AsyncClient(transport=ASGITransport(app=app_a), base_url="http://bridge.test") as client:
+        h = await client.get("/health", headers=auth)
+        assert h.status_code == 200
+        assert h.json()["persistence_enabled"] is True
+        assert h.json()["session_ttl_seconds"] == 300.0
+
+        r1 = await client.post(
+            "/v1/chat/completions",
+            headers={**auth, "X-AATM-Session-Id": "sess-persist-1", "X-AATM-Account-Id": "acct-alpha", "X-AATM-Agent-Id": "worker-1"},
+            json={"model": "arena-bridge-default", "messages": [{"role": "user", "content": "Persisted turn one"}]},
+        )
+        assert r1.status_code == 200
+        r2 = await client.post(
+            "/v1/chat/completions",
+            headers={**auth, "X-AATM-Session-Id": "sess-persist-2", "X-AATM-Account-Id": "acct-beta", "X-AATM-Agent-Id": "worker-2"},
+            json={"model": "arena-bridge-default", "messages": [{"role": "user", "content": "Beta persisted turn"}]},
+        )
+        assert r2.status_code == 200
+
+    assert state_file.exists()
+    # State file must never store Bearer auth tokens
+    assert token_val not in state_file.read_text(encoding="utf-8")
+
+    # 2. Simulate daemon restart via fresh create_app(state_file=...) — sessions & isolation survive!
+    app_b = create_app(state_file=state_file, session_ttl_seconds=300.0)
+    async with AsyncClient(transport=ASGITransport(app=app_b), base_url="http://bridge.test") as client:
+        s1 = await client.get("/v1/sessions/sess-persist-1", headers={**auth, "X-AATM-Account-Id": "acct-alpha"})
+        assert s1.status_code == 200
+        assert s1.json()["turn_count"] == 1
+        assert any("Persisted turn one" in m["content"] for m in s1.json()["history"])
+
+        # Cross-account isolation still holds after reload
+        hijack = await client.get("/v1/sessions/sess-persist-1", headers={**auth, "X-AATM-Account-Id": "acct-beta"})
+        assert hijack.status_code == 403
+
+    # 3. Idle-session TTL eviction removes stale sessions without cross-account leakage
+    app_ttl = create_app(state_file=state_file, session_ttl_seconds=60.0)
+    # Age only sess-persist-1 past TTL while keeping sess-persist-2 fresh
+    app_ttl.state.session_store._sessions["sess-persist-1"].last_active_epoch = time.time() - 120.0
+    async with AsyncClient(transport=ASGITransport(app=app_ttl), base_url="http://bridge.test") as client:
+        list_resp = await client.get("/v1/sessions", headers=auth)
+        assert list_resp.status_code == 200
+        body = list_resp.json()
+        assert body["count"] == 1
+        assert [s["session_id"] for s in body["sessions"]] == ["sess-persist-2"]
+        assert body["metrics"]["evicted_sessions"] == 1
+
+        gone = await client.get("/v1/sessions/sess-persist-1", headers={**auth, "X-AATM-Account-Id": "acct-alpha"})
+        assert gone.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_adapter_generate_stream_and_router_route_and_stream_e2e(monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "e2e-stream-token-2026")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with AsyncSessionLocal() as db:
+        await seed_initial_data(db)
+
+        with _LiveBridgeProcess() as srv:
+            bridge_prov = await db.get(AIProvider, "arena-local-bridge")
+            bridge_prov.endpoint_url = srv.base_url
+            await db.commit()
+
+            # 1. Direct ArenaLocalBridgeAdapter.generate_stream() against live SSE server
+            adapter = ArenaLocalBridgeAdapter(
+                "arena-local-bridge",
+                srv.base_url,
+                "env:ARENA_BRIDGE_TOKEN",
+                "arena-bridge-default",
+            )
+            direct_chunks = [
+                c
+                async for c in adapter.generate_stream(
+                    ProviderRequest(
+                        prompt="Stream direct adapter verification message",
+                        agent_id="worker-1",
+                        dry_run=False,
+                        metadata={"session_id": "sess-worker-1", "account_id": "acct-arena-primary"},
+                    )
+                )
+            ]
+            content_chunks = [c for c in direct_chunks if not c.done]
+            done_chunks = [c for c in direct_chunks if c.done]
+            assert len(content_chunks) >= 2
+            assert len(done_chunks) == 1
+            assert done_chunks[0].success is True
+            assert done_chunks[0].metadata["confirmed_usage"] is True
+            assert done_chunks[0].metadata["session_id"] == "sess-worker-1"
+            reassembled = "".join(c.delta for c in content_chunks)
+            assert "sess-worker-1" in reassembled
+            assert "Stream direct adapter verification message" in reassembled
+
+            # Cross-account stream directly against adapter fails cleanly (HTTP 403)
+            bad_chunks = [
+                c
+                async for c in adapter.generate_stream(
+                    ProviderRequest(
+                        prompt="Unauthorized cross-account stream",
+                        agent_id="worker-2",
+                        dry_run=False,
+                        metadata={"session_id": "sess-worker-1", "account_id": "acct-evil"},
+                    )
+                )
+            ]
+            assert len(bad_chunks) == 1
+            assert bad_chunks[0].done is True
+            assert bad_chunks[0].success is False
+            assert bad_chunks[0].metadata["http_status"] == 403
+
+            # 2. End-to-end ProviderRouter.route_and_stream() with DB session tracking
+            router = ProviderRouter()
+            routed_chunks = [
+                c
+                async for c in router.route_and_stream(
+                    db,
+                    ProviderRequest(prompt="Router streamed prompt for worker 3", agent_id="worker-3", dry_run=False),
+                    preferred_provider_id="arena-local-bridge",
+                )
+            ]
+            routed_deltas = [c.delta for c in routed_chunks if not c.done]
+            routed_done = [c for c in routed_chunks if c.done]
+            assert len(routed_deltas) >= 2
+            assert len(routed_done) == 1
+            assert routed_done[0].success is True
+            assert routed_done[0].metadata["session_id"] == "sess-worker-3"
+            assert routed_done[0].metadata["account_id"] == "acct-arena-primary"
+            assert "Router streamed prompt for worker 3" in "".join(routed_deltas)
+
+            db_s3 = await db.get(ProviderSession, "sess-worker-3")
+            assert db_s3.message_count == 1
+            assert db_s3.last_message_at is not None
+
+        # 3. Offline bridge diagnostic fallback via ProviderRouter.route_and_stream()
+        # Disable secondary providers so offline fallback activates deterministically
+        for pid in ("arena-agent", "anthropic-claude"):
+            p = await db.get(AIProvider, pid)
+            if p:
+                p.is_enabled = False
+        await db.commit()
+
+        router = ProviderRouter()
+        fb_chunks = [
+            c
+            async for c in router.route_and_stream(
+                db,
+                ProviderRequest(prompt="Offline stream test", agent_id="worker-3", dry_run=False),
+                preferred_provider_id="arena-local-bridge",
+            )
+        ]
+        assert any("safe-diagnostic" in c.delta for c in fb_chunks if not c.done)
+        assert fb_chunks[-1].done is True
+        assert fb_chunks[-1].success is True
+        assert fb_chunks[-1].metadata["mode"] == "bridge_offline_diagnostic"

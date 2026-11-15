@@ -14,12 +14,14 @@ from sqlalchemy import select
 
 from app.browser.engines import (
     BROWSER_ENGINE_REGISTRY,
+    AutomaWorkflowAdapter,
     authorize_userscript_execution,
     match_url_pattern,
     validate_userscript_policy,
 )
 from app.browser.manager import (
     BrowserManager,
+    browser_manager,
     detect_playwright_capabilities,
     validate_navigation_url,
     validate_selector,
@@ -1150,3 +1152,554 @@ async def test_worker_daemon_halts_cleanly_on_http_401_heartbeat_claim_and_repor
     # Confirm no second poll cycle ever happened after HTTP 401
     heartbeat_calls = [p for p in calls if p.endswith("/heartbeat")]
     assert len(heartbeat_calls) == 1
+
+
+async def test_router_cross_account_session_override_guard_and_health_score_recovery(db_session, monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "router-health-token-2026")
+
+    acct_a = ProviderAccount(
+        id="acct-iso-a",
+        provider_id="arena-local-bridge",
+        label="Account A",
+        account_identifier="a@arena.local",
+        allocation_mode="hybrid",
+        max_employees=5,
+        credential_ref="env:ARENA_BRIDGE_TOKEN",
+        status="active",
+    )
+    acct_b = ProviderAccount(
+        id="acct-iso-b",
+        provider_id="arena-local-bridge",
+        label="Account B",
+        account_identifier="b@arena.local",
+        allocation_mode="hybrid",
+        max_employees=5,
+        credential_ref="env:ARENA_BRIDGE_TOKEN",
+        status="active",
+    )
+    sess_a = ProviderSession(
+        id="sess-iso-a",
+        account_id="acct-iso-a",
+        agent_id="emp-iso-a",
+        status="active",
+        health_score=70.0,
+    )
+    sess_b = ProviderSession(
+        id="sess-iso-b",
+        account_id="acct-iso-b",
+        agent_id="emp-iso-b",
+        status="active",
+        health_score=100.0,
+    )
+    emp_a = Agent(
+        id="emp-iso-a",
+        name="Isolated Employee A",
+        role="worker",
+        specialty="AI",
+        skills=["python"],
+        divisions=["D05"],
+        status="idle",
+        provider_id="arena-local-bridge",
+        provider_account_id="acct-iso-a",
+        provider_session_id="sess-iso-a",
+    )
+    db_session.add_all([acct_a, acct_b, sess_a, sess_b, emp_a])
+    await db_session.commit()
+
+    router = ProviderRouter()
+
+    # 1. Cross-account explicit session_id override rejected cleanly on route_and_execute AND route_and_stream
+    denied_exec = await router.route_and_execute(
+        db_session,
+        ProviderRequest(prompt="Try hijacking B", agent_id="emp-iso-a", metadata={"session_id": "sess-iso-b"}),
+        preferred_provider_id="arena-local-bridge",
+    )
+    assert denied_exec.success is False
+    assert denied_exec.metadata.get("cross_account_denied") is True
+    assert "Cross-account" in (denied_exec.error_message or "")
+
+    denied_stream = [
+        c
+        async for c in router.route_and_stream(
+            db_session,
+            ProviderRequest(prompt="Try streaming B", agent_id="emp-iso-a", metadata={"session_id": "sess-iso-b"}),
+            preferred_provider_id="arena-local-bridge",
+        )
+    ]
+    assert len(denied_stream) == 1
+    assert denied_stream[0].done is True
+    assert denied_stream[0].success is False
+    assert denied_stream[0].metadata.get("cross_account_denied") is True
+
+    # 2. Dynamic health_score degradation on repeated HTTP errors and recovery on live success
+    for pid in ("arena-agent", "anthropic-claude"):
+        prov = await db_session.get(AIProvider, pid)
+        if prov:
+            prov.is_enabled = False
+    await db_session.commit()
+
+    with _MockBridgeServer(expected_bearer="wrong-server-token-forces-401") as failing_srv:
+        bridge_prov = await db_session.get(AIProvider, "arena-local-bridge")
+        bridge_prov.endpoint_url = failing_srv.base_url
+        await db_session.commit()
+
+        # Two HTTP 401 failures drop health_score from 70 -> 55 -> 40 (<50 => degraded)
+        r1 = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Fail 1", agent_id="emp-iso-a", dry_run=False, allow_diagnostic_fallback=False),
+            preferred_provider_id="arena-local-bridge",
+        )
+        r2 = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Fail 2", agent_id="emp-iso-a", dry_run=False, allow_diagnostic_fallback=False),
+            preferred_provider_id="arena-local-bridge",
+        )
+        assert r1.success is False and r2.success is False
+        s_degraded = await db_session.get(ProviderSession, "sess-iso-a")
+        assert s_degraded.health_score == 40.0
+        assert s_degraded.status == "degraded"
+        assert s_degraded.error_count == 2
+
+    with _MockBridgeServer(expected_bearer="router-health-token-2026") as healthy_srv:
+        bridge_prov = await db_session.get(AIProvider, "arena-local-bridge")
+        bridge_prov.endpoint_url = healthy_srv.base_url
+        await db_session.commit()
+
+        # Two healthy turns recover health_score from 40 -> 50 -> 60 (>=60 => restored active!)
+        ok1 = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Recover 1", agent_id="emp-iso-a", dry_run=False),
+            preferred_provider_id="arena-local-bridge",
+        )
+        ok2 = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Recover 2", agent_id="emp-iso-a", dry_run=False),
+            preferred_provider_id="arena-local-bridge",
+        )
+        assert ok1.success is True and ok2.success is True
+        s_recovered = await db_session.get(ProviderSession, "sess-iso-a")
+        assert s_recovered.health_score == 60.0
+        assert s_recovered.status == "active"
+        assert s_recovered.last_error is None
+
+
+async def test_automa_workflow_step_execution_redaction_and_policy_rejection(db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": False,
+            "chromium_path": None,
+            "engine_mode": "headless_fallback",
+        },
+    )
+
+    mgr = BrowserManager()
+    bp = BrowserProfile(
+        id="profile-automa-runner",
+        name="Automa Step Runner Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "profile-automa-runner"),
+        mode="background",
+        status="ready",
+        current_url="about:blank",
+    )
+    db_session.add(bp)
+    await db_session.commit()
+    await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background")
+
+    automa = AutomaWorkflowAdapter()
+
+    # 1. Fail-closed policy rejection when ANY step targets CAPTCHA — zero steps execute!
+    rejected = await automa.execute_workflow(
+        db_session,
+        bp,
+        [
+            {"type": "navigate", "url": "https://fastapi.tiangolo.com/"},
+            {"type": "click_element", "selector": "#g-recaptcha-response"},
+        ],
+        manager=mgr,
+        actor="worker-3",
+    )
+    assert rejected["status"] == "rejected"
+    assert rejected["steps_completed"] == 0
+    assert rejected["trace"] == []
+    assert bp.current_url == "about:blank"
+
+    # 2. Valid 5-step workflow executes sequentially in headless_fallback with strict value redaction
+    secret_field_text = "automa-redacted-entry-554433"
+    res = await automa.execute_workflow(
+        db_session,
+        bp,
+        [
+            {"type": "navigate", "url": "https://fastapi.tiangolo.com/tutorial/"},
+            {"type": "fill_input", "selector": "input[name='q']", "value": secret_field_text},
+            {"type": "click_element", "selector": "button[type='submit']"},
+            {"type": "wait", "ms": 5},
+            {"type": "capture_snapshot"},
+        ],
+        manager=mgr,
+        actor="worker-3",
+    )
+    assert res["status"] == "completed"
+    assert res["steps_completed"] == 5
+    assert len(res["trace"]) == 5
+    assert [t["type"] for t in res["trace"]] == [
+        "navigate",
+        "fill_input",
+        "click_element",
+        "wait",
+        "capture_snapshot",
+    ]
+    assert res["trace"][1]["redacted"] is True
+    assert res["trace"][1]["value_length"] == len(secret_field_text)
+    assert secret_field_text not in json.dumps(res)
+    assert secret_field_text not in (bp.last_snapshot_svg or "")
+
+    # 3. Also verify delegation through AutomaWorkflowAdapter.execute_action(..., params={db, profile, manager, steps})
+    class _FakePage:
+        def __init__(self) -> None:
+            self.url = "https://fastapi.tiangolo.com/live/"
+            self.clicked: list[str] = []
+            self.filled: list[tuple[str, str]] = []
+
+        async def goto(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 15000) -> None:
+            self.url = url
+
+        async def click(self, selector: str, timeout: int = 5000) -> None:
+            self.clicked.append(selector)
+
+        async def fill(self, selector: str, value: str, timeout: int = 5000) -> None:
+            self.filled.append((selector, value))
+
+        async def title(self) -> str:
+            return "Live Automa Page"
+
+        async def screenshot(self, full_page: bool = False, type: str = "png") -> bytes:
+            return b"\x89PNG\r\n\x1a\nLIVE_AUTOMA"
+
+    class _FakeCtx:
+        def __init__(self, page: _FakePage) -> None:
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class _FakePW:
+        async def stop(self) -> None:
+            return None
+
+    fake_page = _FakePage()
+    mgr._active_contexts[bp.id] = (_FakePW(), _FakeCtx(fake_page))
+
+    live_res = await automa.execute_action(
+        bp.id,
+        "run_workflow",
+        {
+            "db": db_session,
+            "profile": bp,
+            "manager": mgr,
+            "actor": "worker-3",
+            "steps": [
+                {"type": "navigate", "url": "https://fastapi.tiangolo.com/live/"},
+                {"type": "fill_input", "selector": "#note", "value": "live-redacted-text"},
+                {"type": "click_element", "selector": "#go"},
+                {"type": "capture_snapshot"},
+            ],
+        },
+    )
+    assert live_res["status"] == "completed"
+    assert live_res["steps_completed"] == 4
+    assert fake_page.filled == [("#note", "live-redacted-text")]
+    assert fake_page.clicked == ["#go"]
+    assert live_res["trace"][3]["format"] == "png+svg"
+    assert "live-redacted-text" not in json.dumps(live_res)
+
+    await mgr.stop_profile(db_session, bp, actor="worker-3")
+
+
+async def test_browser_manager_run_userscript_authorized_live_fallback_and_denied(db_session, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": False,
+            "chromium_path": None,
+            "engine_mode": "headless_fallback",
+        },
+    )
+
+    mgr = BrowserManager()
+    bp = BrowserProfile(
+        id="profile-userscript-harness",
+        name="Userscript Harness Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "profile-userscript-harness"),
+        mode="background",
+        status="ready",
+        current_url="http://localhost:5173/dashboard",
+    )
+    db_session.add(bp)
+    await db_session.commit()
+    await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background", url="http://localhost:5173/dashboard")
+
+    approved_script = {
+        "id": "us-safe-inspector",
+        "name": "Safe Inspector",
+        "is_enabled": True,
+        "audit_status": "approved",
+        "code": "return document.title;",
+        "match_patterns": ["http://localhost:*/*"],
+        "allowed_roles": ["worker"],
+        "allowed_agent_ids": ["worker-3"],
+    }
+
+    # 1. Authorized worker in headless_fallback mode succeeds & records AuditLog
+    fb = await mgr.run_userscript(
+        db_session,
+        bp,
+        approved_script,
+        agent_id="worker-3",
+        agent_role="worker",
+    )
+    assert fb["ok"] is True
+    assert fb["engine_mode"] == "headless_fallback"
+    assert fb["executed_live"] is False
+    assert fb["userscript_id"] == "us-safe-inspector"
+
+    # 2. Unauthorized role fails closed & records browser.userscript.denied AuditLog
+    with pytest.raises(ValueError, match="Userscript authorization denied"):
+        await mgr.run_userscript(db_session, bp, approved_script, agent_id="worker-3", agent_role="guest")
+
+    # 3. Non-matching URL fails closed
+    with pytest.raises(ValueError, match="Userscript authorization denied"):
+        await mgr.run_userscript(
+            db_session,
+            bp,
+            approved_script,
+            agent_id="worker-3",
+            agent_role="worker",
+            target_url="https://github.com/oldman-088/AATM",
+        )
+
+    # 4. Prohibited CAPTCHA/cookie script fails closed even if audit_status was claimed approved
+    evil_script = dict(approved_script, id="us-evil", code="return document.cookie;")
+    with pytest.raises(ValueError, match="Userscript authorization denied"):
+        await mgr.run_userscript(db_session, bp, evil_script, agent_id="worker-3", agent_role="worker")
+
+    denied_logs = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.resource_id == bp.id, AuditLog.action == "browser.userscript.denied")
+        )
+    ).scalars().all()
+    assert len(denied_logs) == 3
+
+    # 5. Live Playwright execution path runs page.evaluate and returns structured result
+    class _EvalPage:
+        def __init__(self) -> None:
+            self.evaluated: list[str] = []
+
+        async def evaluate(self, script: str) -> str:
+            self.evaluated.append(script)
+            return "AATM Command Center"
+
+    class _EvalCtx:
+        def __init__(self, page: _EvalPage) -> None:
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class _EvalPW:
+        async def stop(self) -> None:
+            return None
+
+    eval_page = _EvalPage()
+    mgr._active_contexts[bp.id] = (_EvalPW(), _EvalCtx(eval_page))
+
+    live = await mgr.run_userscript(db_session, bp, approved_script, agent_id="worker-3", agent_role="worker")
+    assert live["ok"] is True
+    assert live["engine_mode"] == "playwright"
+    assert live["executed_live"] is True
+    assert live["result"] == "AATM Command Center"
+    assert len(eval_page.evaluated) == 1
+
+    await mgr.stop_profile(db_session, bp, actor="worker-3")
+
+
+async def test_replace_employee_stops_running_browser_profiles_and_releases_locks(db_session, tmp_path):
+    bp_dir = tmp_path / "profile-replace-lock"
+    bp = BrowserProfile(
+        id="profile-replace-lock",
+        name="Replace Browser Lock Test",
+        agent_id="emp-browser-holder",
+        profile_dir=str(bp_dir),
+        mode="background",
+        status="ready",
+        current_url="about:blank",
+    )
+    emp = Agent(
+        id="emp-browser-holder",
+        name="Browser Holding Employee",
+        role="worker",
+        specialty="Browser QA",
+        skills=["playwright", "python"],
+        divisions=["D06"],
+        status="working",
+        provider_id="arena-agent",
+        browser_profile_id="profile-replace-lock",
+    )
+    db_session.add_all([bp, emp])
+    await db_session.commit()
+
+    await browser_manager.launch_profile(db_session, bp, owner="emp-browser-holder", mode="background")
+    lock_file = bp_dir / ".aatm.lock"
+    assert bp.status == "running"
+    assert lock_file.exists()
+
+    result = await replacement_service.replace_employee(
+        db_session,
+        failing_agent_id="emp-browser-holder",
+        reason="Employee unresponsive with locked browser",
+        actor="manager-0",
+    )
+    assert "profile-replace-lock" in result["stopped_browsers"]
+
+    refreshed_bp = await db_session.get(BrowserProfile, "profile-replace-lock")
+    assert refreshed_bp.status == "stopped"
+    assert refreshed_bp.lock_owner is None
+    assert not lock_file.exists()
+
+
+async def test_worker_daemon_inflight_keepalive_and_step_trace_report(tmp_path: Path):
+    heartbeat_count = 0
+    reported_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal heartbeat_count
+        path = request.url.path
+        if path.endswith("/heartbeat"):
+            heartbeat_count += 1
+            return httpx.Response(200, json={"status": "online"})
+        if path.endswith("/claim"):
+            return httpx.Response(
+                200,
+                json={
+                    "task": {
+                        "id": "task-keepalive-1",
+                        "title": "Long running task",
+                        "description": "Verify in-flight keepalive heartbeats & step trace",
+                        "expected_deliverables": ["keepalive_deliverable.md"],
+                    }
+                },
+            )
+        if path.endswith("/report"):
+            reported_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"status": "completed"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://aatm.test") as client:
+        daemon = WorkerDaemon(
+            WorkerConfig(
+                server_url="http://aatm.test",
+                device_id="node-keepalive",
+                token="keepalive-valid-token-2026",
+                workspace_root=tmp_path / "ws-keepalive",
+                poll_seconds=5.0,
+                keepalive_seconds=0.02,
+            ),
+            client=client,
+        )
+
+        orig_run_steps = daemon._run_task_steps
+
+        async def slow_run_steps(task: dict[str, Any], trace: list[dict[str, Any]]) -> dict[str, Any]:
+            await asyncio.sleep(0.08)
+            return await orig_run_steps(task, trace)
+
+        daemon._run_task_steps = slow_run_steps  # type: ignore[method-assign]
+        executed = await daemon.run_once()
+
+    assert executed is not None
+    assert daemon.token_revoked is False
+    # 1 initial heartbeat from run_once + >= 2 in-flight keepalive heartbeats during slow_run_steps
+    assert heartbeat_count >= 3
+    assert len(reported_payloads) == 1
+    rep = reported_payloads[0]
+    assert rep["success"] is True
+    assert rep["keepalive_heartbeats"] >= 2
+    assert rep["total_elapsed_ms"] >= 50.0
+    assert len(rep["trace"]) >= 1
+    assert rep["trace"][0]["step"] == "write_deliverable"
+    assert rep["trace"][0]["exit_code"] == 0
+
+
+async def test_worker_daemon_mid_task_keepalive_401_halts_immediately(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+):
+    device_token = "midtask-revoked-token-never-log-777"
+    heartbeat_calls = 0
+    report_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal heartbeat_calls, report_calls
+        path = request.url.path
+        if path.endswith("/register"):
+            return httpx.Response(200, json={"device_id": "node-mid401", "bound_agent_id": "dev-node-mid401"})
+        if path.endswith("/heartbeat"):
+            heartbeat_calls += 1
+            # Initial cycle heartbeat succeeds; first in-flight keepalive heartbeat receives HTTP 401!
+            if heartbeat_calls >= 2:
+                return httpx.Response(401, json={"detail": "Device token revoked mid-task"})
+            return httpx.Response(200, json={"status": "online"})
+        if path.endswith("/claim"):
+            return httpx.Response(
+                200,
+                json={
+                    "task": {
+                        "id": "task-mid401",
+                        "title": "Slow task interrupted by token revocation",
+                        "expected_deliverables": ["never_finished.md"],
+                    }
+                },
+            )
+        if path.endswith("/report"):
+            report_calls += 1
+            return httpx.Response(200, json={"status": "completed"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://aatm.test") as client:
+        daemon = WorkerDaemon(
+            WorkerConfig(
+                server_url="http://aatm.test",
+                device_id="node-mid401",
+                token=device_token,
+                workspace_root=tmp_path / "ws-mid401",
+                poll_seconds=60.0,
+                keepalive_seconds=0.02,
+            ),
+            client=client,
+        )
+
+        async def very_slow_steps(task: dict[str, Any], trace: list[dict[str, Any]]) -> dict[str, Any]:
+            await asyncio.sleep(5.0)
+            return {"success": True, "summary": "should be cancelled", "artifacts": [], "trace": trace}
+
+        daemon._run_task_steps = very_slow_steps  # type: ignore[method-assign]
+        with caplog.at_level(logging.ERROR, logger="app.runtime.worker_daemon"):
+            await daemon.run_forever(max_cycles=5)
+
+    assert daemon.token_revoked is True
+    assert daemon.cycles_completed == 1
+    assert heartbeat_calls == 2
+    assert report_calls == 0
+
+    out = capsys.readouterr().out
+    assert "TOKEN REVOKED (HTTP 401)" in out
+    assert device_token not in out
+    assert any("TOKEN REVOKED (HTTP 401)" in rec.message for rec in caplog.records)
+    assert all(device_token not in rec.message for rec in caplog.records)

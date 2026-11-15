@@ -819,6 +819,198 @@ class BrowserManager:
                 "fallback_reason": fallback_reason,
             }
 
+    async def run_userscript(
+        self,
+        db: AsyncSession,
+        profile: BrowserProfile,
+        userscript: Any,
+        agent_id: str,
+        agent_role: str,
+        *,
+        target_url: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Policy-gated userscript runner: enforces authorize_userscript_execution fail-closed, runs via Playwright or headless_fallback."""
+        from app.browser.engines import authorize_userscript_execution
+
+        audit_actor = actor or agent_id or "system"
+        if isinstance(userscript, dict):
+            script_dict = dict(userscript)
+            userscript_id = str(script_dict.get("id") or script_dict.get("name") or "inline-userscript")
+        else:
+            userscript_id = str(getattr(userscript, "id", None) or getattr(userscript, "name", "userscript"))
+            script_dict = {
+                "id": userscript_id,
+                "name": getattr(userscript, "name", userscript_id),
+                "is_enabled": getattr(userscript, "is_enabled", False),
+                "audit_status": getattr(userscript, "audit_status", "pending"),
+                "code": getattr(userscript, "code", ""),
+                "match_patterns": list(getattr(userscript, "match_patterns", []) or []),
+                "allowed_roles": list(getattr(userscript, "allowed_roles", []) or []),
+                "allowed_agent_ids": list(getattr(userscript, "allowed_agent_ids", []) or []),
+            }
+
+        effective_url = validate_navigation_url(target_url or profile.current_url or "about:blank")
+        authorized, reason = authorize_userscript_execution(
+            script_dict,
+            agent_id=agent_id,
+            agent_role=agent_role,
+            target_url=effective_url,
+        )
+        if not authorized:
+            db.add(
+                AuditLog(
+                    actor=audit_actor,
+                    action="browser.userscript.denied",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "reason": reason,
+                    },
+                    severity="warning",
+                )
+            )
+            await db.commit()
+            raise ValueError(f"Userscript authorization denied: {reason}")
+
+        async with self._get_profile_lock(profile.id):
+            if profile.status != "running":
+                raise ValueError(
+                    f"Browser profile '{profile.id}' must be running before executing userscripts (status='{profile.status}')."
+                )
+
+            profile.last_heartbeat = utcnow()
+            code = str(script_dict.get("code") or "")
+
+            if profile.id in self._active_contexts:
+                _, ctx = self._active_contexts[profile.id]
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    eval_result = await page.evaluate(f"() => {{\n{code}\n}}")
+                    result_preview = None if eval_result is None else str(eval_result)[:500]
+                    note = f"Live Playwright userscript '{userscript_id[:36]}' executed for {agent_id}."
+                    profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)
+                    db.add(
+                        AuditLog(
+                            actor=audit_actor,
+                            action="browser.userscript.executed",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "userscript_id": userscript_id,
+                                "agent_id": agent_id,
+                                "agent_role": agent_role,
+                                "target_url": effective_url,
+                                "engine_mode": "playwright",
+                                "executed_live": True,
+                            },
+                        )
+                    )
+                    await db.commit()
+                    await db.refresh(profile)
+                    await event_bus.emit(
+                        "browser.snapshot",
+                        {"profile_id": profile.id, "action": "run_userscript", "userscript_id": userscript_id},
+                    )
+                    return {
+                        "ok": True,
+                        "action": "run_userscript",
+                        "profile_id": profile.id,
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "result": result_preview,
+                        "detail": note,
+                    }
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    profile.last_snapshot_svg = render_browser_wall_svg(
+                        profile, note=f"Playwright userscript error: {type(exc).__name__}"
+                    )
+                    db.add(
+                        AuditLog(
+                            actor=audit_actor,
+                            action="browser.userscript.error",
+                            resource_type="browser_profile",
+                            resource_id=profile.id,
+                            details={
+                                "userscript_id": userscript_id,
+                                "agent_id": agent_id,
+                                "agent_role": agent_role,
+                                "target_url": effective_url,
+                                "engine_mode": "playwright",
+                                "error": err_msg,
+                            },
+                            severity="warning",
+                        )
+                    )
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "action": "run_userscript",
+                        "profile_id": profile.id,
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "engine_mode": "playwright",
+                        "executed_live": True,
+                        "error": err_msg,
+                    }
+
+            caps = detect_playwright_capabilities()
+            fallback_reason = (
+                "Chromium binary not installed on host; authorized userscript verified in headless_fallback mode."
+                if not caps["chromium_installed"]
+                else "No live Playwright context attached to this profile; authorized userscript verified in headless_fallback mode."
+            )
+            profile.last_snapshot_svg = render_browser_wall_svg(
+                profile,
+                note=f"[headless_fallback] Authorized userscript '{userscript_id[:36]}' validated for {agent_id}.",
+            )
+            db.add(
+                AuditLog(
+                    actor=audit_actor,
+                    action="browser.userscript.executed",
+                    resource_type="browser_profile",
+                    resource_id=profile.id,
+                    details={
+                        "userscript_id": userscript_id,
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "target_url": effective_url,
+                        "engine_mode": "headless_fallback",
+                        "executed_live": False,
+                    },
+                )
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await event_bus.emit(
+                "browser.snapshot",
+                {"profile_id": profile.id, "action": "run_userscript", "userscript_id": userscript_id},
+            )
+            return {
+                "ok": True,
+                "action": "run_userscript",
+                "profile_id": profile.id,
+                "userscript_id": userscript_id,
+                "agent_id": agent_id,
+                "agent_role": agent_role,
+                "target_url": effective_url,
+                "engine_mode": "headless_fallback",
+                "executed_live": False,
+                "fallback_reason": fallback_reason,
+                "capabilities": caps,
+            }
+
     async def stop_profile(self, db: AsyncSession, profile: BrowserProfile, actor: str = "system") -> BrowserProfile:
         async with self._get_profile_lock(profile.id):
             await self._close_active_context(profile.id)
