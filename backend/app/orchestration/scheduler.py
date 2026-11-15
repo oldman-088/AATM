@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -9,8 +10,84 @@ from app.core.events import event_bus
 from app.db.base import utcnow
 from app.employees.catalog import ensure_employee_workspace
 from app.models import Agent, AgentMessage, ApprovalRequest, AuditLog, ChatMessage, Notification, Task
+from app.runtime.temporal import to_naive_utc
 
 PRIORITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+# Identifier of the co-located execution node. Tasks pinned to any other device are
+# executed by that device's remote worker daemon, never by the local scheduler.
+LOCAL_DEVICE_ID = "device-local"
+
+# Branches that must never be merged into without an explicit Approval Center decision.
+PROTECTED_BRANCH_NAMES = ("main", "master", "production", "prod", "release")
+
+# High-risk Manager Chat directives must be routed to the Approval Center instead of
+# being executed silently. The patterns are deliberately tolerant of phrasing so that
+# variants ("merge master into main", "push to production", "rm -rf the database")
+# cannot slip past the governance gate.
+HIGH_RISK_DIRECTIVE_RULES: list[tuple[re.Pattern[str], str, str]] = [
+    (
+        re.compile(
+            r"\b(merge|push|rebase|cherry[\s\-]?pick|fast[\s\-]?forward)\b[^.]{0,60}\b"
+            r"(main|master|production|prod|release)\b",
+            re.IGNORECASE,
+        ),
+        "merge",
+        "Merge or push into a protected branch",
+    ),
+    (
+        re.compile(
+            r"\b(main|master|production|prod|release)\b[^.]{0,60}\b"
+            r"(merge|push|rebase|cherry[\s\-]?pick)\b",
+            re.IGNORECASE,
+        ),
+        "merge",
+        "Merge or push into a protected branch",
+    ),
+    (
+        re.compile(
+            r"\b(deploy|roll\s?out|ship|publish|promote)\b[^.]{0,40}\b(prod|production|live|release)\b",
+            re.IGNORECASE,
+        ),
+        "deploy",
+        "Execute production deployment",
+    ),
+    (
+        re.compile(
+            r"\b(increase|raise|extend|expand|double)\b[^.]{0,30}\b(budget|spend|quota|limit)\b",
+            re.IGNORECASE,
+        ),
+        "spend",
+        "Increase AI provider spend limit",
+    ),
+    (
+        re.compile(
+            r"\b(budget|spend)\b[^.]{0,30}\b(increase|raise|extend|expand)\b",
+            re.IGNORECASE,
+        ),
+        "spend",
+        "Increase AI provider spend limit",
+    ),
+    (
+        re.compile(
+            r"\b(delete|drop|purge|wipe|destroy|truncate|rm\s+-rf)\b[^.]{0,40}\b"
+            r"(data|database|db|tables?|records?|users?|all|production|prod|backups?|"
+            r"workspaces?|repositor(y|ies))\b",
+            re.IGNORECASE,
+        ),
+        "delete",
+        "Delete or destroy critical data",
+    ),
+    (
+        re.compile(
+            r"\b(rotate|regenerate|reveal|show|print|exfiltrate|leak|change|update|reset)\b[^.]{0,40}\b"
+            r"(credentials?|api[\s_\-]?keys?|secrets?|tokens?|passwords?|passphrases?|private[\s\-]key)\b",
+            re.IGNORECASE,
+        ),
+        "credential",
+        "Change or expose sensitive credentials",
+    ),
+]
 
 
 class TaskScheduler:
@@ -90,6 +167,10 @@ class TaskScheduler:
         for task in queued:
             if available_slots <= 0 or not idle_workers:
                 break
+            # Tasks pinned to a remote execution device are claimed by that device's
+            # worker daemon; the local scheduler must never steal them.
+            if task.device_id and task.device_id != LOCAL_DEVICE_ID:
+                continue
             if not await self.dependencies_satisfied(db, task):
                 continue
 
@@ -230,12 +311,15 @@ class TaskScheduler:
 
     async def detect_and_recover_stalled_tasks(self, db: AsyncSession) -> list[str]:
         settings = get_settings()
-        cutoff = utcnow() - timedelta(minutes=settings.STALLED_TASK_MINUTES)
-        res = await db.execute(
-            select(Task).where(Task.status == "in_progress", Task.updated_at < cutoff)
-        )
+        cutoff = to_naive_utc(utcnow() - timedelta(minutes=settings.STALLED_TASK_MINUTES))
+        res = await db.execute(select(Task).where(Task.status == "in_progress"))
         recovered: list[str] = []
         for task in res.scalars().all():
+            # Compare in Python: SQLite stores naive UTC strings, so a SQL-side comparison
+            # against an aware cutoff is not reliable across backends.
+            updated = to_naive_utc(task.updated_at)
+            if updated is None or updated >= cutoff:
+                continue
             await self.fail_and_retry_or_escalate(db, task, "Stalled task timeout detected; auto-requeued by self-healing engine.")
             recovered.append(task.id)
         return recovered
@@ -245,24 +329,24 @@ class TaskScheduler:
         lower = content.lower()
         actions_taken: list[str] = []
 
-        # High-risk keywords trigger Approval Center rather than silent execution
-        risky_map = [
-            ("merge main", "merge", "Merge changes into protected branch `main`"),
-            ("deploy prod", "deploy", "Execute production deployment"),
-            ("increase budget", "spend", "Increase AI provider spend limit"),
-        ]
-        for trigger, action_type, title in risky_map:
-            if trigger in lower:
-                app = ApprovalRequest(
-                    project_id=project_id,
-                    action_type=action_type,
-                    title=title,
-                    description=f"Requested via Manager Chat directive: {content}",
-                    requested_by="manager-0",
-                    status="pending",
-                )
-                db.add(app)
-                actions_taken.append(f"Created Approval Request ({action_type}) awaiting user authorization.")
+        # High-risk directives are routed to the Approval Center rather than executed
+        # silently. One request is created per distinct risk category.
+        gated_categories: set[str] = set()
+        for pattern, action_type, title in HIGH_RISK_DIRECTIVE_RULES:
+            if action_type in gated_categories or not pattern.search(content):
+                continue
+            gated_categories.add(action_type)
+            app = ApprovalRequest(
+                project_id=project_id,
+                action_type=action_type,
+                title=title,
+                description=f"Requested via Manager Chat directive: {content}",
+                requested_by="manager-0",
+                payload={"directive": content[:500], "action_type": action_type},
+                status="pending",
+            )
+            db.add(app)
+            actions_taken.append(f"Created Approval Request ({action_type}) awaiting user authorization.")
 
         if any(k in lower for k in ("create task", "assign", "build", "implement", "fix")) and project_id:
             div = "D02" if "api" in lower or "backend" in lower else "D03" if "ui" in lower or "frontend" in lower else "D05" if "provider" in lower or "browser" in lower else "D11"

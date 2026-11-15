@@ -1,7 +1,7 @@
 ========================================================================
 AATM — REAL BLOCKERS & ENVIRONMENT CONSTRAINTS
 ========================================================================
-Updated (UTC): 2026-11-15T06:27:00Z
+Updated (UTC): 2026-11-15T07:35:00Z
 
 ACTIVE BLOCKERS:
 - None blocking the running platform.
@@ -12,4 +12,23 @@ ENVIRONMENT CONSTRAINTS (DOCUMENTED):
 2. Live Anthropic Claude API / Arena Local Bridge calls require `ANTHROPIC_API_KEY` or a running Arena Local Bridge daemon on port 4100.
    -> Handled: Safe zero-spend dry-run mode and health diagnostics operate cleanly without credentials.
 3. Windows 11 `.ps1` scripts cannot be natively executed inside this Linux sandbox; verified by inspection and matched against Ubuntu `.sh` scripts.
-========================================================================
+4. Device-scoped tokens are derived from `SECRET_KEY` and cannot be revoked individually.
+   -> Documented in docs/SECURITY_ASSESSMENT.md and docs/VERIFICATION_REPORT.md; rotating
+      SECRET_KEY revokes every device token. A per-device revocation list is a
+      recommended next step.
+5. Workspace tool execution is contained by allowlist + working directory, not by an
+   OS-level jail.
+   -> Documented in docs/SECURITY_ASSESSMENT.md; production deployments should run
+      workers under a restricted user or container.
+
+RESOLVED THIS PHASE:
+- Emergency Stop orphaned in-flight tasks (D1) — tasks are now requeued on clear and
+  by the self-healing sweep.
+- Secret scanner could not see .env/.sh/.ps1/.yaml or generic secrets (D2) — fixed and
+  covered by regression tests.
+- Approval Center gate bypassable by directive phrasing (D3) — fixed with tolerant
+  regex rules.
+- STATUS.txt claimed "ruff: 0 errors" while 4 lint errors existed (D4) — fixed, and the
+  status files are now regenerated from verified command output.
+- Naive/aware datetime comparison crash in the recovery paths (D5) — fixed with a shared
+  timezone normalisation helper.

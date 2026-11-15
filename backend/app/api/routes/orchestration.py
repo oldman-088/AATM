@@ -57,6 +57,7 @@ def _serialize_task(t: Task) -> dict:
         "status": t.status,
         "assigned_agent_id": t.assigned_agent_id,
         "collaborator_ids": t.collaborator_ids,
+        "device_id": t.device_id,
         "dependencies": t.dependencies,
         "expected_deliverables": t.expected_deliverables,
         "actual_deliverables": t.actual_deliverables,

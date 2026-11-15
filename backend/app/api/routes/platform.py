@@ -21,6 +21,7 @@ from app.models import (
     WorkspaceArtifact,
 )
 from app.orchestration.replacement import replacement_service
+from app.runtime.device_auth import issue_device_token
 from app.runtime.executor import WorkspaceSandboxError, agent_runtime
 from app.schemas.common import (
     AgentMessageSend,
@@ -304,13 +305,32 @@ async def register_device(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Register an execution device (operator action) and mint its device token.
+
+    The returned `device_token` is the credential the remote worker daemon uses for
+    heartbeat / claim / report calls. It is shown once, here.
+    """
     existing = await db.get(ExecutionDevice, body.id)
     if existing:
         existing.status = "online"
         existing.last_heartbeat = utcnow()
         await db.commit()
         await db.refresh(existing)
-        return existing
+        return {
+            "id": existing.id,
+            "name": existing.name,
+            "device_type": existing.device_type,
+            "host_address": existing.host_address,
+            "os_name": existing.os_name,
+            "cpu_cores": existing.cpu_cores,
+            "ram_gb": existing.ram_gb,
+            "capabilities": existing.capabilities,
+            "status": existing.status,
+            "max_concurrent_tasks": existing.max_concurrent_tasks,
+            "last_heartbeat": existing.last_heartbeat,
+            "registered_at": existing.registered_at,
+            "device_token": issue_device_token(existing.id),
+        }
 
     dev = ExecutionDevice(
         id=body.id,
@@ -327,18 +347,21 @@ async def register_device(
     db.add(dev)
     await db.commit()
     await db.refresh(dev)
-    return dev
-
-
-@router.post("/devices/{device_id}/heartbeat")
-async def heartbeat_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    dev = await db.get(ExecutionDevice, device_id)
-    if not dev:
-        raise HTTPException(status_code=404, detail="Device not found")
-    dev.status = "online"
-    dev.last_heartbeat = utcnow()
-    await db.commit()
-    return {"id": dev.id, "status": dev.status, "last_heartbeat": dev.last_heartbeat}
+    return {
+        "id": dev.id,
+        "name": dev.name,
+        "device_type": dev.device_type,
+        "host_address": dev.host_address,
+        "os_name": dev.os_name,
+        "cpu_cores": dev.cpu_cores,
+        "ram_gb": dev.ram_gb,
+        "capabilities": dev.capabilities,
+        "status": dev.status,
+        "max_concurrent_tasks": dev.max_concurrent_tasks,
+        "last_heartbeat": dev.last_heartbeat,
+        "registered_at": dev.registered_at,
+        "device_token": issue_device_token(dev.id),
+    }
 
 
 @router.post("/emergency-stop")
