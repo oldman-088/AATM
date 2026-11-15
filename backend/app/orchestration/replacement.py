@@ -9,6 +9,12 @@ from app.db.base import utcnow
 from app.employees.catalog import ensure_employee_workspace
 from app.models import Agent, AgentMessage, AuditLog, BrowserProfile, Notification, Task
 
+# Marker written into `Task.error_message` so tasks halted by an Emergency Stop can be
+# identified later and resumed. Without it a globally stopped task stays "blocked"
+# forever: the scheduler only dispatches "queued" tasks and the stalled-task sweep only
+# inspects "in_progress" tasks.
+EMERGENCY_STOP_MARKER = "Emergency stop"
+
 
 class ReplacementAndEmergencyService:
     """Smart Employee Replacement & Scoped/Global Emergency Stop."""
@@ -153,21 +159,35 @@ class ReplacementAndEmergencyService:
                 ag.current_task_id = None
                 stopped["agents"] += 1
 
-        if scope in ("global", "task"):
-            stmt = select(Task).where(Task.status.in_(["in_progress", "assigned"]))
+        # A halted employee must not leave its in-flight task running: the task would stay
+        # "in_progress" with a lock owned by a stopped agent and could never be re-dispatched.
+        if scope == "employee" and target_id:
+            task_stmt = select(Task).where(
+                Task.assigned_agent_id == target_id,
+                Task.status.in_(["in_progress", "assigned"]),
+            )
+            for t in (await db.execute(task_stmt)).scalars().all():
+                self._halt_task(t, scope, reason)
+                stopped["tasks"] += 1
+        elif scope in ("global", "task"):
+            task_stmt = select(Task).where(Task.status.in_(["in_progress", "assigned"]))
             if scope == "task":
-                stmt = select(Task).where(Task.id == target_id)
-            for t in (await db.execute(stmt)).scalars().all():
-                t.status = "cancelled" if scope == "task" else "blocked"
-                t.lock_owner = None
-                t.error_message = f"Emergency stop ({scope}): {reason}"
+                task_stmt = select(Task).where(Task.id == target_id)
+            for t in (await db.execute(task_stmt)).scalars().all():
+                if scope == "task":
+                    t.status = "cancelled"
+                    t.lock_owner = None
+                    t.locked_at = None
+                    t.error_message = f"{EMERGENCY_STOP_MARKER} ({scope}): {reason}"
+                else:
+                    self._halt_task(t, scope, reason)
                 stopped["tasks"] += 1
 
         if scope in ("global", "browser"):
-            stmt = select(BrowserProfile).where(BrowserProfile.status == "running")
+            bp_stmt = select(BrowserProfile).where(BrowserProfile.status == "running")
             if scope == "browser":
-                stmt = select(BrowserProfile).where(BrowserProfile.id == target_id)
-            for bp in (await db.execute(stmt)).scalars().all():
+                bp_stmt = select(BrowserProfile).where(BrowserProfile.id == target_id)
+            for bp in (await db.execute(bp_stmt)).scalars().all():
                 bp.status = "stopped"
                 bp.lock_owner = None
                 stopped["browsers"] += 1
@@ -195,15 +215,72 @@ class ReplacementAndEmergencyService:
         await event_bus.emit("security.emergency_stop", stopped)
         return stopped
 
+    @staticmethod
+    def _halt_task(task: Task, scope: str, reason: str) -> None:
+        """Block a task and release its lock, marking it as resumable after the stop."""
+        task.status = "blocked"
+        task.lock_owner = None
+        task.locked_at = None
+        task.error_message = f"{EMERGENCY_STOP_MARKER} ({scope}): {reason}"
+        task.checkpoints = list(task.checkpoints or []) + [
+            {
+                "ts": utcnow().isoformat(),
+                "event": "emergency_stop",
+                "scope": scope,
+                "reason": reason,
+            }
+        ]
+
+    async def resume_emergency_stopped_tasks(
+        self,
+        db: AsyncSession,
+        actor: str = "admin@aatm.local",
+    ) -> list[str]:
+        """Requeue every task that was blocked by an Emergency Stop so work can resume."""
+        res = await db.execute(select(Task).where(Task.status == "blocked"))
+        resumed: list[str] = []
+        for task in res.scalars().all():
+            if not (task.error_message or "").startswith(EMERGENCY_STOP_MARKER):
+                continue
+            task.status = "queued"
+            task.lock_owner = None
+            task.locked_at = None
+            task.error_message = None
+            task.checkpoints = list(task.checkpoints or []) + [
+                {"ts": utcnow().isoformat(), "event": "emergency_stop_cleared", "actor": actor}
+            ]
+            resumed.append(task.id)
+        if resumed:
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="security.emergency_resume",
+                    resource_type="task",
+                    details={"requeued_tasks": resumed},
+                    severity="warning",
+                )
+            )
+            await db.commit()
+        return resumed
+
     async def clear_emergency_stop(self, db: AsyncSession, actor: str = "admin@aatm.local") -> dict[str, int]:
         count = 0
         for ag in (await db.execute(select(Agent).where(Agent.is_emergency_stopped.is_(True)))).scalars().all():
             ag.is_emergency_stopped = False
             ag.status = "idle"
+            ag.current_task_id = None
             count += 1
-        db.add(AuditLog(actor=actor, action="security.emergency_clear", resource_type="global", details={"resumed": count}))
+        resumed_tasks = await self.resume_emergency_stopped_tasks(db, actor=actor)
+        db.add(
+            AuditLog(
+                actor=actor,
+                action="security.emergency_clear",
+                resource_type="global",
+                details={"resumed": count, "requeued_tasks": resumed_tasks},
+            )
+        )
         await db.commit()
-        return {"resumed_agents": count}
+        return {"resumed_agents": count, "resumed_tasks": len(resumed_tasks)}
 
 
 replacement_service = ReplacementAndEmergencyService()

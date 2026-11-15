@@ -9,6 +9,10 @@
 4. **Windows 11 PowerShell Verification**:
    - `scripts/windows/*.ps1` were authored for Windows 11 PowerShell and inspected for correctness, but could not be executed natively inside this Linux sandbox container.
 5. **Multi-Device Remote Worker Execution**:
-   - `ExecutionDevice` registration, heartbeats, and node capability tracking are implemented on the central server; running remote worker daemons on separate physical hosts requires deploying the backend/worker agent to those hosts and pointing them to the central server URL.
+   - The central server keeps the authoritative `ExecutionDevice` registry, and a working remote worker daemon (`backend/app/runtime/worker_daemon.py`) is implemented and verified end to end: it registers, heartbeats, claims tasks, executes them in an isolated local workspace and reports results. Launchers exist for Ubuntu (`scripts/ubuntu/start-worker.sh`) and Windows 11 (`scripts/windows/start-worker.ps1`). Remaining caveat: device tokens are derived from `SECRET_KEY` and therefore cannot be revoked individually, and the workspace sandbox restricts paths and tools but is not an OS-level jail — production nodes should run under a restricted user or container.
 6. **Live External Anthropic Spend**:
    - Live Anthropic Claude completions require `ANTHROPIC_API_KEY` set in the host environment; without it, `AnthropicClaudeAdapter` safely runs in zero-spend diagnostic/dry-run mode.
+7. **Secret Scanner Rule Coverage**:
+   - `qa_engine.run_security_scan()` evaluates 22 rules across 24 file types and additionally inspects the git index for committed `.env` files, private keys, browser profiles, local databases and credential dumps. It is regex based: an unrecognised credential format, or a secret split across an unusual encoding, will not be detected. Findings record the file, line and rule id only, never the matched value.
+8. **Manager Chat Governance Gate**:
+   - High-risk directives are detected with tolerant regex rules and routed to the Approval Center. The gate is deliberately biased towards gating, but it is pattern based; the structured `ApprovalRequest` API remains the authoritative path for high-risk operations.

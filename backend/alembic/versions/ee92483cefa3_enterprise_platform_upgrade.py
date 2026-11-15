@@ -5,8 +5,10 @@ Revises: a56f5804a0ab
 Create Date: 2026-11-15 06:31:14.343691
 """
 from typing import Sequence, Union
-from alembic import op
+
 import sqlalchemy as sa
+
+from alembic import op
 
 revision: str = 'ee92483cefa3'
 down_revision: Union[str, None] = 'a56f5804a0ab'
