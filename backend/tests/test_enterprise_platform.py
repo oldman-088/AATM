@@ -178,9 +178,23 @@ async def test_smart_replacement_emergency_stop_devices_security_and_github(clie
         json={"id": "node-win11-01", "name": "Windows 11 Worker Host", "device_type": "remote_server", "host_address": "10.0.0.15", "os_name": "Windows 11"},
     )
     assert dev.status_code == 201
-    hb = await client.post("/api/v1/devices/node-win11-01/heartbeat")
+    device_token = dev.json()["device_token"]
+    assert device_token
+    hb = await client.post(
+        "/api/v1/devices/node-win11-01/heartbeat",
+        headers={"X-AATM-Device-Token": device_token},
+    )
     assert hb.status_code == 200
     assert hb.json()["status"] == "online"
+
+    # The heartbeat endpoint must reject unauthenticated or forged device tokens.
+    hb_anon = await client.post("/api/v1/devices/node-win11-01/heartbeat")
+    assert hb_anon.status_code == 401
+    hb_forged = await client.post(
+        "/api/v1/devices/node-win11-01/heartbeat",
+        headers={"X-AATM-Device-Token": "not-the-right-token"},
+    )
+    assert hb_forged.status_code == 401
 
     # Prompt-injection sanitizer
     inj = await client.post(

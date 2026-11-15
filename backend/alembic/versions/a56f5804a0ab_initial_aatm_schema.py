@@ -1,12 +1,14 @@
 """initial_aatm_schema
 
 Revision ID: a56f5804a0ab
-Revises: 
+Revises:
 Create Date: 2026-11-15 06:19:01.391829
 """
 from typing import Sequence, Union
-from alembic import op
+
 import sqlalchemy as sa
+
+from alembic import op
 
 revision: str = 'a56f5804a0ab'
 down_revision: Union[str, None] = None

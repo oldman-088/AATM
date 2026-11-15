@@ -20,10 +20,13 @@ from app.models import (
     Task,
     WorkspaceArtifact,
 )
+from app.runtime.sandbox import (
+    WorkspaceSandboxError,
+    assert_allowed_binary,
+    resolve_contained_path,
+)
 
-
-class WorkspaceSandboxError(PermissionError):
-    pass
+__all__ = ["AgentRuntimeExecutor", "WorkspaceSandboxError", "agent_runtime"]
 
 
 class AgentRuntimeExecutor:
@@ -32,12 +35,7 @@ class AgentRuntimeExecutor:
     @staticmethod
     def resolve_safe_path(agent_id: str, relative_path: str) -> Path:
         root = ensure_employee_workspace(agent_id)
-        candidate = (root / relative_path).resolve()
-        if root != candidate and root not in candidate.parents:
-            raise WorkspaceSandboxError(
-                f"Access denied: path '{relative_path}' escapes isolated workspace for '{agent_id}'."
-            )
-        return candidate
+        return resolve_contained_path(root, relative_path)
 
     def list_workspace_files(self, agent_id: str) -> list[dict[str, Any]]:
         root = ensure_employee_workspace(agent_id)
@@ -87,13 +85,10 @@ class AgentRuntimeExecutor:
         task_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute an allowed development tool command strictly inside the employee's isolated workspace."""
-        allowed_bins = {"python3", "python", "pytest", "ruff", "ls", "cat"}
-        if not command or Path(command[0]).name not in allowed_bins:
-            raise WorkspaceSandboxError(f"Command '{command}' not in allowed workspace toolset {sorted(allowed_bins)}.")
+        exe = assert_allowed_binary(command)
 
         ws = ensure_employee_workspace(agent_id)
         settings = get_settings()
-        exe = command[0]
         if exe in ("python", "python3", "pytest", "ruff"):
             venv_bin = settings.REPO_ROOT / ".venv" / "bin" / exe
             if venv_bin.exists():
@@ -102,7 +97,6 @@ class AgentRuntimeExecutor:
         t0 = time.perf_counter()
         proc = subprocess.run(command, cwd=str(ws), capture_output=True, text=True, timeout=20)
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
-
         art = WorkspaceArtifact(
             agent_id=agent_id,
             project_id=project_id,

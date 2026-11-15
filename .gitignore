@@ -12,17 +12,27 @@ __pycache__/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/tsconfig.tsbuildinfo
 coverage/
 
 # Environment & Local Data
 .env
 .env.local
+.env.*
+!.env.example
 data/
+remote_workspaces/
 *.db
 *.sqlite
 *.sqlite3
 logs/
 backups/
+*.pid
+*.pem
+*.key
+*.p12
+*.pfx
+browser_profiles/
 
 # OS / Editor
 .DS_Store

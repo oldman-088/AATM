@@ -10,6 +10,7 @@ from app.core.security import mask_credential_ref, sanitize_untrusted_content
 from app.db.base import utcnow
 from app.db.session import get_db
 from app.employees.catalog import ROLE_TEMPLATES, create_dynamic_employee
+from app.git_workflows.manager import git_workflow_manager
 from app.github_client.client import github_client
 from app.models import (
     AgentMessage,
@@ -21,12 +22,15 @@ from app.models import (
     WorkspaceArtifact,
 )
 from app.orchestration.replacement import replacement_service
+from app.runtime.device_auth import issue_device_token
 from app.runtime.executor import WorkspaceSandboxError, agent_runtime
 from app.schemas.common import (
     AgentMessageSend,
     DeviceRegisterRequest,
     EmergencyStopRequest,
     EmployeeCreate,
+    GitHubIssueCreateRequest,
+    GitHubPRCreateRequest,
     ProviderAccountCreate,
     SanitizeRequest,
     SDLCRequest,
@@ -179,7 +183,12 @@ async def create_userscript(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ok, msg = validate_userscript_policy(body.code, body.match_patterns)
+    ok, msg = validate_userscript_policy(
+        body.code,
+        body.match_patterns,
+        allowed_roles=body.allowed_roles,
+        allowed_agent_ids=body.allowed_agent_ids,
+    )
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     us = Userscript(
@@ -304,13 +313,32 @@ async def register_device(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Register an execution device (operator action) and mint its device token.
+
+    The returned `device_token` is the credential the remote worker daemon uses for
+    heartbeat / claim / report calls. It is shown once, here.
+    """
     existing = await db.get(ExecutionDevice, body.id)
     if existing:
         existing.status = "online"
         existing.last_heartbeat = utcnow()
         await db.commit()
         await db.refresh(existing)
-        return existing
+        return {
+            "id": existing.id,
+            "name": existing.name,
+            "device_type": existing.device_type,
+            "host_address": existing.host_address,
+            "os_name": existing.os_name,
+            "cpu_cores": existing.cpu_cores,
+            "ram_gb": existing.ram_gb,
+            "capabilities": existing.capabilities,
+            "status": existing.status,
+            "max_concurrent_tasks": existing.max_concurrent_tasks,
+            "last_heartbeat": existing.last_heartbeat,
+            "registered_at": existing.registered_at,
+            "device_token": issue_device_token(existing.id),
+        }
 
     dev = ExecutionDevice(
         id=body.id,
@@ -327,18 +355,21 @@ async def register_device(
     db.add(dev)
     await db.commit()
     await db.refresh(dev)
-    return dev
-
-
-@router.post("/devices/{device_id}/heartbeat")
-async def heartbeat_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    dev = await db.get(ExecutionDevice, device_id)
-    if not dev:
-        raise HTTPException(status_code=404, detail="Device not found")
-    dev.status = "online"
-    dev.last_heartbeat = utcnow()
-    await db.commit()
-    return {"id": dev.id, "status": dev.status, "last_heartbeat": dev.last_heartbeat}
+    return {
+        "id": dev.id,
+        "name": dev.name,
+        "device_type": dev.device_type,
+        "host_address": dev.host_address,
+        "os_name": dev.os_name,
+        "cpu_cores": dev.cpu_cores,
+        "ram_gb": dev.ram_gb,
+        "capabilities": dev.capabilities,
+        "status": dev.status,
+        "max_concurrent_tasks": dev.max_concurrent_tasks,
+        "last_heartbeat": dev.last_heartbeat,
+        "registered_at": dev.registered_at,
+        "device_token": issue_device_token(dev.id),
+    }
 
 
 @router.post("/emergency-stop")
@@ -386,3 +417,50 @@ async def github_change_summary():
         "auth": github_client.get_auth_status(),
         "changes": github_client.generate_change_summary(),
     }
+
+
+@router.post("/github/prs", status_code=201)
+async def create_github_pull_request(
+    body: GitHubPRCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await git_workflow_manager.create_pull_request(
+        repo=body.repo,
+        title=body.title,
+        head=body.head,
+        base=body.base,
+        body=body.body,
+        draft=body.draft,
+        db=db,
+        approval_id=body.approval_id,
+        actor=user.email,
+    )
+    if not res.get("allowed"):
+        raise HTTPException(status_code=403, detail=res.get("error") or "GitHub PR blocked by approval/branch policy")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "GitHub PR creation failed")
+    return res
+
+
+@router.post("/github/issues", status_code=201)
+async def create_github_issue(
+    body: GitHubIssueCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await git_workflow_manager.create_issue(
+        repo=body.repo,
+        title=body.title,
+        body=body.body,
+        labels=body.labels,
+        assignees=body.assignees,
+        db=db,
+        approval_id=body.approval_id,
+        actor=user.email,
+    )
+    if not res.get("allowed"):
+        raise HTTPException(status_code=403, detail=res.get("error") or "GitHub issue blocked by approval policy")
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "GitHub issue creation failed")
+    return res
