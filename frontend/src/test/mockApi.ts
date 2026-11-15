@@ -102,8 +102,8 @@ export const fixtures: Record<string, RouteValue> = {
     if ((init.method || 'GET').toUpperCase() === 'POST') {
       const body = JSON.parse(String(init.body || '{}'))
       return {
-        number: 12,
-        html_url: 'https://github.com/oldman-088/AATM/pull/12',
+        pr_number: 12,
+        url: 'https://github.com/oldman-088/AATM/pull/12',
         approval_id: body.approval_id,
         title: body.title,
       }
@@ -114,8 +114,8 @@ export const fixtures: Record<string, RouteValue> = {
     if ((init.method || 'GET').toUpperCase() === 'POST') {
       const body = JSON.parse(String(init.body || '{}'))
       return {
-        number: 34,
-        html_url: 'https://github.com/oldman-088/AATM/issues/34',
+        issue_number: 34,
+        url: 'https://github.com/oldman-088/AATM/issues/34',
         approval_id: body.approval_id,
         title: body.title,
       }
@@ -127,7 +127,11 @@ export const fixtures: Record<string, RouteValue> = {
   '/api/v1/sessions': [],
   '/api/v1/devices': (path: string, init: RequestInit) => {
     if (path.includes('/revoke')) {
-      return { id: path.split('/devices/')[1]?.split('/')[0], status: 'revoked', new_token: 'aatm_dev_rotated_token_9f2c' }
+      return { id: path.split('/devices/')[1]?.split('/')[0], token_version: 1, device_token: 'aatm_dev_rotated_token_9f2c' }
+    }
+    if ((init.method || 'GET').toUpperCase() === 'POST' && path === '/api/v1/devices') {
+      const body = JSON.parse(String(init.body || '{}'))
+      return { device: { id: body.id, name: body.name, status: 'online' }, device_token: 'aatm_dev_bootstrap_token', token_hardened: true, warning: null }
     }
     return []
   },

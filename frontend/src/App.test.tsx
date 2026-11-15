@@ -281,7 +281,11 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
   })
 
   it('requests a pending approval and then opens an approval-gated pull request', async () => {
-    const { calls } = installFetchMock()
+    const { calls } = installFetchMock({
+      '/api/v1/approvals': (_path: string, init: RequestInit) => (init.method || 'GET') === 'POST'
+        ? { id: 'appr-1', status: 'pending' }
+        : [{ id: 'appr-1', status: 'approved' }],
+    })
     render(<App />)
 
     fireEvent.click(navButton('GitHub Integration'))
@@ -296,7 +300,8 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     await waitFor(() => {
       const approval = calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')
       expect(approval).toBeDefined()
-      expect(approval?.body).toMatchObject({ action_type: 'merge' })
+      expect(approval?.body).toMatchObject({ action_type: 'merge', payload: { kind: 'pr', base: 'main', target_branch: 'main' } })
+      expect(approval?.body.payload).not.toHaveProperty('target')
       expect(approval?.authorization).toBe('Bearer test-jwt')
     })
 
@@ -306,7 +311,8 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     )
     expect(await screen.findByText(/Approval requested: appr-1/)).toBeInTheDocument()
 
-    // 2) submit the write, referencing the approval
+    // 2) submit after the approvals list reports the approved status
+    await waitFor(() => expect(screen.getByText('Approval status: Approved')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /Create Pull Request/ }))
 
     await waitFor(() => {
@@ -322,12 +328,16 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       expect(pr?.authorization).toBe('Bearer test-jwt')
     })
 
-    expect(await screen.findByText(/pull\/12/)).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /pull\/12/ })).toHaveAttribute('href', 'https://github.com/oldman-088/AATM/pull/12')
     await settle()
   })
 
   it('creates an approval-gated GitHub issue with merge-class approval', async () => {
-    const { calls } = installFetchMock()
+    const { calls } = installFetchMock({
+      '/api/v1/approvals': (_path: string, init: RequestInit) => (init.method || 'GET') === 'POST'
+        ? { id: 'appr-1', status: 'pending' }
+        : [{ id: 'appr-1', status: 'approved' }],
+    })
     render(<App />)
 
     fireEvent.click(navButton('GitHub Integration'))
@@ -339,10 +349,12 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
     await waitFor(() => {
       const approval = calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')
-      expect(approval?.body).toMatchObject({ action_type: 'merge' })
+      expect(approval?.body).toMatchObject({ action_type: 'merge', payload: { kind: 'issue' } })
+      expect(approval?.body.payload).not.toHaveProperty('target_branch')
     })
 
     await waitFor(() => expect(screen.getByPlaceholderText('Approval UUID')).toHaveValue('appr-1'))
+    await waitFor(() => expect(screen.getByText('Approval status: Approved')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /Create Issue/ }))
 
     await waitFor(() => {
@@ -357,8 +369,18 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       expect(issue?.body).not.toHaveProperty('base')
     })
 
-    expect(await screen.findByText(/issues\/34/)).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: /issues\/34/ })).toHaveAttribute('href', 'https://github.com/oldman-088/AATM/issues/34')
     await settle()
+  })
+
+  it('shows pending and blocks submission until approval', async () => {
+    installFetchMock()
+    render(<App />)
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.change(await screen.findByPlaceholderText('Pull request title'), { target: { value: 'Pending PR' } })
+    fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
+    expect(await screen.findByText('Approval status: Pending')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Create Pull Request/ })).toBeDisabled()
   })
 
   it('blocks GitHub writes until an approval id is present', async () => {
@@ -441,6 +463,32 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     expect(screen.getByText('$42.00')).toBeInTheDocument()
     expect(screen.getByText('$75.00 / $500.00')).toBeInTheDocument()
     expect(screen.getByText('$425.00')).toBeInTheDocument()
+  })
+
+  it('renders zero budget limits and returned zero headroom', async () => {
+    installFetchMock({ '/api/v1/providers/usage': {
+      summary: { total_input_tokens: 0, total_output_tokens: 0, total_estimated_cost_usd: 0 }, logs: [],
+      budget_summary: { daily_limit_usd: 0, monthly_limit_usd: 0, global_daily_spend_usd: 0, global_monthly_spend_usd: 0, daily_remaining_usd: 0, monthly_remaining_usd: 0 },
+    } })
+    render(<App />)
+    fireEvent.click(navButton('Arena & AI Providers'))
+    expect(await screen.findAllByText('$0.00 / $0.00')).toHaveLength(2)
+    expect(screen.getAllByText('$0.00').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('passes selected agent and session to provider dry run', async () => {
+    const { calls } = installFetchMock({
+      '/api/v1/providers': [{ id: 'p1', name: 'P1', provider_type: 'arena', default_model: 'model', credential_status: 'set', health_status: 'healthy', daily_limit_usd: 10 }],
+      '/api/v1/sessions': [{ id: 'session-1' }],
+      '/api/v1/providers/p1/test': { provider_id: 'p1', model: 'model', content: 'ok' },
+    })
+    render(<App />)
+    fireEvent.click(navButton('Arena & AI Providers'))
+    await screen.findByRole('option', { name: 'session-1' })
+    fireEvent.change(screen.getByLabelText('Optional agent'), { target: { value: 'worker-1' } })
+    fireEvent.change(screen.getByLabelText('Optional session'), { target: { value: 'session-1' } })
+    fireEvent.click(screen.getByRole('button', { name: /Safe Dry-Run Test/i }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/providers/p1/test')?.body).toMatchObject({ agent_id: 'worker-1', session_id: 'session-1', dry_run: true }))
   })
 
   it('falls back to provider caps when the budgets setting is unavailable', async () => {

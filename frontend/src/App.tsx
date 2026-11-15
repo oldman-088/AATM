@@ -371,7 +371,7 @@ function AATMWorkspace() {
           {tab === 'providers' && (
             <div className="space-y-6">
               <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
-              <ProvidersView providers={providers} usage={providerUsage} onReload={() => loadAll()} />
+              <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'projects' && (
@@ -386,7 +386,7 @@ function AATMWorkspace() {
               />
             </div>
           )}
-          {tab === 'git' && <GitWorkflowsView gitData={gitData} onReload={() => loadAll()} />}
+          {tab === 'git' && <GitWorkflowsView gitData={gitData} approvals={approvals} onReload={() => loadAll()} />}
           {tab === 'qa' && (
             <div className="space-y-6">
               <QAView qaData={qaData} onReload={() => loadAll()} />
