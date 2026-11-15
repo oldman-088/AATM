@@ -39,6 +39,7 @@ from app.schemas.common import (
     GitHubBranchCreateRequest,
     GitHubIssueCreateRequest,
     GitHubPRCreateRequest,
+    GitWorktreeCreateRequest,
     ProviderTestRequest,
     ProviderUsageResponse,
     validate_credential_ref,
@@ -73,8 +74,8 @@ async def auth_headers(client: AsyncClient):
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-async def _headers_for_role(role: str) -> dict[str, str]:
-    email = f"round2-{role}-device-revoke@example.test"
+async def _headers_for_role(role: str, scope: str = "device-revoke") -> dict[str, str]:
+    email = f"round2-{role}-{scope}@example.test"
     async with AsyncSessionLocal() as db:
         db.add(
             User(
@@ -97,7 +98,7 @@ def _pattern_values(openapi: dict, component: str, field: str) -> set[str]:
 
 async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient):
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-    assert contract["version"] == "2.1.0"
+    assert contract["version"] == "2.2.0"
     assert contract["api_prefix"] == "/api/v1"
 
     response = await client.get("/openapi.json")
@@ -120,6 +121,10 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
         "/api/v1/traces",
         "/api/v1/providers/usage",
         "/api/v1/providers/{provider_id}/test",
+        "/api/v1/agents/{agent_id}",
+        "/api/v1/employees",
+        "/api/v1/git/worktrees",
+        "/api/v1/git/worktrees/{agent_id}",
     }.issubset(paths)
     assert all(methods for methods in paths.values())
 
@@ -183,6 +188,25 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     assert set(trace_operation["query"]) == {"agent_id", "project_id", "limit"}
     trace_sources = trace_operation["response"]["properties"]["traces"]["items"]["properties"]["source"]["enum"]
     assert set(trace_sources) == {"audit_log", "provider_usage_log", "workspace_artifact", "agent_message"}
+    assert {"agent_id", "project_id"}.issubset(trace_operation["query"])
+
+    reports_to_schema = contract["entities"]["agent"]["properties"]["reports_to"]
+    assert reports_to_schema == {"type": ["string", "null"], "maxLength": 64}
+    assert contract["entities"]["agent"]["non_manager_default_reports_to"] == "manager-0"
+    assert "reports_to" in operations["employee_create"]["request"]["properties"]
+    assert "reports_to" in operations["agent_update"]["request"]["properties"]
+
+    create_worktree = operations["git_worktree_create"]
+    assert create_worktree["path"] == "/api/v1/git/worktrees"
+    assert create_worktree["operator_roles"] == ["admin", "operator"]
+    assert create_worktree["request"]["required"] == ["agent_id", "branch_name"]
+    assert create_worktree["request"]["properties"]["base_ref"]["default"] == "HEAD"
+    assert create_worktree["request"]["properties"]["approval_id"]["default"] is None
+    assert set(create_worktree["error_responses"]) == {"400", "403"}
+    remove_worktree = operations["git_worktree_remove"]
+    assert remove_worktree["path"] == "/api/v1/git/worktrees/{agent_id}"
+    assert remove_worktree["operator_roles"] == ["admin", "operator"]
+    assert set(remove_worktree["error_responses"]) == {"400", "403"}
 
     expected_github_requests = {
         "github_branch_create": {"approval_id", "repo", "branch_name", "from_branch"},
@@ -203,6 +227,12 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     assert provider_test_schema["agent_id"].get("anyOf") or provider_test_schema["agent_id"].get("type") == "string"
     assert provider_test_schema["session_id"].get("anyOf") or provider_test_schema["session_id"].get("type") == "string"
     assert "branch" in _pattern_values(openapi, "ApprovalCreate", "action_type")
+    assert "reports_to" in openapi["components"]["schemas"]["AgentUpdate"]["properties"]
+    assert "reports_to" in openapi["components"]["schemas"]["EmployeeCreate"]["properties"]
+    worktree_schema = openapi["components"]["schemas"]["GitWorktreeCreateRequest"]["properties"]
+    assert worktree_schema["base_ref"]["default"] == "HEAD"
+    assert set(paths["/api/v1/git/worktrees"]) == {"post"}
+    assert set(paths["/api/v1/git/worktrees/{agent_id}"]) == {"delete"}
 
     browser_engines = await client.get("/api/v1/browsers/engines")
     assert browser_engines.status_code == 200
@@ -331,6 +361,194 @@ def test_github_write_schemas_require_approval_and_validate_payloads():
             repo="project-without-owner",
             title="Invalid repository",
         )
+
+    worktree = GitWorktreeCreateRequest(agent_id="worker-1", branch_name="feature/worktree")
+    assert worktree.base_ref == "HEAD"
+    assert worktree.approval_id is None
+    assert set(GitWorktreeCreateRequest.model_fields) == {
+        "agent_id",
+        "branch_name",
+        "base_ref",
+        "approval_id",
+    }
+    with pytest.raises(ValidationError):
+        GitWorktreeCreateRequest(agent_id="", branch_name="feature/worktree")
+
+
+async def test_reports_to_update_serialization_and_employee_default(client: AsyncClient, auth_headers, monkeypatch):
+    from app.api.routes import platform as platform_routes
+
+    agent_id = "round3-reports-to-patch-agent"
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Agent(
+                id=agent_id,
+                name="Reports To Patch Agent",
+                role="worker",
+                specialty="contract test",
+            )
+        )
+        await db.commit()
+
+    updated = await client.patch(
+        f"/api/v1/agents/{agent_id}",
+        headers=auth_headers,
+        json={"reports_to": "manager-7"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["reports_to"] == "manager-7"
+
+    cleared = await client.patch(
+        f"/api/v1/agents/{agent_id}",
+        headers=auth_headers,
+        json={"reports_to": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["reports_to"] is None
+
+    created_ids = iter(("round3-employee-default", "round3-employee-explicit"))
+
+    async def fake_create_dynamic_employee(*, db, name, **kwargs):
+        employee = Agent(
+            id=next(created_ids),
+            name=name,
+            role="worker",
+            specialty="contract test",
+        )
+        db.add(employee)
+        await db.flush()
+        return employee
+
+    monkeypatch.setattr(platform_routes, "create_dynamic_employee", fake_create_dynamic_employee)
+    defaulted = await client.post(
+        "/api/v1/employees",
+        headers=auth_headers,
+        json={"name": "Round Three Default Reports"},
+    )
+    assert defaulted.status_code == 201
+    assert defaulted.json()["reports_to"] == "manager-0"
+
+    explicit = await client.post(
+        "/api/v1/employees",
+        headers=auth_headers,
+        json={"name": "Round Three Explicit Reports", "reports_to": "manager-7"},
+    )
+    assert explicit.status_code == 201
+    assert explicit.json()["reports_to"] == "manager-7"
+
+
+async def test_git_worktree_endpoints_require_operator_and_map_errors(
+    client: AsyncClient, auth_headers, monkeypatch
+):
+    from app.git_workflows.manager import git_workflow_manager
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_create_agent_worktree(**kwargs):
+        calls.append(("create", kwargs))
+        branch_name = kwargs["branch_name"]
+        if branch_name == "bad-branch":
+            return {"ok": False, "allowed": False, "error": "Invalid branch name."}
+        if branch_name == "protected-branch":
+            return {
+                "ok": False,
+                "allowed": False,
+                "is_protected_target": True,
+                "error": "Target branch is protected; approval is required.",
+            }
+        if kwargs["agent_id"] == "../outside":
+            return {"ok": False, "allowed": False, "error": "Invalid agent ID for worktree containment."}
+        return {
+            "ok": True,
+            "allowed": True,
+            "agent_id": kwargs["agent_id"],
+            "branch_name": branch_name,
+            "base_ref": kwargs["base_ref"],
+            "worktree_path": "/tmp/worktrees/worker-4",
+        }
+
+    async def fake_remove_agent_worktree(**kwargs):
+        calls.append(("remove", kwargs))
+        if kwargs["agent_id"] == "bad_agent!":
+            return {"ok": False, "allowed": False, "error": "Invalid agent ID for worktree containment."}
+        return {"ok": True, "allowed": True, "agent_id": kwargs["agent_id"], "removed": True}
+
+    monkeypatch.setattr(git_workflow_manager, "create_agent_worktree", fake_create_agent_worktree)
+    monkeypatch.setattr(git_workflow_manager, "remove_agent_worktree", fake_remove_agent_worktree)
+    operator_headers = await _headers_for_role("operator", "worktree-operator")
+    worker_headers = await _headers_for_role("worker", "worktree-operator")
+
+    denied_create = await client.post(
+        "/api/v1/git/worktrees",
+        headers=worker_headers,
+        json={"agent_id": "worker-4", "branch_name": "feature/worker-denied"},
+    )
+    denied_remove = await client.delete("/api/v1/git/worktrees/worker-4", headers=worker_headers)
+    assert denied_create.status_code == 403
+    assert denied_remove.status_code == 403
+    assert calls == []
+
+    created = await client.post(
+        "/api/v1/git/worktrees",
+        headers=operator_headers,
+        json={"agent_id": "worker-4", "branch_name": "feature/worktree", "base_ref": "main"},
+    )
+    assert created.status_code == 201
+    assert created.json()["ok"] is True
+    assert calls[-1][0] == "create"
+    assert calls[-1][1]["agent_id"] == "worker-4"
+    assert calls[-1][1]["branch_name"] == "feature/worktree"
+    assert calls[-1][1]["base_ref"] == "main"
+    assert calls[-1][1]["approval"] is None
+    assert calls[-1][1]["actor"] == "round2-operator-worktree-operator@example.test"
+
+    removed = await client.delete("/api/v1/git/worktrees/worker-4", headers=operator_headers)
+    assert removed.status_code == 200
+    assert removed.json()["removed"] is True
+    assert calls[-1][0] == "remove"
+    assert calls[-1][1]["agent_id"] == "worker-4"
+
+    bad_branch = await client.post(
+        "/api/v1/git/worktrees",
+        headers=auth_headers,
+        json={"agent_id": "worker-4", "branch_name": "bad-branch"},
+    )
+    assert bad_branch.status_code == 400
+    assert bad_branch.json()["detail"] == "Invalid branch name."
+
+    bad_path = await client.post(
+        "/api/v1/git/worktrees",
+        headers=auth_headers,
+        json={"agent_id": "../outside", "branch_name": "feature/path-error"},
+    )
+    assert bad_path.status_code == 400
+    assert "worktree containment" in bad_path.json()["detail"]
+
+    protected = await client.post(
+        "/api/v1/git/worktrees",
+        headers=auth_headers,
+        json={"agent_id": "worker-4", "branch_name": "protected-branch"},
+    )
+    assert protected.status_code == 403
+    assert "approval is required" in protected.json()["detail"]
+
+    invalid_approval = await client.post(
+        "/api/v1/git/worktrees",
+        headers=auth_headers,
+        json={
+            "agent_id": "worker-4",
+            "branch_name": "feature/invalid-approval",
+            "approval_id": "missing-worktree-approval",
+        },
+    )
+    assert invalid_approval.status_code == 403
+
+    bad_remove_path = await client.delete(
+        "/api/v1/git/worktrees/bad_agent!",
+        headers=auth_headers,
+    )
+    assert bad_remove_path.status_code == 400
+    assert "worktree containment" in bad_remove_path.json()["detail"]
 
 
 async def test_operator_jwt_device_heartbeat_and_userscript_role_scoping(client: AsyncClient, auth_headers):

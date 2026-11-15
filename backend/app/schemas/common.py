@@ -44,6 +44,7 @@ class ProjectCreate(BaseModel):
 class EmployeeCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     role_template_id: str | None = None
+    reports_to: str | None = Field(default=None, max_length=64)
     specialty: str | None = None
     skills: list[str] | None = None
     divisions: list[str] | None = None
@@ -60,6 +61,7 @@ class AgentUpdate(BaseModel):
     status: str | None = None
     provider_id: str | None = None
     model_name: str | None = None
+    reports_to: str | None = Field(default=None, max_length=64)
     is_enabled: bool | None = None
     permissions: list[str] | None = None
     autonomy_mode: str | None = None
@@ -308,6 +310,13 @@ class GitHubIssueCreateRequest(_GitHubWriteApprovalRequest):
     body: str = ""
     labels: list[str] = Field(default_factory=list)
     assignees: list[str] = Field(default_factory=list)
+
+
+class GitWorktreeCreateRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=64)
+    branch_name: str = Field(min_length=1, max_length=200)
+    base_ref: str = Field(default="HEAD", min_length=1, max_length=200)
+    approval_id: str | None = Field(default=None, min_length=1)
 
 
 class GitWorkflowCreate(BaseModel):

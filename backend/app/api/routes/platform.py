@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 from app.browser.engines import BROWSER_ENGINE_REGISTRY, validate_userscript_policy
 from app.core.security import mask_credential_ref, sanitize_untrusted_content
 from app.db.base import utcnow
@@ -39,6 +39,7 @@ from app.schemas.common import (
     GitHubBranchCreateRequest,
     GitHubIssueCreateRequest,
     GitHubPRCreateRequest,
+    GitWorktreeCreateRequest,
     ProviderAccountCreate,
     SanitizeRequest,
     SDLCRequest,
@@ -89,6 +90,16 @@ def _audit_trace_links(
     return (str(agent_id) if agent_id is not None else None, str(project_id) if project_id is not None else None)
 
 
+def _raise_git_worktree_error(result: dict[str, Any]) -> None:
+    detail = str(result.get("error") or result.get("reason") or "Git worktree operation failed")
+    approval_failure = (
+        bool(result.get("approval_id"))
+        or result.get("is_protected_target") is True
+        or "approval" in detail.casefold()
+    )
+    raise HTTPException(status_code=403 if approval_failure else 400, detail=detail)
+
+
 @router.get("/employees/templates")
 async def list_role_templates():
     return ROLE_TEMPLATES
@@ -116,11 +127,16 @@ async def create_employee_endpoint(
         device_id=body.device_id,
         actor=user.email,
     )
+    if emp.role != "manager":
+        emp.reports_to = body.reports_to or "manager-0"
+    await db.commit()
+    await db.refresh(emp)
     return {
         "id": emp.id,
         "name": emp.name,
         "role": emp.role,
         "role_template": emp.role_template,
+        "reports_to": emp.reports_to,
         "specialty": emp.specialty,
         "skills": emp.skills,
         "divisions": emp.divisions,
@@ -464,6 +480,47 @@ async def github_change_summary():
         "auth": github_client.get_auth_status(),
         "changes": github_client.generate_change_summary(),
     }
+
+
+@router.post("/git/worktrees", status_code=201)
+async def create_agent_git_worktree(
+    body: GitWorktreeCreateRequest,
+    user: User = Depends(require_role("admin", "operator")),
+    db: AsyncSession = Depends(get_db),
+):
+    approval = None
+    if body.approval_id is not None:
+        approval = await db.get(ApprovalRequest, body.approval_id)
+        if approval is None or approval.action_type != "branch":
+            raise HTTPException(status_code=403, detail="A valid branch approval is required")
+
+    result = await git_workflow_manager.create_agent_worktree(
+        agent_id=body.agent_id,
+        branch_name=body.branch_name,
+        base_ref=body.base_ref,
+        db=db,
+        approval=approval,
+        actor=user.email,
+    )
+    if not result.get("allowed") or not result.get("ok"):
+        _raise_git_worktree_error(result)
+    return result
+
+
+@router.delete("/git/worktrees/{agent_id}")
+async def remove_agent_git_worktree(
+    agent_id: str,
+    user: User = Depends(require_role("admin", "operator")),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await git_workflow_manager.remove_agent_worktree(
+        agent_id=agent_id,
+        db=db,
+        actor=user.email,
+    )
+    if not result.get("allowed") or not result.get("ok"):
+        _raise_git_worktree_error(result)
+    return result
 
 
 @router.post("/github/branches", status_code=201)

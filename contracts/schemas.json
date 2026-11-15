@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "api_prefix": "/api/v1",
   "languages": [
     {"code": "en", "name": "English", "nativeName": "English", "dir": "ltr"},
@@ -34,6 +34,14 @@
     "browser_engines": ["playwright", "browser_use", "openbrowser", "automa"],
     "device_statuses": ["online", "degraded", "offline"],
     "message_types": ["task_assignment", "handoff", "status_update", "direct", "group"]
+  },
+  "entities": {
+    "agent": {
+      "properties": {
+        "reports_to": {"type": ["string", "null"], "maxLength": 64}
+      },
+      "non_manager_default_reports_to": "manager-0"
+    }
   },
   "operations": {
     "device_token_revoke": {
@@ -137,6 +145,69 @@
           "agent_id": {"type": ["string", "null"], "default": null},
           "session_id": {"type": ["string", "null"], "default": null}
         }
+      }
+    },
+    "employee_create": {
+      "method": "POST",
+      "path": "/api/v1/employees",
+      "request": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string", "minLength": 2, "maxLength": 120},
+          "reports_to": {"type": ["string", "null"], "maxLength": 64, "default": null}
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["id", "role", "reports_to"],
+        "properties": {
+          "id": {"type": "string"},
+          "role": {"type": "string"},
+          "reports_to": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "agent_update": {
+      "method": "PATCH",
+      "path": "/api/v1/agents/{agent_id}",
+      "request": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "reports_to": {"type": ["string", "null"], "maxLength": 64}
+        }
+      }
+    },
+    "git_worktree_create": {
+      "method": "POST",
+      "path": "/api/v1/git/worktrees",
+      "operator_roles": ["admin", "operator"],
+      "request": {
+        "type": "object",
+        "required": ["agent_id", "branch_name"],
+        "properties": {
+          "agent_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "branch_name": {"type": "string", "minLength": 1, "maxLength": 200},
+          "base_ref": {"type": "string", "minLength": 1, "maxLength": 200, "default": "HEAD"},
+          "approval_id": {"type": ["string", "null"], "minLength": 1, "default": null}
+        }
+      },
+      "error_responses": {
+        "400": "Invalid agent path, branch, base ref, or Git worktree operation.",
+        "403": "Caller must be an admin/operator; protected-branch and approval failures are forbidden."
+      }
+    },
+    "git_worktree_remove": {
+      "method": "DELETE",
+      "path": "/api/v1/git/worktrees/{agent_id}",
+      "operator_roles": ["admin", "operator"],
+      "path_parameters": {
+        "agent_id": {"type": "string", "minLength": 1, "maxLength": 64}
+      },
+      "error_responses": {
+        "400": "Invalid agent path or Git worktree removal failed.",
+        "403": "Caller must be an admin/operator."
       }
     },
     "execution_traces": {
