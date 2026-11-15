@@ -4,6 +4,43 @@ import { Badge, Button, Card, Input, Select } from '../components/ui'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 
+export function SkillGapPanel({ onReload }: { onReload: () => void }) {
+  const { t, formatNumber } = useI18n()
+  const [skills, setSkills] = useState('')
+  const [analysis, setAnalysis] = useState<any>(null)
+  const [count, setCount] = useState<number | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+  const required = skills.split(',').map((value) => value.trim()).filter(Boolean)
+  const run = async (provision: boolean) => {
+    setBusy(true); setError('')
+    try {
+      const data = await apiFetch<any>(provision ? '/employees/provision-specialists' : '/employees/skill-gaps', {
+        method: 'POST', body: JSON.stringify({ required_skills: required }),
+      })
+      if (provision) { setCount(data.provisioned_count ?? null); setAnalysis(data.after ?? null); setConfirm(false); onReload() }
+      else { setAnalysis(data); setCount(null) }
+    } catch (err: any) { setError(err?.message || t.enterprise.operationFailed); setConfirm(false) } finally { setBusy(false) }
+  }
+  return <Card className="space-y-3">
+    <h3 className="text-sm font-semibold text-white">{t.enterprise.skillTitle}</h3>
+    <Input aria-label={t.enterprise.requiredSkills} placeholder={t.enterprise.requiredSkills} value={skills} onChange={(e) => { setSkills(e.target.value); setAnalysis(null); setCount(null); setConfirm(false) }} />
+    <div className="flex flex-wrap gap-2">
+      <Button variant="secondary" disabled={!required.length || busy} onClick={() => run(false)}>{t.enterprise.analyzeSkills}</Button>
+      <Button disabled={!analysis || busy || !Array.isArray(analysis.missing_skills) || !analysis.missing_skills.length} onClick={() => confirm ? run(true) : setConfirm(true)}>{confirm ? t.enterprise.confirmProvision : t.enterprise.provisionSkills}</Button>
+      {confirm && <Button variant="secondary" onClick={() => setConfirm(false)}>{t.common.cancel}</Button>}
+    </div>
+    {error && <div role="alert" className="text-xs text-rose-300">{error}</div>}
+    {analysis && <div className="space-y-1 text-xs text-slate-300">
+      <div>{t.enterprise.coveredSkills}: {(analysis.covered_skills || []).join(', ') || '—'}</div>
+      <div>{t.enterprise.missingSkills}: {(analysis.missing_skills || []).join(', ') || '—'}</div>
+      {typeof analysis.coverage_ratio === 'number' && <div>{formatNumber(Math.round(analysis.coverage_ratio * 100))}%</div>}
+    </div>}
+    {count !== null && <div className="text-xs text-emerald-300">{t.enterprise.provisionedCount}: {formatNumber(count)}</div>}
+  </Card>
+}
+
 export function EmployeeCreatorAndOrgPanel({
   agents,
   templates,
@@ -141,6 +178,7 @@ export function EmployeeCreatorAndOrgPanel({
         </form>
       </Card>
 
+      <SkillGapPanel onReload={onReload} />
       {/* Organization Structure + Smart Replacement trigger */}
       <Card className="space-y-2">
         <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.orgStructureTitle}</h3>
@@ -346,6 +384,9 @@ export function ArenaAccountsSessionsPanel({
   const [label, setLabel] = useState('')
   const [identifier, setIdentifier] = useState('')
   const [mode, setMode] = useState('hybrid')
+  const [recovered, setRecovered] = useState<number | null>(null)
+  const [recoveryError, setRecoveryError] = useState('')
+  const [recovering, setRecovering] = useState(false)
 
   const createAccount = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -362,6 +403,15 @@ export function ArenaAccountsSessionsPanel({
   const recoverSession = async (id: string) => {
     await apiFetch(`/sessions/${id}/recover`, { method: 'POST' })
     onReload()
+  }
+
+  const recoverDegraded = async () => {
+    setRecovering(true); setRecoveryError(''); setRecovered(null)
+    try {
+      const result = await apiFetch<any>('/providers/sessions/recover', { method: 'POST' })
+      if (typeof result.recovered_count === 'number') setRecovered(result.recovered_count)
+      onReload()
+    } catch (err: any) { setRecoveryError(err?.message || t.enterprise.operationFailed) } finally { setRecovering(false) }
   }
 
   return (
@@ -395,6 +445,9 @@ export function ArenaAccountsSessionsPanel({
 
       <Card className="space-y-3">
         <h3 className="text-sm font-semibold text-white">{t.enterprise.sessionsTitle}</h3>
+        <Button variant="secondary" disabled={recovering} onClick={recoverDegraded}>{t.enterprise.recoverAll}</Button>
+        {recovered !== null && <p className="text-xs text-emerald-300">{t.enterprise.recoveredCount}: {recovered}</p>}
+        {recoveryError && <p role="alert" className="text-xs text-rose-300">{recoveryError}</p>}
         <div className="max-h-52 space-y-1.5 overflow-y-auto text-xs">
           {sessions.map((s) => (
             <div key={s.id} className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/60 p-2">

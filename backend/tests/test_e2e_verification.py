@@ -1655,5 +1655,115 @@ async def test_e2e_github_branches_endpoint_enforces_branch_approval_and_payload
     assert len(gh_calls) == 2
 
 
+# ---------------------------------------------------------------------------
+# 24. Round 4: PostgreSQL URL Normalization, Alembic Offline SQL DDL & Hardened Config
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_e2e_postgresql_url_normalization_and_alembic_sql_ddl_compilation(monkeypatch):
+    """Verify PostgreSQL URL normalization (`postgres://`, `postgresql://`,
+    `postgresql+asyncpg://`, `postgresql+psycopg2://` -> `postgresql+psycopg://`),
+    async engine construction via `_make_engine()`, and Alembic offline (`sql=True`)
+    DDL compilation across the entire migration chain on PostgreSQL dialect.
+    """
+    import io
+
+    from alembic.config import Config as AlembicConfig
+
+    from alembic import command
+    from app.core.config import (
+        Settings,
+        normalize_async_database_url,
+        normalize_database_url,
+        normalize_sync_database_url,
+    )
+    from app.db.session import _make_engine
+
+    expected_pg = "postgresql+psycopg://aatm@localhost:5432/aatm"
+    for raw_pg in (
+        "postgres://aatm@localhost:5432/aatm",
+        "postgresql://aatm@localhost:5432/aatm",
+        "postgresql+asyncpg://aatm@localhost:5432/aatm",
+        "postgresql+psycopg2://aatm@localhost:5432/aatm",
+        "postgresql+psycopg://aatm@localhost:5432/aatm",
+    ):
+        assert normalize_async_database_url(raw_pg) == expected_pg
+        assert normalize_sync_database_url(raw_pg) == expected_pg
+        assert normalize_database_url(raw_pg, async_driver=True) == expected_pg
+        assert normalize_database_url(raw_pg, async_driver=False) == expected_pg
+
+    assert (
+        normalize_async_database_url("sqlite:///./data/aatm.db")
+        == "sqlite+aiosqlite:///./data/aatm.db"
+    )
+    assert (
+        normalize_sync_database_url("sqlite+aiosqlite:///./data/aatm.db")
+        == "sqlite:///./data/aatm.db"
+    )
+
+    pg_settings = Settings(DATABASE_URL="postgres://aatm@localhost:5432/aatm")
+    assert pg_settings.get_async_database_url() == expected_pg
+    assert pg_settings.get_sync_database_url() == expected_pg
+
+    pg_engine = _make_engine("postgres://aatm@localhost:5432/aatm")
+    try:
+        assert pg_engine.dialect.name == "postgresql"
+        assert pg_engine.dialect.driver == "psycopg"
+    finally:
+        await pg_engine.dispose()
+
+    # Compile full Alembic migration chain in offline `sql=True` mode using PostgreSQL dialect.
+    backend_dir = Path(__file__).resolve().parents[1]
+    alembic_cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+    alembic_cfg.set_main_option("sqlalchemy.url", "postgres://aatm@localhost:5432/aatm")
+    ddl_buffer = io.StringIO()
+    alembic_cfg.attributes["output_buffer"] = ddl_buffer
+
+    command.upgrade(alembic_cfg, "head", sql=True)
+    compiled_ddl = ddl_buffer.getvalue()
+
+    assert "CREATE TABLE agents" in compiled_ddl
+    assert "CREATE TABLE ai_providers" in compiled_ddl
+    assert "CREATE TABLE agent_messages" in compiled_ddl
+    assert "CREATE TABLE execution_devices" in compiled_ddl
+    assert "ALTER TABLE execution_devices ADD COLUMN token_version" in compiled_ddl
+    assert "ALTER TABLE agents ADD COLUMN reports_to" in compiled_ddl
+    assert "a56f5804a0ab" in compiled_ddl
+    assert "ee92483cefa3" in compiled_ddl
+    assert "6c3ab8f4d2e1" in compiled_ddl
+    assert "629b77662bf2" in compiled_ddl
+
+
+def test_e2e_round4_settings_env_and_hardened_docker_compose_worker():
+    """Verify `GITHUB_WEBHOOK_SECRET` and `AATM_SANDBOX_MODE` in `Settings` and
+    `.env.example`, and verify the hardened `worker` container definition in
+    `docker-compose.yml`.
+    """
+    from app.core.config import ROOT_DIR, Settings
+
+    s = Settings(
+        GITHUB_WEBHOOK_SECRET="whsec-test-only",
+        AATM_SANDBOX_MODE="docker",
+    )
+    assert s.GITHUB_WEBHOOK_SECRET == "whsec-test-only"
+    assert s.AATM_GITHUB_WEBHOOK_SECRET == "whsec-test-only"
+    assert s.AATM_SANDBOX_MODE == "docker"
+    assert s.SANDBOX_MODE == "docker"
+
+    env_example = (ROOT_DIR / ".env.example").read_text(encoding="utf-8")
+    assert "GITHUB_WEBHOOK_SECRET=" in env_example
+    assert "AATM_SANDBOX_MODE=process" in env_example
+
+    compose_text = (ROOT_DIR / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "postgres:" in compose_text
+    assert "worker:" in compose_text
+    assert "read_only: true" in compose_text
+    assert "no-new-privileges:true" in compose_text
+    assert "cap_drop:" in compose_text
+    assert "pids_limit: 64" in compose_text
+    assert "AATM_SANDBOX_MODE" in compose_text
+
+
+
 
 

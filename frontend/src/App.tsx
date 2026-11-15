@@ -386,7 +386,7 @@ function AATMWorkspace() {
               />
             </div>
           )}
-          {tab === 'git' && <GitWorkflowsView gitData={gitData} approvals={approvals} onReload={() => loadAll()} />}
+          {tab === 'git' && <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} onReload={() => loadAll()} />}
           {tab === 'qa' && (
             <div className="space-y-6">
               <QAView qaData={qaData} onReload={() => loadAll()} />

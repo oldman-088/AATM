@@ -4,6 +4,85 @@ import { Badge, Button, Card, Input, Select } from '../components/ui'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 
+type WorkflowStep = { type: string; url?: string; selector?: string; value?: string; ms?: number }
+
+export function VisualWorkflowBuilder({ browsers }: { browsers: any[] }) {
+  const { t } = useI18n()
+  const [profile, setProfile] = useState('')
+  const [engine, setEngine] = useState('automa')
+  const [steps, setSteps] = useState<WorkflowStep[]>([])
+  const [result, setResult] = useState<any>(null)
+  const [error, setError] = useState('')
+  const [running, setRunning] = useState(false)
+  const selected = browsers.some((b) => b.id === profile) ? profile : ''
+  const types = [
+    ['navigate', t.enterprise.navigateStep], ['click_element', t.enterprise.clickStep],
+    ['fill_input', t.enterprise.fillStep], ['extract_text', t.enterprise.extractStep],
+    ['capture_snapshot', t.enterprise.snapshotStep], ['wait', t.enterprise.waitStep],
+  ]
+  const update = (index: number, patch: Partial<WorkflowStep>) => setSteps((old) => old.map((step, i) => i === index ? { ...step, ...patch } : step))
+  const move = (index: number, delta: number) => setSteps((old) => {
+    const next = [...old]; const other = index + delta
+    if (other < 0 || other >= next.length) return old
+    ;[next[index], next[other]] = [next[other], next[index]]
+    return next
+  })
+  const run = async () => {
+    setRunning(true); setError(''); setResult(null)
+    try {
+      const payload = steps.map((step) => {
+        if (step.type === 'navigate') return { type: step.type, url: step.url || '' }
+        if (step.type === 'fill_input') return { type: step.type, selector: step.selector || '', value: step.value || '' }
+        if (step.type === 'click_element' || step.type === 'extract_text') return { type: step.type, selector: step.selector || '' }
+        if (step.type === 'wait') return { type: step.type, ms: step.ms || 0 }
+        return { type: step.type }
+      })
+      const res = await apiFetch<any>(`/browsers/${encodeURIComponent(selected)}/workflow`, { method: 'POST', body: JSON.stringify({ engine, steps: payload }) })
+      setResult(res)
+    } catch (err: any) { setError(err?.message || t.enterprise.operationFailed) } finally { setRunning(false) }
+  }
+  return (
+    <Card className="space-y-3">
+      <h3 className="text-sm font-semibold text-white">{t.enterprise.workflowBuilder}</h3>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Select aria-label={t.enterprise.workflowProfile} value={selected} onChange={(e) => setProfile(e.target.value)}>
+          <option value="">{browsers.length ? t.enterprise.noSelection : t.enterprise.workflowNoProfiles}</option>
+          {browsers.map((b) => <option key={b.id} value={b.id}>{b.name || b.id}</option>)}
+        </Select>
+        <Select aria-label={t.enterprise.workflowEngine} value={engine} onChange={(e) => setEngine(e.target.value)}>
+          {['automa', 'browser_use', 'openbrowser'].map((name) => <option key={name} value={name}>{name}</option>)}
+        </Select>
+      </div>
+      {steps.map((step, index) => <div key={index} className="space-y-2 rounded border border-slate-700 p-2">
+        <div className="flex flex-wrap gap-2">
+          <Select aria-label={`${t.enterprise.workflowStep} ${index + 1}`} value={step.type} onChange={(e) => update(index, { type: e.target.value })}>
+            {types.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </Select>
+          <Button size="sm" variant="secondary" aria-label={`${t.enterprise.workflowUp} ${index + 1}`} disabled={index === 0} onClick={() => move(index, -1)}>{t.enterprise.workflowUp}</Button>
+          <Button size="sm" variant="secondary" aria-label={`${t.enterprise.workflowDown} ${index + 1}`} disabled={index === steps.length - 1} onClick={() => move(index, 1)}>{t.enterprise.workflowDown}</Button>
+          <Button size="sm" variant="danger" aria-label={`${t.enterprise.workflowRemove} ${index + 1}`} onClick={() => setSteps((old) => old.filter((_, i) => i !== index))}>{t.enterprise.workflowRemove}</Button>
+        </div>
+        {step.type === 'navigate' && <Input aria-label={`${t.enterprise.workflowUrl} ${index + 1}`} value={step.url || ''} onChange={(e) => update(index, { url: e.target.value })} />}
+        {['click_element', 'fill_input', 'extract_text'].includes(step.type) && <Input aria-label={`${t.enterprise.workflowSelector} ${index + 1}`} value={step.selector || ''} onChange={(e) => update(index, { selector: e.target.value })} />}
+        {step.type === 'fill_input' && <Input aria-label={`${t.enterprise.workflowValue} ${index + 1}`} value={step.value || ''} onChange={(e) => update(index, { value: e.target.value })} />}
+        {step.type === 'wait' && <Input type="number" min="0" aria-label={`${t.enterprise.workflowWait} ${index + 1}`} value={step.ms ?? 0} onChange={(e) => update(index, { ms: Number(e.target.value) })} />}
+      </div>)}
+      <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" onClick={() => setSteps((old) => [...old, { type: 'navigate' }])}>{t.enterprise.workflowAdd}</Button>
+        <Button disabled={!selected || !steps.length || running} onClick={run}>{t.enterprise.workflowRun}</Button>
+      </div>
+      {error && <div role="alert" className="text-xs text-rose-300">{error}</div>}
+      {result && <div className="space-y-1 text-xs text-slate-300"><h4>{t.enterprise.workflowResults}: {result.status} ({result.steps_completed}/{result.steps_total})</h4>
+        {result.reason && <p>{result.reason}</p>}
+        {Array.isArray(result.trace) && result.trace.map((item: any, i: number) => <div key={i} className="rounded border border-slate-700 p-2">
+          <span>{item.step_index + 1}. {item.type} · {item.status} · {item.engine_mode || ''}</span>
+          {item.type === 'extract_text' && (typeof item.redacted_count === 'number' ? <pre className="whitespace-pre-wrap break-all">{String(item.text || '')}</pre> : <p>{t.enterprise.workflowUnverified}</p>)}
+        </div>)}
+      </div>}
+    </Card>
+  )
+}
+
 export function BrowserWallView({
   browsers,
   capabilities,
@@ -38,6 +117,7 @@ export function BrowserWallView({
         )}
       </div>
 
+      <VisualWorkflowBuilder browsers={browsers} />
       <div className="grid gap-4 lg:grid-cols-2">
         {browsers.map((bp) => (
           <Card key={bp.id} className="space-y-3">
@@ -504,9 +584,49 @@ export function ProjectsMemoryView({
   )
 }
 
-type GitHubTarget = 'pr' | 'issue' | 'branch'
+export function AgentWorktrees({ agents, worktrees, onReload }: { agents: any[]; worktrees: any[]; onReload: () => void }) {
+  const { t } = useI18n()
+  const [agent, setAgent] = useState('')
+  const [branch, setBranch] = useState('')
+  const [base, setBase] = useState('HEAD')
+  const [approval, setApproval] = useState('')
+  const [confirm, setConfirm] = useState(false)
+  const [feedback, setFeedback] = useState('')
+  const [busy, setBusy] = useState(false)
+  const run = async (remove: boolean) => {
+    setBusy(true); setFeedback('')
+    try {
+      await apiFetch(remove ? `/git/worktrees/${encodeURIComponent(agent)}` : '/git/worktrees', {
+        method: remove ? 'DELETE' : 'POST',
+        ...(remove ? {} : { body: JSON.stringify({ agent_id: agent, branch_name: branch, base_ref: base, ...(approval.trim() ? { approval_id: approval.trim() } : {}) }) }),
+      })
+      setConfirm(false); setFeedback(t.enterprise.worktreeDone); onReload()
+    } catch (err: any) { setFeedback(err?.message || t.enterprise.operationFailed); setConfirm(false) } finally { setBusy(false) }
+  }
+  return <Card className="space-y-3">
+    <h3 className="text-sm font-semibold text-white">{t.enterprise.worktreesTitle}</h3>
+    <div className="grid gap-2 sm:grid-cols-2">
+      <Select aria-label={t.enterprise.worktreeAgent} value={agent} onChange={(e) => { setAgent(e.target.value); setConfirm(false) }}>
+        <option value="">{t.enterprise.noSelection}</option>
+        {agents.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
+      </Select>
+      <Input aria-label={t.enterprise.worktreeBranch} placeholder={t.enterprise.worktreeBranch} value={branch} onChange={(e) => setBranch(e.target.value)} />
+      <Input aria-label={t.enterprise.worktreeBase} value={base} onChange={(e) => setBase(e.target.value)} />
+      <Input aria-label={t.enterprise.worktreeApproval} placeholder={t.enterprise.worktreeApproval} value={approval} onChange={(e) => setApproval(e.target.value)} />
+    </div>
+    <div className="flex flex-wrap gap-2">
+      <Button disabled={!agent || !branch.trim() || !base.trim() || busy} onClick={() => run(false)}>{t.enterprise.worktreeCreate}</Button>
+      <Button variant="danger" disabled={!agent || busy} onClick={() => confirm ? run(true) : setConfirm(true)}>{confirm ? t.enterprise.confirmRemove : t.enterprise.worktreeRemove}</Button>
+      {confirm && <Button variant="secondary" onClick={() => setConfirm(false)}>{t.common.cancel}</Button>}
+    </div>
+    {feedback && <div role="status" className="text-xs text-slate-300">{feedback}</div>}
+    {worktrees.map((wt, i) => <div key={i} className="break-all text-xs text-slate-400">{wt.worktree || wt.path} {wt.branch || ''}</div>)}
+  </Card>
+}
 
-export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: any; approvals: any[]; onReload: () => void }) {
+type GitHubTarget = 'pr' | 'issue' | 'branch' | 'comment'
+
+export function GitWorkflowsView({ gitData, approvals, agents, onReload }: { gitData: any; approvals: any[]; agents: any[]; onReload: () => void }) {
   const { t } = useI18n()
   const [mergeFeedback, setMergeFeedback] = useState<string | null>(null)
 
@@ -519,6 +639,7 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
   const [baseBranch, setBaseBranch] = useState('main')
   const [branchName, setBranchName] = useState('')
   const [fromBranch, setFromBranch] = useState('main')
+  const [prNumber, setPrNumber] = useState('')
   const [approvalId, setApprovalId] = useState('')
   const [requestedApprovalId, setRequestedApprovalId] = useState('')
   const [writeFeedback, setWriteFeedback] = useState<{ kind: 'ok' | 'error' | 'info'; message: string; url?: string } | null>(null)
@@ -542,18 +663,19 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
    */
   const requestApproval = async () => {
     if (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim())) return
+    if (target === 'comment' && (!repo.trim() || !/^[1-9][0-9]*$/.test(prNumber) || !bodyText.trim())) return
     setRequesting(true)
     try {
       const created = await apiFetch<any>('/approvals', {
         method: 'POST',
         body: JSON.stringify({
           action_type: target === 'branch' ? 'branch' : 'merge',
-          title: target === 'branch' ? `${t.enterprise.targetBranch}: ${branchName}` : title || (target === 'pr' ? 'GitHub pull request' : 'GitHub issue'),
+          title: target === 'branch' ? `${t.enterprise.targetBranch}: ${branchName}` : target === 'comment' ? `${t.enterprise.commentMode}: #${prNumber}` : title || (target === 'pr' ? 'GitHub pull request' : 'GitHub issue'),
           description:
-            target === 'branch' ? `${branchName} ← ${fromBranch} (${repo})` : target === 'pr'
+            target === 'branch' ? `${branchName} ← ${fromBranch} (${repo})` : target === 'comment' ? `${repo} #${prNumber}` : target === 'pr'
               ? `Create PR ${headBranch || repository.current_branch} -> ${baseBranch} in ${repo}`
               : `Create issue "${title}" in ${repo}`,
-          payload: target === 'branch' ? { kind: 'branch', repo, branch_name: branchName, from_branch: fromBranch } : { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
+          payload: target === 'branch' ? { kind: 'branch', repo, branch_name: branchName, from_branch: fromBranch } : target === 'comment' ? { kind: 'comment', repo, pr_number: Number(prNumber), event: 'COMMENT', body: bodyText } : { kind: target, repo, title, body: bodyText, head: headBranch, base: baseBranch, target_branch: target === 'pr' ? baseBranch : undefined },
         }),
       })
       setApprovalId(created?.id || '')
@@ -569,14 +691,16 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
 
   const submitWrite = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!(target === 'branch' ? branchName.trim() && fromBranch.trim() && repo.trim() : title.trim()) || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected') {
+    if (!(target === 'branch' ? branchName.trim() && fromBranch.trim() && repo.trim() : target === 'comment' ? repo.trim() && /^[1-9][0-9]*$/.test(prNumber) && bodyText.trim() : title.trim()) || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected') {
       setWriteFeedback({ kind: 'error', message: t.git.approvalRequired })
       return
     }
     setSubmitting(true)
     try {
       const payload =
-        target === 'branch'
+        target === 'comment'
+          ? { approval_id: approvalId.trim(), repo, event: 'COMMENT', body: bodyText }
+          : target === 'branch'
           ? { approval_id: approvalId.trim(), repo, branch_name: branchName, from_branch: fromBranch }
           : target === 'pr'
           ? {
@@ -588,7 +712,7 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
               base: baseBranch,
             }
           : { approval_id: approvalId.trim(), repo, title, body: bodyText }
-      const res = await apiFetch<any>(target === 'pr' ? '/github/prs' : target === 'issue' ? '/github/issues' : '/github/branches', {
+      const res = await apiFetch<any>(target === 'pr' ? '/github/prs' : target === 'issue' ? '/github/issues' : target === 'branch' ? '/github/branches' : `/github/prs/${encodeURIComponent(prNumber)}/comments`, {
         method: 'POST',
         body: JSON.stringify(payload),
       })
@@ -654,7 +778,8 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
         </Card>
       </div>
 
-      {/* Approval-gated GitHub writes (PR / Issue) */}
+      <AgentWorktrees agents={agents} worktrees={Array.isArray(repository.worktrees) ? repository.worktrees : []} onReload={onReload} />
+      {/* Approval-gated GitHub writes */}
       <Card className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
@@ -662,7 +787,7 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
             {t.git.writeTitle}
           </h3>
           <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-            {(['pr', 'issue', 'branch'] as const).map((kind) => (
+            {(['pr', 'issue', 'branch', 'comment'] as const).map((kind) => (
               <button
                 key={kind}
                 type="button"
@@ -671,7 +796,7 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
                   target === kind ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}
               >
-                {kind === 'pr' ? t.git.targetPr : kind === 'issue' ? t.git.targetIssue : t.enterprise.targetBranch}
+                {kind === 'pr' ? t.git.targetPr : kind === 'issue' ? t.git.targetIssue : kind === 'branch' ? t.enterprise.targetBranch : t.enterprise.commentMode}
               </button>
             ))}
           </div>
@@ -708,7 +833,7 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
             />
           </div>
           {approvalId.trim() && <div role="status" className="text-xs text-slate-300">{t.enterprise.approvalStatus} {statusLabel}</div>}
-          {target === 'branch' ? (
+          {target === 'comment' ? <Input type="number" min="1" aria-label={t.enterprise.prNumber} placeholder={t.enterprise.prNumber} value={prNumber} onChange={(e) => setPrNumber(e.target.value)} /> : target === 'branch' ? (
             <div className="grid gap-2 md:grid-cols-2">
               <Input value={branchName} onChange={(e) => setBranchName(e.target.value)} placeholder={t.enterprise.branchName} aria-label={t.enterprise.branchName} />
               <Input value={fromBranch} onChange={(e) => setFromBranch(e.target.value)} placeholder={t.enterprise.fromBranch} aria-label={t.enterprise.fromBranch} />
@@ -736,16 +861,16 @@ export function GitWorkflowsView({ gitData, approvals, onReload }: { gitData: an
             value={bodyText}
             onChange={(e) => setBodyText(e.target.value)}
             rows={3}
-            placeholder={t.git.bodyPlaceholder}
-            aria-label={t.git.bodyPlaceholder}
+            placeholder={target === 'comment' ? t.enterprise.commentBody : t.git.bodyPlaceholder}
+            aria-label={target === 'comment' ? t.enterprise.commentBody : t.git.bodyPlaceholder}
             className="w-full rounded-lg border border-slate-700 bg-slate-950/70 p-3 text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
           />}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="secondary" onClick={requestApproval} disabled={requesting || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim()))}>
+            <Button type="button" variant="secondary" onClick={requestApproval} disabled={requesting || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim())) || (target === 'comment' && (!repo.trim() || !/^[1-9][0-9]*$/.test(prNumber) || !bodyText.trim()))}>
               {t.git.requestApproval}
             </Button>
-            <Button type="submit" disabled={submitting || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected' || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim()))}>
-              {target === 'pr' ? t.git.submitPr : target === 'issue' ? t.git.submitIssue : t.enterprise.submitBranch}
+            <Button type="submit" disabled={submitting || !approvalId.trim() || approvalStatus === 'pending' || approvalStatus === 'rejected' || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim())) || (target === 'comment' && (!repo.trim() || !/^[1-9][0-9]*$/.test(prNumber) || !bodyText.trim()))}>
+              {target === 'pr' ? t.git.submitPr : target === 'issue' ? t.git.submitIssue : target === 'branch' ? t.enterprise.submitBranch : t.enterprise.submitComment}
             </Button>
           </div>
         </form>

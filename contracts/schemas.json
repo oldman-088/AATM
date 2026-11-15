@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "api_prefix": "/api/v1",
   "languages": [
     {"code": "en", "name": "English", "nativeName": "English", "dir": "ltr"},
@@ -147,6 +147,50 @@
         }
       }
     },
+    "provider_sessions_recover": {
+      "method": "POST",
+      "path": "/api/v1/providers/sessions/recover",
+      "operator_roles": ["admin", "operator"],
+      "request": {"type": "object", "required": [], "properties": {}},
+      "response": {
+        "type": "object",
+        "required": ["recovered_count", "threshold", "sessions"],
+        "properties": {
+          "recovered_count": {"type": "integer", "minimum": 0},
+          "threshold": {"type": "number"},
+          "sessions": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    },
+    "browser_workflow": {
+      "method": "POST",
+      "path": "/api/v1/browsers/{profile_id}/workflow",
+      "request": {
+        "type": "object",
+        "required": ["steps"],
+        "properties": {
+          "engine": {"type": "string", "default": "automa"},
+          "steps": {"type": "array", "items": {"type": "object"}},
+          "agent_id": {"type": ["string", "null"], "default": null}
+        }
+      },
+      "error_responses": {
+        "400": "Unsupported engine or disallowed/invalid workflow steps.",
+        "403": "Supplied agent_id does not match the browser profile assignment."
+      }
+    },
+    "browser_extract_text": {
+      "method": "POST",
+      "path": "/api/v1/browsers/{profile_id}/extract-text",
+      "request": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": {"type": "string", "minLength": 1},
+          "max_chars": {"type": "integer", "default": 2000}
+        }
+      }
+    },
     "employee_create": {
       "method": "POST",
       "path": "/api/v1/employees",
@@ -165,6 +209,31 @@
           "id": {"type": "string"},
           "role": {"type": "string"},
           "reports_to": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "employee_skill_gaps": {
+      "method": "POST",
+      "path": "/api/v1/employees/skill-gaps",
+      "request": {
+        "type": "object",
+        "required": ["required_skills"],
+        "properties": {
+          "required_skills": {"type": "array", "items": {"type": "string"}},
+          "divisions": {"type": ["array", "null"], "items": {"type": "string"}, "default": null}
+        }
+      }
+    },
+    "employee_provision_specialists": {
+      "method": "POST",
+      "path": "/api/v1/employees/provision-specialists",
+      "operator_roles": ["admin", "operator"],
+      "request": {
+        "type": "object",
+        "required": ["required_skills"],
+        "properties": {
+          "required_skills": {"type": "array", "items": {"type": "string"}},
+          "divisions": {"type": ["array", "null"], "items": {"type": "string"}, "default": null}
         }
       }
     },
@@ -279,6 +348,47 @@
           "base": {"type": "string", "minLength": 1, "default": "main"},
           "draft": {"type": "boolean", "default": false}
         }
+      }
+    },
+    "github_pr_comment": {
+      "method": "POST",
+      "path": "/api/v1/github/prs/{pr_number}/comments",
+      "path_parameters": {"pr_number": {"type": "integer", "minimum": 1}},
+      "request": {
+        "type": "object",
+        "required": ["repo", "body"],
+        "properties": {
+          "approval_id": {"type": ["string", "null"], "minLength": 1, "default": null},
+          "repo": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"},
+          "body": {"type": "string", "minLength": 1, "maxLength": 65536},
+          "event": {"type": "string", "enum": ["COMMENT", "APPROVE", "REQUEST_CHANGES"], "default": "COMMENT"}
+        }
+      },
+      "error_responses": {"403": "Approval is missing, unapproved, or does not match the requested repository, PR, event, and body."}
+    },
+    "github_webhook": {
+      "method": "POST",
+      "path": "/api/v1/github/webhooks",
+      "authentication": "X-Hub-Signature-256 HMAC-SHA256",
+      "headers": {
+        "X-Hub-Signature-256": {"type": "string", "required": true, "pattern": "^sha256=[a-f0-9]{64}$"},
+        "X-GitHub-Event": {"type": "string", "required": false},
+        "X-GitHub-Delivery": {"type": "string", "required": false}
+      },
+      "request": {"type": "object", "description": "Raw GitHub webhook JSON, authenticated over the exact request bytes."},
+      "response": {
+        "type": "object",
+        "required": ["accepted", "delivery_id", "event"],
+        "properties": {
+          "accepted": {"type": "boolean"},
+          "delivery_id": {"type": "string"},
+          "event": {"type": "string"}
+        }
+      },
+      "error_responses": {
+        "400": "Malformed webhook JSON.",
+        "401": "Missing or invalid HMAC signature.",
+        "503": "Webhook signing key is not configured."
       }
     },
     "github_issue_create": {

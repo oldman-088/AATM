@@ -1,9 +1,9 @@
 # AATM — Verification Report (Worker 4: Orchestration, QA & Ops)
 
 **Report Date (UTC):** 2026-11-15
-**Branch:** `arena/e5fef882-aatm` (integrated Round 3 W1 + W2 + W3 + W4)
-**Scope:** Divisions 01–12 — end-to-end verification, Rounds 1–3 integration,
-Multi-Device worker daemon, isolated per-agent Git worktrees, SSE bridge streaming, GitHub CI/templates, E2E test suite and deployment hardening.
+**Branch:** `arena/e3ac5bb2-aatm` (integrated Round 4 W1 + W2 + W3 + W4)
+**Scope:** Divisions 01–12 — end-to-end verification, Rounds 1–4 integration,
+Multi-Device worker daemon, OS/Docker sandbox isolation, PostgreSQL DDL compilation, Visual Workflow Builder, Skill-Gap Provisioning, GitHub Webhooks/PR Comments, and deployment hardening.
 
 ---
 
@@ -11,17 +11,17 @@ Multi-Device worker daemon, isolated per-agent Git worktrees, SSE bridge streami
 
 | Gate | Command | Result |
 |---|---|---|
-| Database migrations | `alembic upgrade head` | **PASSED** — head `629b77662bf2` |
+| Database migrations | `alembic upgrade head` | **PASSED** — head `629b77662bf2` (SQLite + PostgreSQL `--sql` DDL verified) |
 | Backend lint | `ruff check backend` | **PASSED** — 0 errors |
 | Bridge lint | `ruff check --config backend/pyproject.toml bridge` | **PASSED** — 0 errors |
-| Backend tests | `pytest -q` | **PASSED** — 89/89 (0 warnings) |
-| ↳ E2E verification suite | `pytest tests/test_e2e_verification.py` | **PASSED** — 34/34 |
+| Backend tests | `pytest -q` | **PASSED** — 99/99 (0 warnings) |
+| ↳ E2E verification suite | `pytest tests/test_e2e_verification.py` | **PASSED** — 36/36 |
 | Bridge tests | `pytest -v bridge/tests/test_bridge.py` | **PASSED** — 10/10 |
 | Static secret scan | `python -m app.qa.engine` | **PASSED** — 0 findings (133 files) |
 | Frontend typecheck | `npm run lint` (`tsc --noEmit`) | **PASSED** — 0 errors |
-| Frontend unit tests | `npm run test` (vitest) | **PASSED** — 43/43 (2 files) |
+| Frontend unit tests | `npm run test` (vitest) | **PASSED** — 50/50 (2 files) |
 | Frontend production build | `npm run build` (vite) | **PASSED** (`1,584` modules) |
-| One-command pipeline | `scripts/ubuntu/verify.sh` | **PASSED** — 12/12 gates, exit 0 (`142` total tests) |
+| One-command pipeline | `scripts/ubuntu/verify.sh` | **PASSED** — 12/12 gates, exit 0 (`159` total tests) |
 | Live multi-device round trip | real uvicorn + daemon OS process | **PASSED** |
 
 ---
@@ -194,6 +194,18 @@ regression test. The suite runs as part of `pytest` and of `scripts/ubuntu/verif
 - `backend/app/api/routes/platform.py` — `POST /api/v1/github/branches` enforces
   `ApprovalRequest.action_type == "branch"` and exact `repo` / `branch_name` /
   `from_branch` payload matching before invoking `gh`.
+
+### A5 — PostgreSQL URL Normalization, Alembic Offline SQL DDL Compilation & Container Sandbox Hardening (Divisions 08, 11 & 12)
+
+- `backend/app/core/config.py`, `backend/app/db/session.py`, `backend/alembic/env.py` —
+  normalizes `postgres://`, `postgresql://`, `postgresql+asyncpg://`, and
+  `postgresql+psycopg2://` URLs to `postgresql+psycopg://` for both async and sync
+  SQLAlchemy engines, registers an offline `MockConnection` inspector so all Alembic
+  migrations compile cleanly in `alembic upgrade head --sql` offline PostgreSQL mode,
+  and exposes `GITHUB_WEBHOOK_SECRET` and `AATM_SANDBOX_MODE`.
+- `docker-compose.yml` & `.env.example` — adds a hardened `worker` container service
+  (`read_only: true`, `cap_drop: [ALL]`, `no-new-privileges:true`, `pids_limit: 64`,
+  `mem_limit: 512m`, non-root user `65534:65534`, `AATM_SANDBOX_MODE`).
 
 ---
 

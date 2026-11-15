@@ -22,6 +22,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,8 +31,12 @@ from typing import Any
 import httpx
 
 from app.runtime.sandbox import (
+    DEFAULT_DOCKER_IMAGE,
     WorkspaceSandboxError,
     assert_allowed_binary,
+    build_isolated_command,
+    build_resource_preexec,
+    build_sanitized_env,
     resolve_contained_path,
 )
 
@@ -55,6 +60,12 @@ class WorkerConfig:
     max_concurrent: int = 2
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
     device_type: str = "remote_server"
+    sandbox_mode: str = "process"
+    sandbox_memory_mb: int = 512
+    sandbox_cpu_seconds: int = 30
+    sandbox_cpu_limit: float = 1.0
+    sandbox_pids_limit: int = 64
+    sandbox_docker_image: str = DEFAULT_DOCKER_IMAGE
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -72,6 +83,15 @@ class WorkerConfig:
             keepalive_seconds=keepalive,
             max_concurrent=int(os.environ.get("AATM_WORKER_MAX_CONCURRENT", 2)),
             device_type=os.environ.get("AATM_DEVICE_TYPE", "remote_server"),
+            sandbox_mode=os.environ.get("AATM_SANDBOX_MODE", "process").strip().lower() or "process",
+            sandbox_memory_mb=int(os.environ.get("AATM_SANDBOX_MEMORY_MB", "512")),
+            sandbox_cpu_seconds=int(os.environ.get("AATM_SANDBOX_CPU_SECONDS", "30")),
+            sandbox_cpu_limit=float(os.environ.get("AATM_SANDBOX_CPU_LIMIT", "1.0")),
+            sandbox_pids_limit=int(os.environ.get("AATM_SANDBOX_PIDS_LIMIT", "64")),
+            sandbox_docker_image=(
+                os.environ.get("AATM_SANDBOX_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE).strip()
+                or DEFAULT_DOCKER_IMAGE
+            ),
         )
 
 
@@ -139,14 +159,45 @@ class WorkerDaemon:
         """Resolve a path inside this device's isolated workspace."""
         return resolve_contained_path(self.workspace_root, relative_path)
 
-    def run_tool(self, command: list[str]) -> dict[str, Any]:
-        """Execute an allowlisted development tool inside the isolated workspace."""
-        assert_allowed_binary(command)
+    def _run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
+        """Execute an allowlisted tool inside the isolated workspace with scrubbed env and OS/Docker bounds."""
+        exe = assert_allowed_binary(command)
+        ws = self.workspace_root
+        eff_mode = (sandbox_mode or self.config.sandbox_mode or "process").strip().lower() or "process"
+
+        exec_command = list(command)
+        if eff_mode == "process" and exe in ("python", "python3", "pytest", "ruff"):
+            venv_tool = Path(sys.executable).parent / exe
+            if venv_tool.exists():
+                exec_command = [str(venv_tool), *command[1:]]
+
+        isolated_cmd = build_isolated_command(
+            exec_command,
+            ws,
+            sandbox_mode=eff_mode,
+            memory_mb=self.config.sandbox_memory_mb,
+            cpu_limit=self.config.sandbox_cpu_limit,
+            pids_limit=self.config.sandbox_pids_limit,
+            docker_image=self.config.sandbox_docker_image,
+        )
+        sanitized_env = build_sanitized_env({"HOME": str(ws)})
+        preexec = (
+            build_resource_preexec(
+                memory_mb=self.config.sandbox_memory_mb,
+                cpu_seconds=self.config.sandbox_cpu_seconds,
+                max_procs=self.config.sandbox_pids_limit,
+            )
+            if eff_mode == "process"
+            else None
+        )
+
         t0 = time.perf_counter()
         try:
             proc = subprocess.run(
-                command,
-                cwd=str(self.workspace_root),
+                isolated_cmd,
+                cwd=str(ws),
+                env=sanitized_env,
+                preexec_fn=preexec,
                 capture_output=True,
                 text=True,
                 timeout=self.config.command_timeout,
@@ -156,6 +207,7 @@ class WorkerDaemon:
                 "stdout": proc.stdout[-8000:],
                 "stderr": proc.stderr[-4000:],
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "sandbox_mode": eff_mode,
             }
         except subprocess.TimeoutExpired:
             return {
@@ -163,7 +215,12 @@ class WorkerDaemon:
                 "stdout": "",
                 "stderr": f"Command timed out after {self.config.command_timeout}s.",
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "sandbox_mode": eff_mode,
             }
+
+    def run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
+        """Public wrapper for `_run_tool` preserving backward compatibility."""
+        return self._run_tool(command, sandbox_mode=sandbox_mode)
 
     # ------------------------------------------------------------------ server calls
     async def register(self) -> dict[str, Any]:

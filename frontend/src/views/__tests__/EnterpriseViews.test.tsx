@@ -2,7 +2,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { I18nProvider } from '../../i18n/I18nContext'
 import { installFetchMock } from '../../test/mockApi'
+import { VisualWorkflowBuilder } from '../InfraViews'
 import {
+  SkillGapPanel,
   AgentMessagingPanel,
   ArenaAccountsSessionsPanel,
   EmployeeCreatorAndOrgPanel,
@@ -186,7 +188,7 @@ describe('Enterprise panels — i18n, RTL & backend wiring', () => {
       expect(post?.body).toMatchObject({ label: 'Arena Team', account_identifier: 'team@arena.ai' })
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Recover/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Recover$/ }))
     await waitFor(() => {
       expect(calls.find((c) => c.path === '/api/v1/sessions/sess-1/recover' && c.method === 'POST')).toBeDefined()
     })
@@ -465,5 +467,59 @@ describe('Round 3 hierarchy and filtered traces', () => {
     fireEvent.change(screen.getByLabelText('Filter traces by agent'), { target: { value: '' } })
     expect(await screen.findByText(/task.run.*warning/)).toBeInTheDocument()
     expect(calls.filter((c) => c.path === '/api/v1/traces')).toHaveLength(2)
+  })
+})
+
+
+describe('Round 4 skill and session operations', () => {
+  it('analyzes skills, confirms provisioning and reloads the team', async () => {
+    let reloads = 0
+    const { calls } = installFetchMock()
+    renderWithLocale(<SkillGapPanel onReload={() => { reloads++ }} />)
+    fireEvent.change(screen.getByLabelText('Required skills (comma-separated)'), { target: { value: 'react, python' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze skills' }))
+    expect(await screen.findByText('Missing skills: python')).toBeInTheDocument()
+    expect(calls.find((c) => c.path === '/api/v1/employees/skill-gaps')?.body).toEqual({ required_skills: ['react', 'python'] })
+    fireEvent.click(screen.getByRole('button', { name: 'Provision specialists' }))
+    expect(calls.some((c) => c.path === '/api/v1/employees/provision-specialists')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm provisioning' }))
+    expect(await screen.findByText('Specialists provisioned: 1')).toBeInTheDocument()
+    expect(reloads).toBe(1)
+  })
+
+  it('recovers degraded sessions and displays the count', async () => {
+    const { calls } = installFetchMock()
+    renderWithLocale(<ArenaAccountsSessionsPanel accounts={[]} sessions={[]} onReload={noop} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Recover Degraded Sessions' }))
+    expect(await screen.findByText('Recovered sessions: 2')).toBeInTheDocument()
+    expect(calls.find((c) => c.path === '/api/v1/providers/sessions/recover')?.method).toBe('POST')
+  })
+})
+
+
+describe('Round 4 workflow safety', () => {
+  it('does not display extracted text when backend redaction is unconfirmed', async () => {
+    installFetchMock({ '/api/v1/browsers/profile-1/workflow': { status: 'completed', steps_completed: 1, steps_total: 1, trace: [{ step_index: 0, type: 'extract_text', status: 'completed', text: 'private unredacted text' }] } })
+    renderWithLocale(<VisualWorkflowBuilder browsers={[{ id: 'profile-1', name: 'Profile' }]} />)
+    fireEvent.change(screen.getByLabelText('Browser profile'), { target: { value: 'profile-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add step' }))
+    fireEvent.change(screen.getByLabelText('Step type 1'), { target: { value: 'extract_text' } })
+    fireEvent.change(screen.getByLabelText('Selector 1'), { target: { value: 'h1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }))
+    expect(await screen.findByText('Extracted output unavailable: redaction not confirmed')).toBeInTheDocument()
+    expect(screen.queryByText('private unredacted text')).not.toBeInTheDocument()
+  })
+
+  it('surfaces unavailable workflow endpoints without claiming success', async () => {
+    const mocked = installFetchMock()
+    const original = mocked.mock.getMockImplementation()!
+    mocked.mock.mockImplementation(async (input: any, init: RequestInit = {}) => String(input).endsWith('/workflow')
+      ? { ok: false, status: 404, json: async () => ({ detail: 'Not Found' }) } : original(input, init))
+    renderWithLocale(<VisualWorkflowBuilder browsers={[{ id: 'profile-1', name: 'Profile' }]} />)
+    fireEvent.change(screen.getByLabelText('Browser profile'), { target: { value: 'profile-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add step' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Not Found')
+    expect(screen.queryByText(/Execution summary/)).not.toBeInTheDocument()
   })
 })

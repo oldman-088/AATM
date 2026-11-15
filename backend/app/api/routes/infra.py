@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
+from app.browser.engines import BROWSER_ENGINE_REGISTRY
 from app.browser.manager import browser_manager, detect_playwright_capabilities
 from app.core.config import get_settings
 from app.core.security import mask_credential_ref
@@ -12,8 +13,10 @@ from app.providers.base import ProviderRequest
 from app.providers.router import provider_router
 from app.schemas.common import (
     BrowserCreateRequest,
+    BrowserExtractTextRequest,
     BrowserLaunchRequest,
     BrowserNavigateRequest,
+    BrowserWorkflowRequest,
     ProviderCreateOrUpdate,
     ProviderTestRequest,
     ProviderUsageResponse,
@@ -205,6 +208,14 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/providers/sessions/recover")
+async def recover_degraded_provider_sessions(
+    user: User = Depends(require_role("admin", "operator")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await provider_router.recover_degraded_sessions(db)
+
+
 @router.get("/browsers/capabilities")
 async def browser_capabilities():
     return detect_playwright_capabilities()
@@ -272,6 +283,55 @@ async def navigate_browser(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return _serialize_browser(updated)
+
+
+@router.post("/browsers/{profile_id}/workflow")
+async def execute_browser_workflow(
+    profile_id: str,
+    body: BrowserWorkflowRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await db.get(BrowserProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Browser profile not found")
+    engine = BROWSER_ENGINE_REGISTRY.get(body.engine)
+    if engine is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported browser workflow engine '{body.engine}'.")
+    workflow_actor = user.email
+    if body.agent_id is not None:
+        if body.agent_id != profile.agent_id:
+            raise HTTPException(status_code=403, detail="Agent ID does not match the browser profile")
+        workflow_actor = body.agent_id
+    try:
+        result = await engine.execute_workflow(
+            db,
+            profile,
+            body.steps,
+            manager=browser_manager,
+            actor=workflow_actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if result.get("status") == "rejected":
+        raise HTTPException(status_code=400, detail=result.get("reason") or "Workflow rejected by browser policy")
+    return result
+
+
+@router.post("/browsers/{profile_id}/extract-text")
+async def extract_browser_text(
+    profile_id: str,
+    body: BrowserExtractTextRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await db.get(BrowserProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Browser profile not found")
+    try:
+        return await browser_manager.extract_text(db, profile, body.selector, max_chars=body.max_chars)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @router.post("/browsers/{profile_id}/stop")

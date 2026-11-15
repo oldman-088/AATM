@@ -617,6 +617,84 @@ class GitHubClient:
             "output": out,
         }
 
+    def comment_on_pull_request(
+        self,
+        repo: str,
+        pr_number: int,
+        body: str,
+        event: str = "COMMENT",
+        approval: Any | None = None,
+        allowed_repos: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        """Post a PR comment or review after allowlist and approval checks."""
+        ok_repo, repo_or_err = self.validate_repo(repo, allowed_repos=allowed_repos)
+        if not ok_repo:
+            return {
+                "ok": False,
+                "allowed": False,
+                "repo": sanitize_cli_output(repo),
+                "pr_number": pr_number,
+                "error": repo_or_err,
+                "reason": repo_or_err,
+            }
+        repo = repo_or_err
+
+        if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
+            msg = "Pull request number must be a positive integer."
+            return {"ok": False, "allowed": False, "repo": repo, "error": msg, "reason": msg}
+
+        clean_event = str(event or "").strip().upper()
+        if clean_event not in {"COMMENT", "APPROVE", "REQUEST_CHANGES"}:
+            msg = "Event must be COMMENT, APPROVE, or REQUEST_CHANGES."
+            return {"ok": False, "allowed": False, "repo": repo, "pr_number": pr_number, "error": msg, "reason": msg}
+
+        clean_body = str(body or "").strip()
+        if not clean_body:
+            msg = "Pull request comment or review body is required."
+            return {"ok": False, "allowed": False, "repo": repo, "pr_number": pr_number, "event": clean_event, "error": msg, "reason": msg}
+
+        approved, reason, approval_id = verify_approval(approval, repo=repo)
+        if not approved:
+            return {
+                "ok": False,
+                "allowed": False,
+                "repo": repo,
+                "pr_number": pr_number,
+                "event": clean_event,
+                "approval_id": approval_id,
+                "error": reason,
+                "reason": reason,
+            }
+
+        if clean_event == "COMMENT":
+            args = ["pr", "comment", str(pr_number), "--repo", repo, "--body", clean_body]
+        else:
+            review_flag = "--approve" if clean_event == "APPROVE" else "--request-changes"
+            args = ["pr", "review", str(pr_number), "--repo", repo, review_flag, "--body", clean_body]
+
+        rc, output = self._run_gh(args)
+        if rc != 0:
+            return {
+                "ok": False,
+                "allowed": True,
+                "repo": repo,
+                "pr_number": pr_number,
+                "event": clean_event,
+                "approval_id": approval_id,
+                "error": sanitize_cli_output(output),
+                "reason": sanitize_cli_output(output),
+            }
+
+        return {
+            "ok": True,
+            "allowed": True,
+            "repo": repo,
+            "pr_number": pr_number,
+            "event": clean_event,
+            "approval_id": approval_id,
+            "output": sanitize_cli_output(output),
+        }
+
     def create_issue(
         self,
         repo: str,
