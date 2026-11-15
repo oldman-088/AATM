@@ -1,7 +1,18 @@
+import re
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+_CREDENTIAL_REF_PATTERN = re.compile(r"env:[A-Z_][A-Z0-9_]*")
+CREDENTIAL_REF_ERROR = "credential_ref must reference an environment variable (env:NAME); inline credentials are not accepted."
+
+
+def validate_credential_ref(value: str | None) -> str | None:
+    """Validate an environment-variable credential reference without echoing its value on failure."""
+    if value is not None and _CREDENTIAL_REF_PATTERN.fullmatch(value) is None:
+        raise ValueError(CREDENTIAL_REF_ERROR)
+    return value
 
 
 class LoginRequest(BaseModel):
@@ -85,7 +96,10 @@ class ProviderCreateOrUpdate(BaseModel):
     name: str
     provider_type: str = Field(pattern="^(arena_local_bridge|arena_agent|anthropic_claude)$")
     endpoint_url: str | None = None
-    credential_ref: str | None = None
+    credential_ref: str | None = Field(
+        default=None,
+        description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",
+    )
     default_model: str
     available_models: list[str] = Field(default_factory=list)
     priority: int = 10
@@ -99,7 +113,10 @@ class ProviderAccountCreate(BaseModel):
     account_identifier: str
     allocation_mode: str = Field(default="hybrid", pattern="^(one_per_employee|shared|hybrid)$")
     max_employees: int = Field(default=5, ge=1, le=50)
-    credential_ref: str | None = "env:ARENA_SESSION_TOKEN"
+    credential_ref: str | None = Field(
+        default="env:ARENA_SESSION_TOKEN",
+        description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",
+    )
 
 
 class ProviderTestRequest(BaseModel):
@@ -218,6 +235,29 @@ class ApprovalCreate(BaseModel):
 class ApprovalDecision(BaseModel):
     decision: str = Field(pattern="^(approved|rejected)$")
     review_note: str | None = None
+
+
+class _GitHubWriteApprovalRequest(BaseModel):
+    approval_id: str = Field(
+        min_length=1,
+        description="ID of an approved governance request; integrations must verify approval before writing.",
+    )
+    repo: str = Field(pattern=r"^[^/\s]+/[^/\s]+$", description="GitHub repository in owner/name form.")
+
+
+class GitHubPRCreateRequest(_GitHubWriteApprovalRequest):
+    title: str = Field(min_length=1, max_length=256)
+    body: str = ""
+    head: str = Field(min_length=1)
+    base: str = Field(default="main", min_length=1)
+    draft: bool = False
+
+
+class GitHubIssueCreateRequest(_GitHubWriteApprovalRequest):
+    title: str = Field(min_length=1, max_length=256)
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    assignees: list[str] = Field(default_factory=list)
 
 
 class GitWorkflowCreate(BaseModel):

@@ -16,6 +16,7 @@ from app.schemas.common import (
     BrowserNavigateRequest,
     ProviderCreateOrUpdate,
     ProviderTestRequest,
+    validate_credential_ref,
 )
 
 router = APIRouter(tags=["providers-browsers"])
@@ -73,6 +74,11 @@ async def upsert_provider(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    try:
+        validate_credential_ref(body.credential_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
     pid = body.id or body.name.lower().replace(" ", "-")
     existing = await db.get(AIProvider, pid)
     if existing:
@@ -249,7 +255,10 @@ async def navigate_browser(
     bp = await db.get(BrowserProfile, profile_id)
     if not bp:
         raise HTTPException(status_code=404, detail="Browser profile not found")
-    updated = await browser_manager.navigate_profile(db, bp, body.url, body.title)
+    try:
+        updated = await browser_manager.navigate_profile(db, bp, body.url, body.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     return _serialize_browser(updated)
 
 
