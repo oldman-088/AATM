@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,6 +16,7 @@ from app.providers.base import (
     ProviderHealth,
     ProviderRequest,
     ProviderResponse,
+    ProviderStreamChunk,
     validate_credential_ref,
 )
 
@@ -135,12 +137,38 @@ class ProviderRouter:
                 return requested_model
         return provider.default_model
 
+    @staticmethod
+    def _update_session_health(
+        employee_session: ProviderSession | None,
+        *,
+        success: bool,
+        error_message: str | None,
+        bridge_offline: bool,
+        is_dry_or_diag: bool,
+    ) -> None:
+        if employee_session is None or is_dry_or_diag:
+            return
+        if success:
+            employee_session.message_count += 1
+            employee_session.last_message_at = utcnow()
+            employee_session.last_error = None
+            employee_session.health_score = min(100.0, round(float(employee_session.health_score) + 10.0, 2))
+            if employee_session.status == "degraded" and employee_session.health_score >= 60.0:
+                employee_session.status = "active"
+        else:
+            penalty = 5.0 if bridge_offline else 15.0
+            employee_session.error_count += 1
+            employee_session.last_error = error_message
+            employee_session.health_score = max(0.0, round(float(employee_session.health_score) - penalty, 2))
+            if employee_session.health_score < 50.0 and employee_session.status == "active":
+                employee_session.status = "degraded"
+
     async def _resolve_employee_session_context(
         self,
         db: AsyncSession,
         req: ProviderRequest,
     ) -> tuple[dict[str, Any], ProviderSession | None]:
-        """Resolve per-employee ProviderSession.id & account_id into request metadata without overwriting explicit overrides."""
+        """Resolve per-employee ProviderSession.id & account_id into request metadata, rejecting cross-account overrides."""
         merged_meta: dict[str, Any] = dict(req.metadata or {})
         session: ProviderSession | None = None
         agent: Agent | None = None
@@ -149,9 +177,20 @@ class ProviderRouter:
             merged_meta.setdefault("agent_id", req.agent_id)
             agent = await db.get(Agent, req.agent_id)
 
-        explicit_session_id = merged_meta.get("session_id")
+        explicit_session_id = str(merged_meta.get("session_id") or "").strip() or None
+        explicit_account_id = str(merged_meta.get("account_id") or "").strip() or None
+
         if explicit_session_id:
-            session = await db.get(ProviderSession, str(explicit_session_id))
+            session = await db.get(ProviderSession, explicit_session_id)
+            if session is not None:
+                if agent and agent.provider_account_id and session.account_id and session.account_id != agent.provider_account_id:
+                    raise ValueError(
+                        f"Cross-account session override denied: session '{explicit_session_id}' belongs to account '{session.account_id}', not employee '{agent.id}' account '{agent.provider_account_id}'."
+                    )
+                if explicit_account_id and session.account_id and session.account_id != explicit_account_id:
+                    raise ValueError(
+                        f"Cross-account session override denied: session '{explicit_session_id}' belongs to account '{session.account_id}', not requested account '{explicit_account_id}'."
+                    )
         elif agent and agent.provider_session_id:
             session = await db.get(ProviderSession, agent.provider_session_id)
         elif req.agent_id:
@@ -189,7 +228,21 @@ class ProviderRouter:
         if preferred_provider_id:
             providers.sort(key=lambda p: (0 if p.id == preferred_provider_id else 1, p.priority))
 
-        session_meta, employee_session = await self._resolve_employee_session_context(db, req)
+        try:
+            session_meta, employee_session = await self._resolve_employee_session_context(db, req)
+        except ValueError as exc:
+            return ProviderResponse(
+                provider_id=preferred_provider_id or "none",
+                model=req.model or "none",
+                content="",
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost_usd=0.0,
+                latency_ms=0.0,
+                success=False,
+                error_message=str(exc),
+                metadata={"cross_account_denied": True},
+            )
 
         last_err = "No enabled AI providers available."
         budget_blocked = False
@@ -260,16 +313,13 @@ class ProviderRouter:
             p.latency_ms = response.latency_ms
             p.last_checked_at = utcnow()
 
-            if employee_session is not None and not is_dry_or_diag:
-                if response.success:
-                    employee_session.message_count += 1
-                    employee_session.last_message_at = utcnow()
-                    employee_session.last_error = None
-                    employee_session.health_score = min(100.0, employee_session.health_score + 5.0)
-                elif not response.metadata.get("bridge_offline"):
-                    employee_session.error_count += 1
-                    employee_session.last_error = response.error_message
-                    employee_session.health_score = max(0.0, employee_session.health_score - 10.0)
+            self._update_session_health(
+                employee_session,
+                success=response.success,
+                error_message=response.error_message,
+                bridge_offline=bool(response.metadata.get("bridge_offline")),
+                is_dry_or_diag=is_dry_or_diag,
+            )
 
             await db.commit()
 
@@ -330,6 +380,202 @@ class ProviderRouter:
             success=False,
             error_message=last_err,
             metadata={"budget_exceeded": budget_blocked},
+        )
+
+    async def route_and_stream(
+        self,
+        db: AsyncSession,
+        req: ProviderRequest,
+        preferred_provider_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamChunk]:
+        """Route streaming completion requests across providers with spend caps, cross-account isolation & failover."""
+        res = await db.execute(
+            select(AIProvider).where(AIProvider.is_enabled.is_(True)).order_by(AIProvider.priority.asc())
+        )
+        providers = list(res.scalars().all())
+        if preferred_provider_id:
+            providers.sort(key=lambda p: (0 if p.id == preferred_provider_id else 1, p.priority))
+
+        try:
+            session_meta, employee_session = await self._resolve_employee_session_context(db, req)
+        except ValueError as exc:
+            yield ProviderStreamChunk(
+                provider_id=preferred_provider_id or "none",
+                model=req.model or "none",
+                delta="",
+                done=True,
+                finish_reason="error",
+                success=False,
+                error_message=str(exc),
+                metadata={"cross_account_denied": True},
+            )
+            return
+
+        last_err = "No enabled AI providers available."
+        budget_blocked = False
+        non_offline_failure = False
+        offline_fallback_candidate: tuple[AIProvider, str, str] | None = None
+
+        for p in providers:
+            cred_ok, cred_err = validate_credential_ref(p.credential_ref)
+            if not cred_ok:
+                p.health_status = "degraded"
+                p.last_checked_at = utcnow()
+                await db.commit()
+                last_err = f"Provider {p.id}: {cred_err}"
+                non_offline_failure = True
+                continue
+
+            if not req.dry_run:
+                within_budget, budget_err = await self.check_spend_caps(db, p)
+                if not within_budget:
+                    last_err = budget_err or last_err
+                    budget_blocked = True
+                    non_offline_failure = True
+                    continue
+
+            effective_model = self._select_model(p, req.model)
+            attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
+            adapter = build_adapter(
+                p.provider_type,
+                p.id,
+                p.endpoint_url,
+                p.credential_ref,
+                effective_model,
+            )
+
+            emitted_any = False
+            terminal_chunk: ProviderStreamChunk | None = None
+            async for chunk in adapter.generate_stream(attempt_req):
+                for key in ("session_id", "account_id", "conversation_id"):
+                    if key in session_meta and key not in chunk.metadata:
+                        chunk.metadata[key] = session_meta[key]
+                if not chunk.done:
+                    emitted_any = True
+                    yield chunk
+                else:
+                    terminal_chunk = chunk
+
+            if terminal_chunk is None:
+                terminal_chunk = ProviderStreamChunk(
+                    provider_id=p.id,
+                    model=effective_model,
+                    done=True,
+                    finish_reason="error",
+                    success=False,
+                    error_message=f"Provider {p.id} terminated stream without completion frame.",
+                    metadata={"stream": True, **session_meta},
+                )
+
+            is_dry_or_diag = bool(req.dry_run or terminal_chunk.metadata.get("dry_run"))
+            recorded_cost = 0.0 if is_dry_or_diag else terminal_chunk.estimated_cost_usd
+            confirmed_cost = (
+                recorded_cost
+                if (terminal_chunk.success and terminal_chunk.metadata.get("confirmed_usage") and not is_dry_or_diag)
+                else None
+            )
+
+            db.add(
+                ProviderUsageLog(
+                    provider_id=p.id,
+                    agent_id=req.agent_id,
+                    task_id=req.task_id,
+                    model_name=terminal_chunk.model,
+                    input_tokens=terminal_chunk.input_tokens,
+                    output_tokens=terminal_chunk.output_tokens,
+                    estimated_cost_usd=recorded_cost,
+                    confirmed_cost_usd=confirmed_cost,
+                    latency_ms=terminal_chunk.latency_ms,
+                    success=terminal_chunk.success,
+                    error_message=terminal_chunk.error_message,
+                )
+            )
+            if terminal_chunk.metadata.get("bridge_offline"):
+                p.health_status = "offline"
+            else:
+                p.health_status = "healthy" if terminal_chunk.success else "degraded"
+            p.latency_ms = terminal_chunk.latency_ms
+            p.last_checked_at = utcnow()
+
+            self._update_session_health(
+                employee_session,
+                success=terminal_chunk.success,
+                error_message=terminal_chunk.error_message,
+                bridge_offline=bool(terminal_chunk.metadata.get("bridge_offline")),
+                is_dry_or_diag=is_dry_or_diag,
+            )
+            await db.commit()
+
+            await event_bus.emit(
+                "provider.usage",
+                {
+                    "provider_id": p.id,
+                    "model": terminal_chunk.model,
+                    "success": terminal_chunk.success,
+                    "cost_usd": recorded_cost,
+                    "stream": True,
+                    "session_id": session_meta.get("session_id"),
+                    "account_id": session_meta.get("account_id"),
+                },
+            )
+
+            if terminal_chunk.success or emitted_any:
+                yield terminal_chunk
+                return
+
+            last_err = terminal_chunk.error_message or last_err
+            if terminal_chunk.metadata.get("bridge_offline"):
+                if offline_fallback_candidate is None:
+                    offline_fallback_candidate = (p, effective_model, last_err)
+            else:
+                non_offline_failure = True
+
+        if req.allow_diagnostic_fallback and offline_fallback_candidate is not None and not non_offline_failure:
+            offline_provider, offline_model, offline_reason = offline_fallback_candidate
+            in_tok = BaseProviderAdapter.estimate_tokens(req.system_prompt + req.prompt)
+            diag_content = (
+                f"[{offline_provider.id} | safe-diagnostic] Local bridge unavailable ({offline_reason}). "
+                "Running in safe zero-spend diagnostic mode until the bridge daemon is started."
+            )
+            diag_meta = {
+                "mode": "bridge_offline_diagnostic",
+                "dry_run": True,
+                "stream": True,
+                "bridge_offline": True,
+                "original_error": offline_reason,
+                **{k: session_meta[k] for k in ("session_id", "account_id", "conversation_id") if k in session_meta},
+            }
+            yield ProviderStreamChunk(
+                provider_id=offline_provider.id,
+                model=offline_model,
+                delta=diag_content,
+                done=False,
+                metadata=diag_meta,
+            )
+            yield ProviderStreamChunk(
+                provider_id=offline_provider.id,
+                model=offline_model,
+                delta="",
+                done=True,
+                finish_reason="stop",
+                input_tokens=in_tok,
+                output_tokens=BaseProviderAdapter.estimate_tokens(diag_content),
+                estimated_cost_usd=0.0,
+                latency_ms=0.0,
+                success=True,
+                metadata=diag_meta,
+            )
+            return
+
+        yield ProviderStreamChunk(
+            provider_id="none",
+            model=req.model or "none",
+            delta="",
+            done=True,
+            finish_reason="error",
+            success=False,
+            error_message=last_err,
+            metadata={"budget_exceeded": budget_blocked, "stream": True},
         )
 
 

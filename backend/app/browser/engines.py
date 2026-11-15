@@ -1,10 +1,18 @@
+import asyncio
 import fnmatch
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 from urllib.parse import urlparse
 
-from app.browser.manager import detect_playwright_capabilities, validate_navigation_url, validate_selector
+from app.browser.manager import (
+    BrowserManager,
+    browser_manager,
+    detect_playwright_capabilities,
+    validate_navigation_url,
+    validate_selector,
+)
 
 MAX_USERSCRIPT_BYTES = 100_000
 
@@ -392,6 +400,19 @@ class OpenBrowserEngineAdapter(BaseBrowserEngineAdapter):
         return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "delegated_to": "playwright", "status": "executed"}
 
 
+EXECUTABLE_WORKFLOW_STEPS = {
+    "navigate",
+    "click",
+    "click_element",
+    "fill",
+    "fill_input",
+    "snapshot",
+    "capture_snapshot",
+    "wait",
+}
+MAX_WORKFLOW_WAIT_MS = 10_000
+
+
 class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
     """Validates and executes authorized step-based browser workflows without bundling external extensions."""
 
@@ -401,8 +422,243 @@ class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
         return {
             "engine": self.engine_name,
             "supports_workflow_json": True,
+            "supports_step_execution": True,
+            "supported_steps": sorted(EXECUTABLE_WORKFLOW_STEPS),
             "delegates_to": "playwright",
             "status": "ready",
+        }
+
+    @staticmethod
+    def _validate_workflow_steps(steps: Any, *, require_executable: bool = False) -> tuple[bool, str]:
+        if not isinstance(steps, list):
+            return False, "Workflow steps must be a list."
+
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                return False, f"Step {idx} must be an object."
+            step_type = str(step.get("type", "")).strip().lower()
+            for term in PROHIBITED_ACTION_TERMS:
+                if term in step_type:
+                    return False, f"Policy violation at step {idx}: prohibited step type '{step_type}'."
+            if require_executable and step_type not in EXECUTABLE_WORKFLOW_STEPS:
+                return (
+                    False,
+                    f"Unsupported executable workflow step '{step_type}' at index {idx}. Allowed: {sorted(EXECUTABLE_WORKFLOW_STEPS)}.",
+                )
+            if step.get("url") is not None:
+                try:
+                    validate_navigation_url(str(step["url"]))
+                except ValueError as exc:
+                    return False, f"Policy violation at step {idx}: {exc}"
+            if step.get("selector") is not None:
+                try:
+                    validate_selector(str(step["selector"]))
+                except ValueError as exc:
+                    return False, f"Policy violation at step {idx}: {exc}"
+            if require_executable:
+                if step_type == "navigate" and not step.get("url"):
+                    return False, f"Step {idx} ('navigate') requires a valid 'url'."
+                if step_type in ("click", "click_element") and not step.get("selector"):
+                    return False, f"Step {idx} ('{step_type}') requires a valid 'selector'."
+                if step_type in ("fill", "fill_input") and (not step.get("selector") or "value" not in step):
+                    return False, f"Step {idx} ('{step_type}') requires 'selector' and 'value'."
+            inline_code = step.get("code") or step.get("script")
+            if inline_code:
+                patterns = step.get("match_patterns") or ([step["url"]] if step.get("url") else [])
+                code_ok, code_msg = validate_userscript_policy(str(inline_code), patterns)
+                if not code_ok:
+                    return False, f"Policy violation at step {idx}: {code_msg}"
+
+        return True, "ok"
+
+    async def execute_workflow(
+        self,
+        db: Any,
+        profile: Any,
+        steps: list[dict[str, Any]],
+        *,
+        manager: BrowserManager | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        """Validate all steps fail-closed, then execute sequentially against BrowserManager with redacted step traces."""
+        ok, msg = self._validate_workflow_steps(steps, require_executable=True)
+        if not ok:
+            return {
+                "engine": self.engine_name,
+                "profile_id": profile.id,
+                "status": "rejected",
+                "reason": msg,
+                "steps_total": len(steps) if isinstance(steps, list) else 0,
+                "steps_validated": 0,
+                "steps_completed": 0,
+                "trace": [],
+            }
+
+        mgr = manager or browser_manager
+        trace: list[dict[str, Any]] = []
+        wf_t0 = time.perf_counter()
+
+        for idx, step in enumerate(steps):
+            step_type = str(step.get("type", "")).strip().lower()
+            step_t0 = time.perf_counter()
+            try:
+                if step_type == "navigate":
+                    url = str(step["url"])
+                    updated = await mgr.navigate_profile(db, profile, url)
+                    elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    live = profile.id in mgr._active_contexts
+                    trace.append(
+                        {
+                            "step_index": idx,
+                            "type": "navigate",
+                            "status": "completed",
+                            "elapsed_ms": elapsed_ms,
+                            "engine_mode": "playwright" if live else "headless_fallback",
+                            "executed_live": live,
+                            "url": updated.current_url,
+                        }
+                    )
+                elif step_type in ("click", "click_element"):
+                    res = await mgr.click_element(
+                        db,
+                        profile,
+                        str(step["selector"]),
+                        actor=actor,
+                        timeout_ms=int(step.get("timeout_ms", 5_000)),
+                    )
+                    elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    step_ok = bool(res.get("ok"))
+                    trace.append(
+                        {
+                            "step_index": idx,
+                            "type": "click_element",
+                            "status": "completed" if step_ok else "failed",
+                            "elapsed_ms": elapsed_ms,
+                            "engine_mode": res.get("engine_mode"),
+                            "executed_live": bool(res.get("executed_live")),
+                            "selector": res.get("selector"),
+                            **({"error": res["error"]} if not step_ok and res.get("error") else {}),
+                        }
+                    )
+                    if not step_ok:
+                        return {
+                            "engine": self.engine_name,
+                            "profile_id": profile.id,
+                            "status": "failed",
+                            "reason": res.get("error", f"Step {idx} ('{step_type}') failed."),
+                            "steps_total": len(steps),
+                            "steps_validated": len(steps),
+                            "steps_completed": idx,
+                            "total_elapsed_ms": round((time.perf_counter() - wf_t0) * 1000, 2),
+                            "trace": trace,
+                        }
+                elif step_type in ("fill", "fill_input"):
+                    res = await mgr.fill_input(
+                        db,
+                        profile,
+                        str(step["selector"]),
+                        str(step["value"]),
+                        actor=actor,
+                        timeout_ms=int(step.get("timeout_ms", 5_000)),
+                    )
+                    elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    step_ok = bool(res.get("ok"))
+                    trace.append(
+                        {
+                            "step_index": idx,
+                            "type": "fill_input",
+                            "status": "completed" if step_ok else "failed",
+                            "elapsed_ms": elapsed_ms,
+                            "engine_mode": res.get("engine_mode"),
+                            "executed_live": bool(res.get("executed_live")),
+                            "selector": res.get("selector"),
+                            "value_length": res.get("value_length"),
+                            "redacted": True,
+                            **({"error": res["error"]} if not step_ok and res.get("error") else {}),
+                        }
+                    )
+                    if not step_ok:
+                        return {
+                            "engine": self.engine_name,
+                            "profile_id": profile.id,
+                            "status": "failed",
+                            "reason": res.get("error", f"Step {idx} ('{step_type}') failed."),
+                            "steps_total": len(steps),
+                            "steps_validated": len(steps),
+                            "steps_completed": idx,
+                            "total_elapsed_ms": round((time.perf_counter() - wf_t0) * 1000, 2),
+                            "trace": trace,
+                        }
+                elif step_type in ("snapshot", "capture_snapshot"):
+                    res = await mgr.capture_snapshot(
+                        db,
+                        profile,
+                        actor=actor,
+                        full_page=bool(step.get("full_page", False)),
+                    )
+                    elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    trace.append(
+                        {
+                            "step_index": idx,
+                            "type": "capture_snapshot",
+                            "status": "completed",
+                            "elapsed_ms": elapsed_ms,
+                            "engine_mode": res.get("engine_mode"),
+                            "executed_live": bool(res.get("executed_live")),
+                            "format": res.get("format"),
+                            "screenshot_bytes": res.get("screenshot_bytes", 0),
+                        }
+                    )
+                elif step_type == "wait":
+                    raw_ms = step.get("ms", step.get("duration_ms", 0))
+                    try:
+                        bounded_ms = min(max(0, int(raw_ms)), MAX_WORKFLOW_WAIT_MS)
+                    except (TypeError, ValueError):
+                        bounded_ms = 0
+                    if bounded_ms > 0:
+                        await asyncio.sleep(bounded_ms / 1000.0)
+                    elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                    trace.append(
+                        {
+                            "step_index": idx,
+                            "type": "wait",
+                            "status": "completed",
+                            "elapsed_ms": elapsed_ms,
+                            "wait_ms": bounded_ms,
+                        }
+                    )
+            except Exception as exc:
+                elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
+                trace.append(
+                    {
+                        "step_index": idx,
+                        "type": step_type,
+                        "status": "failed",
+                        "elapsed_ms": elapsed_ms,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                return {
+                    "engine": self.engine_name,
+                    "profile_id": profile.id,
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "steps_total": len(steps),
+                    "steps_validated": len(steps),
+                    "steps_completed": idx,
+                    "total_elapsed_ms": round((time.perf_counter() - wf_t0) * 1000, 2),
+                    "trace": trace,
+                }
+
+        return {
+            "engine": self.engine_name,
+            "profile_id": profile.id,
+            "status": "completed",
+            "steps_total": len(steps),
+            "steps_validated": len(steps),
+            "steps_completed": len(steps),
+            "total_elapsed_ms": round((time.perf_counter() - wf_t0) * 1000, 2),
+            "trace": trace,
         }
 
     async def execute_action(self, profile_id: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -411,52 +667,18 @@ class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
             return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
 
         steps = params.get("steps", [])
-        if not isinstance(steps, list):
-            return {"engine": self.engine_name, "profile_id": profile_id, "status": "rejected", "reason": "Workflow steps must be a list."}
+        if "db" in params and "profile" in params:
+            return await self.execute_workflow(
+                params["db"],
+                params["profile"],
+                steps,
+                manager=params.get("manager"),
+                actor=str(params.get("actor") or "system"),
+            )
 
-        for idx, step in enumerate(steps):
-            if not isinstance(step, dict):
-                return {"engine": self.engine_name, "profile_id": profile_id, "status": "rejected", "reason": f"Step {idx} must be an object."}
-            step_type = str(step.get("type", "")).lower()
-            for term in PROHIBITED_ACTION_TERMS:
-                if term in step_type:
-                    return {
-                        "engine": self.engine_name,
-                        "profile_id": profile_id,
-                        "status": "rejected",
-                        "reason": f"Policy violation at step {idx}: prohibited step type '{step_type}'.",
-                    }
-            if step.get("url"):
-                try:
-                    validate_navigation_url(str(step["url"]))
-                except ValueError as exc:
-                    return {
-                        "engine": self.engine_name,
-                        "profile_id": profile_id,
-                        "status": "rejected",
-                        "reason": f"Policy violation at step {idx}: {exc}",
-                    }
-            if step.get("selector"):
-                try:
-                    validate_selector(str(step["selector"]))
-                except ValueError as exc:
-                    return {
-                        "engine": self.engine_name,
-                        "profile_id": profile_id,
-                        "status": "rejected",
-                        "reason": f"Policy violation at step {idx}: {exc}",
-                    }
-            inline_code = step.get("code") or step.get("script")
-            if inline_code:
-                patterns = step.get("match_patterns") or ([step["url"]] if step.get("url") else [])
-                code_ok, code_msg = validate_userscript_policy(str(inline_code), patterns)
-                if not code_ok:
-                    return {
-                        "engine": self.engine_name,
-                        "profile_id": profile_id,
-                        "status": "rejected",
-                        "reason": f"Policy violation at step {idx}: {code_msg}",
-                    }
+        steps_ok, steps_msg = self._validate_workflow_steps(steps, require_executable=False)
+        if not steps_ok:
+            return {"engine": self.engine_name, "profile_id": profile_id, "status": "rejected", "reason": steps_msg}
 
         return {
             "engine": self.engine_name,

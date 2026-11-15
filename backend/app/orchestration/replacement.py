@@ -2,7 +2,7 @@ import logging
 import shutil
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.manager import browser_manager
@@ -117,6 +117,10 @@ class ReplacementAndEmergencyService:
                 )
             )
 
+        failing_name = failing.name
+        replacement_id = replacement.id
+        replacement_name = replacement.name
+
         failing.status = "offline"
         failing.current_task_id = None
         replacement.last_heartbeat = utcnow()
@@ -124,6 +128,7 @@ class ReplacementAndEmergencyService:
             replacement.current_task_id = transferred_tasks[0]
 
         bridge_cleanup = await self._cleanup_bridge_session(db, failing)
+        stopped_browsers = await self._stop_employee_browsers(db, failing, actor=actor)
 
         db.add(
             AuditLog(
@@ -132,21 +137,26 @@ class ReplacementAndEmergencyService:
                 resource_type="agent",
                 resource_id=failing_agent_id,
                 details={
-                    "replacement_id": replacement.id,
+                    "replacement_id": replacement_id,
                     "transferred_tasks": transferred_tasks,
                     "transferred_files": transferred_files,
                     "reason": reason,
                     "bridge_session_cleanup": bridge_cleanup,
+                    "stopped_browsers": stopped_browsers,
                 },
                 severity="warning",
             )
         )
+        browser_note = f" Stopped {len(stopped_browsers)} browser profile(s)." if stopped_browsers else ""
         db.add(
             Notification(
                 category="replacement",
                 severity="warning",
-                title=f"Smart Replacement: {failing.name} -> {replacement.name}",
-                message=f"Transferred {len(transferred_tasks)} task(s) and {len(transferred_files)} workspace file(s).",
+                title=f"Smart Replacement: {failing_name} -> {replacement_name}",
+                message=(
+                    f"Transferred {len(transferred_tasks)} task(s) and {len(transferred_files)} workspace file(s)."
+                    + browser_note
+                ),
                 link="/agents",
             )
         )
@@ -155,18 +165,57 @@ class ReplacementAndEmergencyService:
             "employee.replaced",
             {
                 "from": failing_agent_id,
-                "to": replacement.id,
+                "to": replacement_id,
                 "tasks": transferred_tasks,
                 "bridge_session_cleanup": bridge_cleanup,
+                "stopped_browsers": stopped_browsers,
             },
         )
         return {
             "replaced_employee": failing_agent_id,
-            "replacement_employee": replacement.id,
+            "replacement_employee": replacement_id,
             "transferred_tasks": transferred_tasks,
             "transferred_files": transferred_files,
             "bridge_session_cleanup": bridge_cleanup,
+            "stopped_browsers": stopped_browsers,
         }
+
+    async def _stop_employee_browsers(
+        self,
+        db: AsyncSession,
+        failing: Agent,
+        *,
+        actor: str,
+    ) -> list[str]:
+        """Stop any running BrowserProfile owned or locked by the replaced employee to release .aatm.lock and contexts."""
+        ownership_filters = [
+            BrowserProfile.agent_id == failing.id,
+            BrowserProfile.lock_owner == failing.id,
+        ]
+        if failing.browser_profile_id:
+            ownership_filters.append(BrowserProfile.id == failing.browser_profile_id)
+
+        bp_res = await db.execute(
+            select(BrowserProfile).where(
+                BrowserProfile.status == "running",
+                or_(*ownership_filters),
+            )
+        )
+        running_profiles = list(bp_res.scalars().all())
+        stopped_ids: list[str] = []
+        for bp in running_profiles:
+            bp_id = bp.id
+            try:
+                await browser_manager.stop_profile(db, bp, actor=actor)
+                stopped_ids.append(bp_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort browser lock cleanup must never abort replacement
+                logger.warning(
+                    "Best-effort browser stop failed for agent=%s profile=%s: %s",
+                    failing.id,
+                    bp_id,
+                    type(exc).__name__,
+                )
+        return stopped_ids
 
     async def _cleanup_bridge_session(
         self,
