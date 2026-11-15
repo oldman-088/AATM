@@ -66,7 +66,7 @@ SCAN_EXTENSIONS: tuple[str, ...] = (
     ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
     ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
     ".env", ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".conf", ".properties",
-    ".txt", ".sql", ".html", ".xml",
+    ".txt", ".md", ".sql", ".html", ".xml",
 )
 
 # Directories that hold generated/local state and must never be scanned or committed.

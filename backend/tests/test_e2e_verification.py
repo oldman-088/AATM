@@ -33,14 +33,25 @@ from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
 @pytest.fixture(scope="session", autouse=True)
 async def _preserve_alembic_version_stamp():
     yield
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
     from sqlalchemy import text
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    alembic_cfg = Config(str(backend_dir / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+    head_rev = ScriptDirectory.from_config(alembic_cfg).get_current_head()
 
     async with engine.begin() as conn:
         await conn.execute(
             text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
         )
         await conn.execute(text("DELETE FROM alembic_version"))
-        await conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('ee92483cefa3')"))
+        if head_rev:
+            await conn.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:rev)"),
+                {"rev": head_rev},
+            )
 
 
 @pytest.fixture(scope="module")
@@ -978,4 +989,216 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
     assert ant_secret not in err_res["error"]
     assert "[REDACTED]" in err_res["error"]
     assert gh_secret not in sanitize_cli_output(f"Authorization: Bearer {gh_secret}")
+
+
+# --------------------------------------------------------------------------------------
+# 8. Increment 5: CI/Templates, Security Policy, Device Revocation & Bridge Cleanup
+# --------------------------------------------------------------------------------------
+async def test_e2e_github_ci_templates_and_security_policy_scan_clean():
+    settings = get_settings()
+    root = Path(settings.REPO_ROOT)
+
+    ci_workflow = root / ".github" / "workflows" / "ci.yml"
+    pr_template = root / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    issue_template = root / ".github" / "ISSUE_TEMPLATE" / "task.md"
+    security_policy = root / "docs" / "SECURITY_POLICY.md"
+
+    for artifact in (ci_workflow, pr_template, issue_template, security_policy):
+        assert artifact.is_file(), f"Required governance artifact missing: {artifact}"
+        assert artifact.stat().st_size > 100, f"Governance artifact unexpectedly empty: {artifact}"
+
+    ci_text = ci_workflow.read_text(encoding="utf-8")
+    for required_gate in (
+        "alembic upgrade head",
+        "ruff check backend",
+        "ruff check --config backend/pyproject.toml bridge",
+        "pytest -v",
+        "bridge/tests/test_bridge.py",
+        "app.qa.engine",
+        "npm run lint",
+        "npm test",
+        "npm run build",
+    ):
+        assert required_gate in ci_text, f"CI workflow missing gate: {required_gate}"
+
+    pr_text = pr_template.read_text(encoding="utf-8")
+    issue_text = issue_template.read_text(encoding="utf-8")
+    assert "AATM_MASTER_SPECIFICATION.md" in pr_text
+    assert "AGENTS.md" in pr_text
+    assert "AATM_MASTER_SPECIFICATION.md" in issue_text
+    assert "AGENTS.md" in issue_text
+
+    sec_text = security_policy.read_text(encoding="utf-8")
+    for topic in (
+        "Workspace Isolation",
+        "validate_credential_ref",
+        "sanitize_untrusted_content",
+        "ApprovalRequest",
+        "token_version",
+        "Emergency Stop",
+    ):
+        assert topic in sec_text, f"SECURITY_POLICY.md missing section/topic: {topic}"
+
+    scan = qa_engine.run_security_scan()
+    assert scan["status"] == "passed", f"Secret scanner reported findings: {scan['findings']}"
+    assert scan["findings"] == []
+
+
+async def test_e2e_device_token_revocation_halts_worker_daemon_on_401(
+    client, auth_headers, project_id, tmp_path
+):
+    await _cancel_all_queued(client, auth_headers)
+
+    reg = await client.post(
+        "/api/v1/devices",
+        headers=auth_headers,
+        json={
+            "id": "e2e-node-revoke-01",
+            "name": "E2E Revocation Node",
+            "device_type": "remote_server",
+            "host_address": "10.0.0.201",
+            "os_name": "Ubuntu 24.04",
+        },
+    )
+    assert reg.status_code == 201
+    token_v1 = reg.json()["device_token"]
+
+    daemon_transport = ASGITransport(app=app)
+    async with AsyncClient(transport=daemon_transport, base_url="http://e2e-node") as daemon_client:
+        daemon = WorkerDaemon(
+            WorkerConfig(
+                device_id="e2e-node-revoke-01",
+                device_name="E2E Revocation Node",
+                token=token_v1,
+                workspace_root=tmp_path / "e2e-node-revoke-01",
+                poll_seconds=0.001,
+            ),
+            client=daemon_client,
+        )
+        await daemon.register()
+        hb_ok = await daemon.heartbeat()
+        assert hb_ok["status"] == "online"
+        assert daemon.token_revoked is False
+
+        # Operator revokes the device token; token_version increments and v1 becomes invalid.
+        rev = await client.post("/api/v1/devices/e2e-node-revoke-01/revoke", headers=auth_headers)
+        assert rev.status_code == 200
+        token_v2 = rev.json()["device_token"]
+        assert token_v2 != token_v1
+        assert rev.json()["token_version"] >= 2
+
+        # Daemon with revoked v1 token must detect HTTP 401 on heartbeat/poll and stop polling cleanly.
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await daemon.run_once()
+        assert exc_info.value.response.status_code == 401
+        assert daemon.token_revoked is True
+        assert daemon.stop_reason is not None and "401" in daemon.stop_reason
+
+        # Starting run_forever with a revoked token also halts immediately without spinning 5 cycles.
+        daemon_loop = WorkerDaemon(
+            WorkerConfig(
+                device_id="e2e-node-revoke-01",
+                device_name="E2E Revocation Node",
+                token=token_v1,
+                workspace_root=tmp_path / "e2e-node-revoke-01",
+                poll_seconds=0.001,
+            ),
+            client=daemon_client,
+        )
+        await daemon_loop.run_forever(max_cycles=5)
+        assert daemon_loop.token_revoked is True
+        assert daemon_loop.stop_reason is not None and "401" in daemon_loop.stop_reason
+        assert daemon_loop.cycles_completed <= 1
+
+    # A fresh daemon configured with the rotated v2 token is accepted again.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://e2e-node") as daemon_client_v2:
+        daemon_v2 = WorkerDaemon(
+            WorkerConfig(
+                device_id="e2e-node-revoke-01",
+                device_name="E2E Revocation Node",
+                token=token_v2,
+                workspace_root=tmp_path / "e2e-node-revoke-01",
+                poll_seconds=0.001,
+            ),
+            client=daemon_client_v2,
+        )
+        hb_v2 = await daemon_v2.heartbeat()
+        assert hb_v2["status"] == "online"
+        assert daemon_v2.token_revoked is False
+
+
+async def test_e2e_smart_replacement_bridge_session_cleanup(
+    client, auth_headers, project_id, monkeypatch
+):
+    from app.models import ProviderSession
+    from app.providers.adapters import ArenaLocalBridgeAdapter
+
+    deleted_calls: list[tuple[str, str | None]] = []
+
+    async def _mock_delete_session_ok(self, session_id: str, account_id: str | None = None):
+        deleted_calls.append((session_id, account_id))
+        return {
+            "deleted": True,
+            "session_id": session_id,
+            "account_id": account_id,
+            "status": "deleted",
+            "bridge_reachable": True,
+        }
+
+    monkeypatch.setattr(ArenaLocalBridgeAdapter, "delete_session", _mock_delete_session_ok)
+
+    emp_bridge = (
+        await client.post(
+            "/api/v1/employees",
+            headers=auth_headers,
+            json={
+                "name": "E2E Bridge Employee",
+                "role_template_id": "backend_developer",
+                "provider_id": "arena-local-bridge",
+                "allocation_mode": "one_per_employee",
+                "create_browser_profile": False,
+            },
+        )
+    ).json()
+    old_session_id = emp_bridge["provider_session_id"]
+    assert old_session_id
+
+    rep = await client.post(f"/api/v1/employees/{emp_bridge['id']}/replace", headers=auth_headers)
+    assert rep.status_code == 200
+    rep_body = rep.json()
+    assert rep_body["bridge_session_cleanup"] is not None
+    assert rep_body["bridge_session_cleanup"]["deleted"] is True
+    assert rep_body["bridge_session_cleanup"]["session_id"] == old_session_id
+    assert any(sid == old_session_id for sid, _ in deleted_calls)
+
+    async with AsyncSessionLocal() as db:
+        closed_sess = await db.get(ProviderSession, old_session_id)
+        assert closed_sess is not None and closed_sess.status == "closed"
+
+    # When the local bridge is offline/unreachable, replacement must still succeed gracefully.
+    async def _mock_delete_session_offline(self, session_id: str, account_id: str | None = None):
+        raise RuntimeError("Bridge connection refused")
+
+    monkeypatch.setattr(ArenaLocalBridgeAdapter, "delete_session", _mock_delete_session_offline)
+
+    emp_offline = (
+        await client.post(
+            "/api/v1/employees",
+            headers=auth_headers,
+            json={
+                "name": "E2E Offline Bridge Employee",
+                "role_template_id": "backend_developer",
+                "provider_id": "arena-local-bridge",
+                "allocation_mode": "one_per_employee",
+                "create_browser_profile": False,
+            },
+        )
+    ).json()
+    rep_offline = await client.post(f"/api/v1/employees/{emp_offline['id']}/replace", headers=auth_headers)
+    assert rep_offline.status_code == 200
+    cleanup_offline = rep_offline.json()["bridge_session_cleanup"]
+    assert cleanup_offline is not None
+    assert cleanup_offline["deleted"] is False
+    assert cleanup_offline["bridge_reachable"] is False
+
 
