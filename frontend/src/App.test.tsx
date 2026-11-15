@@ -561,3 +561,60 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     await settle()
   })
 })
+
+
+describe('Round 4 workflow and Git controls', () => {
+  beforeEach(() => { localStorage.clear(); localStorage.setItem('aatm_jwt_token', 'test-jwt'); installWebSocketMock() })
+  afterEach(async () => { await settle() })
+
+  it('edits, reorders and submits a structured browser workflow with safe text output', async () => {
+    const { calls } = installFetchMock({ '/api/v1/browsers': [{ id: 'profile-1', name: 'Profile One', status: 'stopped', mode: 'background', current_url: 'about:blank' }] })
+    render(<App />)
+    fireEvent.click(navButton('Browsers & Userscripts'))
+    fireEvent.change(await screen.findByLabelText('Browser profile'), { target: { value: 'profile-1' } })
+    fireEvent.change(screen.getByLabelText('Engine'), { target: { value: 'automa' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add step' }))
+    fireEvent.change(screen.getByLabelText('URL 1'), { target: { value: 'https://example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add step' }))
+    fireEvent.change(screen.getByLabelText('Step type 2'), { target: { value: 'extract_text' } })
+    fireEvent.change(screen.getByLabelText('Selector 2'), { target: { value: 'h1' } })
+    fireEvent.click(screen.getByLabelText('Move up 2'))
+    fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/browsers/profile-1/workflow')?.body).toEqual({
+      engine: 'automa', steps: [{ type: 'extract_text', selector: 'h1' }, { type: 'navigate', url: 'https://example.com' }],
+    }))
+    expect(await screen.findByText('redacted result')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Remove step 1'))
+    expect(screen.queryByLabelText('Selector 1')).not.toBeInTheDocument()
+  })
+
+  it('creates and confirms removal of an agent worktree with authenticated requests', async () => {
+    const { calls } = installFetchMock()
+    render(<App />)
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.change(await screen.findByLabelText('Agent'), { target: { value: 'worker-1' } })
+    fireEvent.change(screen.getByLabelText('Worktree branch'), { target: { value: 'worker-1/task' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create Worktree' }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/git/worktrees' && c.method === 'POST')?.body).toEqual({ agent_id: 'worker-1', branch_name: 'worker-1/task', base_ref: 'HEAD' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Worktree' }))
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm removal' }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/git/worktrees/worker-1' && c.method === 'DELETE')?.authorization).toBe('Bearer test-jwt'))
+  })
+
+  it('requests approval and posts a PR comment', async () => {
+    const { calls } = installFetchMock({ '/api/v1/approvals': (_path: string, init: RequestInit) => (init.method || 'GET') === 'POST'
+      ? { id: 'comment-approval', status: 'pending' } : [{ id: 'comment-approval', status: 'approved' }] })
+    render(<App />)
+    fireEvent.click(navButton('GitHub Integration'))
+    fireEvent.click(await screen.findByRole('button', { name: 'PR Comment / Review' }))
+    fireEvent.change(screen.getByLabelText('PR number'), { target: { value: '12' } })
+    fireEvent.change(screen.getByLabelText('Comment body'), { target: { value: 'Looks good.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Request Approval' }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/approvals' && c.method === 'POST')?.body).toMatchObject({ action_type: 'merge', payload: { kind: 'comment', repo: 'oldman-088/AATM', pr_number: 12, body: 'Looks good.' } }))
+    await waitFor(() => expect(screen.getByText('Approval status: Approved')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Submit Comment' }))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/github/prs/12/comments')?.body).toEqual({ approval_id: 'comment-approval', repo: 'oldman-088/AATM', body: 'Looks good.' }))
+    expect(await screen.findByRole('link', { name: /issuecomment-1/ })).toBeInTheDocument()
+  })
+})

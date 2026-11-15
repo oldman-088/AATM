@@ -127,6 +127,15 @@ export const fixtures: Record<string, RouteValue> = {
     return []
   },
 
+  '/api/v1/employees/skill-gaps': { covered_skills: ['react'], missing_skills: ['python'], coverage_ratio: 0.5 },
+  '/api/v1/employees/provision-specialists': { provisioned_count: 1, provisioned_employees: [{ id: 'worker-9' }], after: { covered_skills: ['react', 'python'], missing_skills: [], coverage_ratio: 1 } },
+  '/api/v1/providers/sessions/recover': { recovered_count: 2, sessions: [] },
+  '/api/v1/git/worktrees': (path: string, init: RequestInit) => ({ ok: true, allowed: true, agent_id: path.split('/').pop(), method: init.method }),
+  '/api/v1/browsers/profile-1/workflow': { engine: 'automa', status: 'completed', steps_completed: 2, steps_total: 2, trace: [
+    { step_index: 0, type: 'extract_text', status: 'completed', text: 'redacted result', redacted_count: 0, engine_mode: 'playwright' },
+    { step_index: 1, type: 'navigate', status: 'completed', engine_mode: 'playwright' },
+  ] },
+  '/api/v1/github/prs/12/comments': { ok: true, allowed: true, url: 'https://github.com/oldman-088/AATM/pull/12#issuecomment-1' },
   '/api/v1/accounts': [],
   '/api/v1/sessions': [],
   '/api/v1/devices': (path: string, init: RequestInit) => {
