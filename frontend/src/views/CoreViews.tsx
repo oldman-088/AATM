@@ -364,6 +364,7 @@ export function TasksView({
   const [title, setTitle] = useState('')
   const [division, setDivision] = useState('D08')
   const [priority, setPriority] = useState('high')
+  const [executionMode, setExecutionMode] = useState('automatic')
 
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -375,6 +376,7 @@ export function TasksView({
         division_code: division,
         title,
         priority,
+        execution_mode: executionMode,
       }),
     })
     setTitle('')
@@ -400,7 +402,7 @@ export function TasksView({
       </div>
 
       <Card>
-        <form onSubmit={createTask} className="grid gap-3 md:grid-cols-4">
+        <form onSubmit={createTask} className="grid gap-3 md:grid-cols-5">
           <Input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -413,6 +415,11 @@ export function TasksView({
                 {d}
               </option>
             ))}
+          </Select>
+          <Select value={executionMode} onChange={(e) => setExecutionMode(e.target.value)}>
+            <option value="automatic">automatic</option>
+            <option value="manual">manual</option>
+            <option value="collaborative">collaborative</option>
           </Select>
           <div className="flex gap-2">
             <Select value={priority} onChange={(e) => setPriority(e.target.value)} className="flex-1">

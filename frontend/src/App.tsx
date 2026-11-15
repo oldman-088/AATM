@@ -5,6 +5,7 @@ import {
   Brain,
   CheckSquare,
   Cpu,
+  FolderCode,
   FolderGit2,
   Languages,
   LayoutDashboard,
@@ -13,6 +14,7 @@ import {
   LogOut,
   MessageSquare,
   Monitor,
+  OctagonAlert,
   ShieldCheck,
   SunMoon,
 } from 'lucide-react'
@@ -22,6 +24,16 @@ import { I18nProvider, useI18n } from './i18n/I18nContext'
 import type { Language } from './i18n/types'
 import { apiFetch } from './lib/api'
 import { AgentsView, DashboardView, ManagerChatView, TasksView } from './views/CoreViews'
+import {
+  AgentMessagingPanel,
+  ArenaAccountsSessionsPanel,
+  EmployeeCreatorAndOrgPanel,
+  MultiDeviceNodesPanel,
+  PromptInjectionGuardPanel,
+  SDLCIdeaExecutorPanel,
+  UserscriptsEnginesPanel,
+  WorkspacesView,
+} from './views/EnterpriseViews'
 import { ApprovalsAuditView, QAView, SettingsNotificationsView } from './views/GovernanceViews'
 import { BrowserWallView, GitWorkflowsView, ProjectsMemoryView, ProvidersView } from './views/InfraViews'
 
@@ -30,6 +42,7 @@ type NavTab =
   | 'chat'
   | 'agents'
   | 'tasks'
+  | 'workspaces'
   | 'browsers'
   | 'providers'
   | 'projects'
@@ -46,23 +59,28 @@ function AATMWorkspace() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('aatm_theme') === 'light' ? 'light' : 'dark'))
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
 
-  // Auth form state
   const [email, setEmail] = useState('admin@aatm.local')
   const [password, setPassword] = useState('aatm-admin-2026')
   const [showAuthModal, setShowAuthModal] = useState(false)
 
-  // Data state
   const [overview, setOverview] = useState<any>(null)
   const [agents, setAgents] = useState<any[]>([])
+  const [templates, setTemplates] = useState<any[]>([])
   const [tasks, setTasks] = useState<any[]>([])
+  const [agentMessages, setAgentMessages] = useState<any[]>([])
   const [projects, setProjects] = useState<any[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [memories, setMemories] = useState<any[]>([])
   const [chatMessages, setChatMessages] = useState<any[]>([])
   const [browsers, setBrowsers] = useState<any[]>([])
   const [browserCaps, setBrowserCaps] = useState<any>(null)
+  const [browserEngines, setBrowserEngines] = useState<any>(null)
+  const [userscripts, setUserscripts] = useState<any[]>([])
   const [providers, setProviders] = useState<any[]>([])
   const [providerUsage, setProviderUsage] = useState<any>(null)
+  const [accounts, setAccounts] = useState<any[]>([])
+  const [sessions, setSessions] = useState<any[]>([])
+  const [devices, setDevices] = useState<any[]>([])
   const [gitData, setGitData] = useState<any>(null)
   const [qaData, setQaData] = useState<any>(null)
   const [approvals, setApprovals] = useState<any[]>([])
@@ -77,16 +95,23 @@ function AATMWorkspace() {
 
   const loadAll = useCallback(async (memQuery = '') => {
     try {
-      const [ov, ag, tk, pr, ch, br, bc, pv, pu, gt, qa, ap, au, nf, mm] = await Promise.all([
+      const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, ap, au, nf, mm] = await Promise.all([
         apiFetch<any>('/dashboard/overview'),
         apiFetch<any[]>('/agents'),
+        apiFetch<any[]>('/employees/templates'),
         apiFetch<any[]>('/tasks'),
+        apiFetch<any[]>('/messages'),
         apiFetch<any[]>('/projects'),
         apiFetch<any[]>('/chat'),
         apiFetch<any[]>('/browsers'),
         apiFetch<any>('/browsers/capabilities'),
+        apiFetch<any>('/browsers/engines'),
+        apiFetch<any[]>('/userscripts'),
         apiFetch<any[]>('/providers'),
         apiFetch<any>('/providers/usage'),
+        apiFetch<any[]>('/accounts'),
+        apiFetch<any[]>('/sessions'),
+        apiFetch<any[]>('/devices'),
         apiFetch<any>('/git/status'),
         apiFetch<any>('/qa/summary'),
         apiFetch<any[]>('/approvals'),
@@ -96,14 +121,21 @@ function AATMWorkspace() {
       ])
       setOverview(ov)
       setAgents(ag)
+      setTemplates(tpl)
       setTasks(tk)
+      setAgentMessages(am)
       setProjects(pr)
       if (!activeProjectId && pr.length > 0) setActiveProjectId(pr[0].id)
       setChatMessages(ch)
       setBrowsers(br)
       setBrowserCaps(bc)
+      setBrowserEngines(be)
+      setUserscripts(us)
       setProviders(pv)
       setProviderUsage(pu)
+      setAccounts(ac)
+      setSessions(ss)
+      setDevices(dv)
       setGitData(gt)
       setQaData(qa)
       setApprovals(ap)
@@ -120,7 +152,6 @@ function AATMWorkspace() {
     loadAll()
   }, [loadAll])
 
-  // WebSocket live event subscription
   useEffect(() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${window.location.host}/ws/events`)
@@ -151,11 +182,30 @@ function AATMWorkspace() {
     }
   }
 
+  const anyEmergencyStopped = agents.some((a) => a.is_emergency_stopped)
+
+  const toggleEmergencyStop = async () => {
+    try {
+      if (anyEmergencyStopped) {
+        await apiFetch('/emergency-stop/clear', { method: 'POST' })
+      } else {
+        await apiFetch('/emergency-stop', {
+          method: 'POST',
+          body: JSON.stringify({ scope: 'global', reason: 'Operator clicked Emergency Stop in Command Center' }),
+        })
+      }
+      loadAll()
+    } catch (err: any) {
+      setErrorBanner(err?.message || 'Emergency control requires authentication')
+    }
+  }
+
   const navItems: Array<{ id: NavTab; label: string; icon: React.ReactNode }> = [
     { id: 'dashboard', label: t.nav.dashboard, icon: <LayoutDashboard className="h-4 w-4" /> },
     { id: 'chat', label: t.nav.chat, icon: <MessageSquare className="h-4 w-4" /> },
     { id: 'agents', label: t.nav.agents, icon: <Bot className="h-4 w-4" /> },
     { id: 'tasks', label: t.nav.tasks, icon: <ListTodo className="h-4 w-4" /> },
+    { id: 'workspaces', label: t.nav.workspaces, icon: <FolderCode className="h-4 w-4" /> },
     { id: 'browsers', label: t.nav.browsers, icon: <Monitor className="h-4 w-4" /> },
     { id: 'providers', label: t.nav.providers, icon: <Cpu className="h-4 w-4" /> },
     { id: 'projects', label: t.nav.projects, icon: <Brain className="h-4 w-4" /> },
@@ -169,12 +219,9 @@ function AATMWorkspace() {
 
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-100">
-      {/* Sidebar */}
       <aside className="hidden w-64 shrink-0 flex-col border-e border-slate-800 bg-slate-900/70 p-4 md:flex">
         <div className="mb-6 flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-600 font-bold text-white">
-            AA
-          </div>
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-600 font-bold text-white">AA</div>
           <div>
             <div className="text-base font-bold tracking-tight text-white">{t.appName}</div>
             <div className="text-[11px] text-slate-400">{t.appSubtitle}</div>
@@ -221,9 +268,7 @@ function AATMWorkspace() {
         </div>
       </aside>
 
-      {/* Main Content */}
       <div className="flex flex-1 flex-col">
-        {/* Topbar */}
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/50 px-5 py-3">
           <div className="flex flex-wrap items-center gap-2 md:hidden">
             {navItems.slice(0, 6).map((item) => (
@@ -239,12 +284,17 @@ function AATMWorkspace() {
           </div>
 
           <div className="hidden items-center gap-2 text-xs text-slate-400 md:flex">
-            <Badge variant="success">4 Workers Online</Badge>
-            <Badge variant="info">12 Divisions</Badge>
+            <Badge variant="success">{agents.length} Employees</Badge>
+            <Badge variant="info">{devices.length} Device Node(s)</Badge>
             {!user && <span className="text-amber-400">{t.auth.authRequiredHint}</span>}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant={anyEmergencyStopped ? 'secondary' : 'danger'} onClick={toggleEmergencyStop}>
+              <OctagonAlert className="h-4 w-4" />
+              {anyEmergencyStopped ? 'Resume System' : 'Emergency Stop'}
+            </Button>
+
             <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
               <Languages className="mx-1 h-3.5 w-3.5 text-slate-400" />
               {(['en', 'ar', 'fa'] as const).map((code) => (
@@ -277,9 +327,9 @@ function AATMWorkspace() {
           </div>
         </header>
 
-        <main className="flex-1 p-5">
+        <main className="flex-1 space-y-6 p-5">
           {errorBanner && (
-            <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-950/40 px-4 py-2 text-sm text-rose-200">
+            <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 px-4 py-2 text-sm text-rose-200">
               {errorBanner}
             </div>
           )}
@@ -295,25 +345,51 @@ function AATMWorkspace() {
           {tab === 'chat' && (
             <ManagerChatView messages={chatMessages} projectId={activeProjectId} onReload={() => loadAll()} />
           )}
-          {tab === 'agents' && <AgentsView agents={agents} onReload={() => loadAll()} />}
-          {tab === 'tasks' && <TasksView tasks={tasks} projectId={activeProjectId} onReload={() => loadAll()} />}
+          {tab === 'agents' && (
+            <div className="space-y-6">
+              <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={() => loadAll()} />
+              <AgentsView agents={agents} onReload={() => loadAll()} />
+            </div>
+          )}
+          {tab === 'tasks' && (
+            <div className="space-y-6">
+              <AgentMessagingPanel agents={agents} messages={agentMessages} projectId={activeProjectId} onReload={() => loadAll()} />
+              <TasksView tasks={tasks} projectId={activeProjectId} onReload={() => loadAll()} />
+            </div>
+          )}
+          {tab === 'workspaces' && <WorkspacesView agents={agents} />}
           {tab === 'browsers' && (
-            <BrowserWallView browsers={browsers} capabilities={browserCaps} onReload={() => loadAll()} />
+            <div className="space-y-6">
+              <UserscriptsEnginesPanel engines={browserEngines} userscripts={userscripts} onReload={() => loadAll()} />
+              <BrowserWallView browsers={browsers} capabilities={browserCaps} onReload={() => loadAll()} />
+            </div>
           )}
           {tab === 'providers' && (
-            <ProvidersView providers={providers} usage={providerUsage} onReload={() => loadAll()} />
+            <div className="space-y-6">
+              <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
+              <ProvidersView providers={providers} usage={providerUsage} onReload={() => loadAll()} />
+            </div>
           )}
           {tab === 'projects' && (
-            <ProjectsMemoryView
-              projects={projects}
-              memories={memories}
-              activeProjectId={activeProjectId}
-              onSelectProject={setActiveProjectId}
-              onReload={(q) => loadAll(q)}
-            />
+            <div className="space-y-6">
+              <SDLCIdeaExecutorPanel onReload={() => loadAll()} />
+              <ProjectsMemoryView
+                projects={projects}
+                memories={memories}
+                activeProjectId={activeProjectId}
+                onSelectProject={setActiveProjectId}
+                onReload={(q) => loadAll(q)}
+              />
+            </div>
           )}
           {tab === 'git' && <GitWorkflowsView gitData={gitData} onReload={() => loadAll()} />}
-          {tab === 'qa' && <QAView qaData={qaData} onReload={() => loadAll()} />}
+          {tab === 'qa' && (
+            <div className="space-y-6">
+              <QAView qaData={qaData} onReload={() => loadAll()} />
+              <MultiDeviceNodesPanel devices={devices} onReload={() => loadAll()} />
+              <PromptInjectionGuardPanel />
+            </div>
+          )}
           {tab === 'approvals' && (
             <ApprovalsAuditView approvals={approvals} auditLogs={auditLogs} onReload={() => loadAll()} />
           )}
@@ -329,7 +405,6 @@ function AATMWorkspace() {
         </main>
       </div>
 
-      {/* Sign In Modal */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <form onSubmit={handleSignIn} className="w-full max-w-sm space-y-4 rounded-xl border border-slate-800 bg-slate-900 p-5">

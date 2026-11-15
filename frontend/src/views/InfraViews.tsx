@@ -277,11 +277,12 @@ export function ProjectsMemoryView({
           <form onSubmit={addMemory} className="space-y-2">
             <div className="flex gap-2">
               <Select value={memScope} onChange={(e) => setMemScope(e.target.value)}>
-                <option value="global">global</option>
+                <option value="employee">employee</option>
+                <option value="team">team</option>
                 <option value="project">project</option>
-                <option value="agent">agent</option>
-                <option value="task">task</option>
+                <option value="organization">organization</option>
                 <option value="decision">decision</option>
+                <option value="global">global</option>
               </Select>
               <Input value={memTitle} onChange={(e) => setMemTitle(e.target.value)} placeholder="Title" />
             </div>

@@ -8,6 +8,7 @@ export interface Translations {
     chat: string
     agents: string
     tasks: string
+    workspaces: string
     browsers: string
     providers: string
     projects: string
