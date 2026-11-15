@@ -18,6 +18,7 @@ Configuration can also be supplied through the environment:
 import argparse
 import asyncio
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -33,6 +34,8 @@ from app.runtime.sandbox import (
     assert_allowed_binary,
     resolve_contained_path,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_COMMAND_TIMEOUT = 120
@@ -76,8 +79,30 @@ class WorkerDaemon:
         self._client = client
         self._owns_client = client is None
         self.worker_id = f"{config.device_id}-worker"
+        self.token_revoked: bool = False
+        self.stop_reason: str | None = None
+        self.cycles_completed: int = 0
         if client is not None:
             client.headers.update(self._auth_headers())
+
+    def _record_token_revocation(self, action: str) -> None:
+        """Record and emit an explicit token-revocation notice once per 401 event."""
+        if not self.token_revoked:
+            self.token_revoked = True
+            self.stop_reason = (
+                f"Device token revoked or rejected (HTTP 401) on {action} for device '{self.config.device_id}'."
+            )
+            notice = (
+                f"[aatm-worker] TOKEN REVOKED (HTTP 401) during {action} for device={self.config.device_id}. "
+                "Stopping polling cleanly — issue a new device token and restart the worker daemon."
+            )
+            logger.error(notice)
+            print(notice, flush=True)
+
+    def _check_response(self, action: str, resp: httpx.Response) -> None:
+        if resp.status_code == 401:
+            self._record_token_revocation(action)
+        resp.raise_for_status()
 
     # ------------------------------------------------------------------ plumbing
     @property
@@ -149,12 +174,12 @@ class WorkerDaemon:
             "worker_id": self.worker_id,
         }
         resp = await self.client.post(f"/api/v1/devices/{self.config.device_id}/register", json=payload)
-        resp.raise_for_status()
+        self._check_response("register", resp)
         return resp.json()
 
     async def heartbeat(self) -> dict[str, Any]:
         resp = await self.client.post(f"/api/v1/devices/{self.config.device_id}/heartbeat")
-        resp.raise_for_status()
+        self._check_response("heartbeat", resp)
         return resp.json()
 
     async def claim(self) -> dict[str, Any] | None:
@@ -162,7 +187,7 @@ class WorkerDaemon:
             f"/api/v1/devices/{self.config.device_id}/claim",
             json={"worker_id": self.worker_id, "max_concurrent": self.config.max_concurrent},
         )
-        resp.raise_for_status()
+        self._check_response("claim", resp)
         return resp.json().get("task")
 
     async def report(
@@ -183,7 +208,7 @@ class WorkerDaemon:
                 "error_message": error,
             },
         )
-        resp.raise_for_status()
+        self._check_response("report", resp)
         return resp.json()
 
     # ------------------------------------------------------------------ execution
@@ -250,22 +275,35 @@ class WorkerDaemon:
         return task
 
     async def run_forever(self, max_cycles: int | None = None) -> None:
-        """Run the daemon loop until interrupted (or `max_cycles` cycles completed)."""
-        await self.register()
-        cycles = 0
-        while max_cycles is None or cycles < max_cycles:
-            cycles += 1
+        """Run the daemon loop until interrupted, token-revoked (HTTP 401), or `max_cycles` completed."""
+        try:
             try:
-                task = await self.run_once()
+                await self.register()
             except httpx.HTTPStatusError as exc:
-                print(f"[aatm-worker] server rejected request: {exc.response.status_code} {exc.response.text[:200]}")
-                task = None
-            except Exception as exc:  # noqa: BLE001 - keep the daemon alive
-                print(f"[aatm-worker] transient error: {exc}")
-                task = None
-            if task is None:
-                await asyncio.sleep(self.config.poll_seconds)
-        await self.aclose()
+                if exc.response.status_code == 401:
+                    self._record_token_revocation("register")
+                    return
+                raise
+
+            cycles = 0
+            while not self.token_revoked and (max_cycles is None or cycles < max_cycles):
+                cycles += 1
+                self.cycles_completed = cycles
+                try:
+                    task = await self.run_once()
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 401:
+                        self._record_token_revocation("poll")
+                        break
+                    print(f"[aatm-worker] server rejected request: {exc.response.status_code} {exc.response.text[:200]}")
+                    task = None
+                except Exception as exc:  # noqa: BLE001 - keep the daemon alive
+                    print(f"[aatm-worker] transient error: {exc}")
+                    task = None
+                if task is None and not self.token_revoked:
+                    await asyncio.sleep(self.config.poll_seconds)
+        finally:
+            await self.aclose()
 
 
 def _parse_args(argv: list[str] | None = None) -> tuple[WorkerConfig, int | None]:
@@ -328,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(daemon.run_forever(max_cycles=max_cycles))
     except KeyboardInterrupt:
         print("[aatm-worker] interrupted", flush=True)
+    if daemon.token_revoked:
+        return 3
     return 0
 
 

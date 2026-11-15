@@ -1,12 +1,14 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -27,17 +29,23 @@ from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.models import (
+    Agent,
     AIProvider,
     AuditLog,
     BrowserProfile,
     BrowserSession,
+    Project,
+    ProviderAccount,
     ProviderSession,
     ProviderUsageLog,
     SystemSetting,
+    Task,
 )
+from app.orchestration.replacement import replacement_service
 from app.providers.adapters import AnthropicClaudeAdapter, ArenaLocalBridgeAdapter
 from app.providers.base import ProviderRequest, validate_credential_ref
 from app.providers.router import ProviderRouter
+from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
 
 
 class _MockBridgeServer:
@@ -934,3 +942,211 @@ async def test_browser_safe_actions_click_fill_snapshot_fallback_and_playwright_
     assert "<svg" in live_snap["svg"]
 
     await mgr.stop_profile(db_session, bp, actor="worker-3")
+
+
+async def test_replace_employee_best_effort_bridge_session_cleanup_online_and_offline(db_session, monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "replace-bridge-token-2026")
+    proj = (await db_session.execute(select(Project).limit(1))).scalar_one()
+
+    acct = ProviderAccount(
+        id="acct-bridge-replace",
+        provider_id="arena-local-bridge",
+        label="Bridge Replacement Test Account",
+        account_identifier="bridge-replace@arena.local",
+        allocation_mode="hybrid",
+        max_employees=10,
+        credential_ref="env:ARENA_BRIDGE_TOKEN",
+        status="active",
+    )
+    db_session.add(acct)
+    await db_session.flush()
+
+    # 1. Online Arena Local Bridge -> DELETE /v1/sessions/{old_session_id} executes and marks DB session closed
+    with _MockBridgeServer(expected_bearer="replace-bridge-token-2026") as srv:
+        srv.sessions["sess-emp-bridge-online"] = "acct-bridge-replace"
+        bridge_prov = await db_session.get(AIProvider, "arena-local-bridge")
+        bridge_prov.endpoint_url = srv.base_url
+
+        sess_online = ProviderSession(
+            id="sess-emp-bridge-online",
+            account_id="acct-bridge-replace",
+            agent_id="emp-bridge-online",
+            status="active",
+        )
+        emp_online = Agent(
+            id="emp-bridge-online",
+            name="Bridge Employee Online",
+            role="worker",
+            specialty="AI Systems",
+            skills=["python", "arena"],
+            divisions=["D05"],
+            status="working",
+            provider_id="arena-local-bridge",
+            provider_account_id="acct-bridge-replace",
+            provider_session_id="sess-emp-bridge-online",
+        )
+        task_online = Task(
+            id="task-bridge-online",
+            project_id=proj.id,
+            division_code="D05",
+            title="Online bridge replacement handoff",
+            status="in_progress",
+            assigned_agent_id="emp-bridge-online",
+        )
+        db_session.add_all([sess_online, emp_online, task_online])
+        await db_session.commit()
+
+        result_online = await replacement_service.replace_employee(
+            db_session,
+            failing_agent_id="emp-bridge-online",
+            reason="Repeated timeout",
+            actor="manager-0",
+        )
+        assert result_online["replaced_employee"] == "emp-bridge-online"
+        assert "task-bridge-online" in result_online["transferred_tasks"]
+        cleanup_online = result_online["bridge_session_cleanup"]
+        assert cleanup_online is not None
+        assert cleanup_online["deleted"] is True
+        assert cleanup_online["status"] == "deleted"
+        assert cleanup_online["session_id"] == "sess-emp-bridge-online"
+        assert cleanup_online["account_id"] == "acct-bridge-replace"
+        assert "sess-emp-bridge-online" not in srv.sessions
+        refreshed_sess = await db_session.get(ProviderSession, "sess-emp-bridge-online")
+        assert refreshed_sess.status == "closed"
+
+    # 2. Offline Arena Local Bridge -> replacement MUST STILL SUCCEED cleanly (never raises)
+    sess_offline = ProviderSession(
+        id="sess-emp-bridge-offline",
+        account_id="acct-bridge-replace",
+        agent_id="emp-bridge-offline",
+        status="active",
+    )
+    emp_offline = Agent(
+        id="emp-bridge-offline",
+        name="Bridge Employee Offline",
+        role="worker",
+        specialty="AI Systems",
+        skills=["python", "arena"],
+        divisions=["D05"],
+        status="working",
+        provider_id="arena-local-bridge",
+        provider_account_id="acct-bridge-replace",
+        provider_session_id="sess-emp-bridge-offline",
+    )
+    task_offline = Task(
+        id="task-bridge-offline",
+        project_id=proj.id,
+        division_code="D05",
+        title="Offline bridge replacement handoff",
+        status="queued",
+        assigned_agent_id="emp-bridge-offline",
+    )
+    db_session.add_all([sess_offline, emp_offline, task_offline])
+    await db_session.commit()
+
+    result_offline = await replacement_service.replace_employee(
+        db_session,
+        failing_agent_id="emp-bridge-offline",
+        reason="Bridge unreachable during failure",
+        actor="manager-0",
+    )
+    assert result_offline["replaced_employee"] == "emp-bridge-offline"
+    assert "task-bridge-offline" in result_offline["transferred_tasks"]
+    cleanup_offline = result_offline["bridge_session_cleanup"]
+    assert cleanup_offline is not None
+    assert cleanup_offline["deleted"] is False
+    assert cleanup_offline["status"] == "bridge_offline"
+    assert cleanup_offline["bridge_reachable"] is False
+    emp_offline_db = await db_session.get(Agent, "emp-bridge-offline")
+    assert emp_offline_db.status == "offline"
+
+    # 3. Non-bridge employee (arena-agent) -> skips bridge cleanup cleanly
+    emp_non_bridge = Agent(
+        id="emp-non-bridge",
+        name="Non-Bridge Employee",
+        role="worker",
+        specialty="Docs",
+        skills=["markdown"],
+        divisions=["D09"],
+        status="working",
+        provider_id="arena-agent",
+        provider_account_id="acct-arena-primary",
+        provider_session_id="sess-non-bridge",
+    )
+    db_session.add(emp_non_bridge)
+    await db_session.commit()
+    result_non_bridge = await replacement_service.replace_employee(db_session, "emp-non-bridge", reason="Reassigned")
+    assert result_non_bridge["bridge_session_cleanup"] is None
+
+
+@pytest.mark.parametrize("revoke_stage", ["heartbeat", "claim", "report"])
+async def test_worker_daemon_halts_cleanly_on_http_401_heartbeat_claim_and_report(
+    revoke_stage: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+):
+    device_token = "revoked-device-token-do-not-log-999"
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append(path)
+        if path.endswith("/register"):
+            return httpx.Response(200, json={"device_id": "node-401", "bound_agent_id": "dev-node-401"})
+        if path.endswith("/heartbeat"):
+            if revoke_stage == "heartbeat":
+                return httpx.Response(401, json={"detail": "Device token revoked"})
+            return httpx.Response(200, json={"status": "online"})
+        if path.endswith("/claim"):
+            if revoke_stage == "claim":
+                return httpx.Response(401, json={"detail": "Device token revoked"})
+            return httpx.Response(
+                200,
+                json={
+                    "task": {
+                        "id": "task-401-test",
+                        "title": "Test 401 on report",
+                        "description": "Execute then report against revoked token",
+                        "expected_deliverables": ["report_401.md"],
+                    }
+                },
+            )
+        if path.endswith("/report"):
+            if revoke_stage == "report":
+                return httpx.Response(401, json={"detail": "Device token revoked"})
+            return httpx.Response(200, json={"status": "completed"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://aatm.test") as client:
+        daemon = WorkerDaemon(
+            WorkerConfig(
+                server_url="http://aatm.test",
+                device_id="node-401",
+                token=device_token,
+                workspace_root=tmp_path / f"ws-{revoke_stage}",
+                poll_seconds=60.0,  # Large poll interval proves 401 halts immediately without sleeping
+            ),
+            client=client,
+        )
+        with caplog.at_level(logging.ERROR, logger="app.runtime.worker_daemon"):
+            await daemon.run_forever(max_cycles=5)
+
+    assert daemon.token_revoked is True
+    assert daemon.cycles_completed == 1
+    assert daemon.stop_reason is not None
+    assert "401" in daemon.stop_reason
+    assert revoke_stage in daemon.stop_reason
+
+    # Verify explicit token-revocation notice logged AND printed, with ZERO raw token leakage
+    out = capsys.readouterr().out
+    assert "TOKEN REVOKED (HTTP 401)" in out
+    assert revoke_stage in out
+    assert device_token not in out
+    assert any("TOKEN REVOKED (HTTP 401)" in rec.message and revoke_stage in rec.message for rec in caplog.records)
+    assert all(device_token not in rec.message for rec in caplog.records)
+
+    # Confirm no second poll cycle ever happened after HTTP 401
+    heartbeat_calls = [p for p in calls if p.endswith("/heartbeat")]
+    assert len(heartbeat_calls) == 1

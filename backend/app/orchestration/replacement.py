@@ -1,3 +1,4 @@
+import logging
 import shutil
 from typing import Any
 
@@ -8,7 +9,20 @@ from app.browser.manager import browser_manager
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.employees.catalog import ensure_employee_workspace
-from app.models import Agent, AgentMessage, AuditLog, BrowserProfile, Notification, Task
+from app.models import (
+    Agent,
+    AgentMessage,
+    AIProvider,
+    AuditLog,
+    BrowserProfile,
+    Notification,
+    ProviderAccount,
+    ProviderSession,
+    Task,
+)
+from app.providers.adapters import ArenaLocalBridgeAdapter
+
+logger = logging.getLogger(__name__)
 
 # Marker written into `Task.error_message` so tasks halted by an Emergency Stop can be
 # identified later and resumed. Without it a globally stopped task stays "blocked"
@@ -109,6 +123,8 @@ class ReplacementAndEmergencyService:
         if transferred_tasks:
             replacement.current_task_id = transferred_tasks[0]
 
+        bridge_cleanup = await self._cleanup_bridge_session(db, failing)
+
         db.add(
             AuditLog(
                 actor=actor,
@@ -120,6 +136,7 @@ class ReplacementAndEmergencyService:
                     "transferred_tasks": transferred_tasks,
                     "transferred_files": transferred_files,
                     "reason": reason,
+                    "bridge_session_cleanup": bridge_cleanup,
                 },
                 severity="warning",
             )
@@ -134,13 +151,91 @@ class ReplacementAndEmergencyService:
             )
         )
         await db.commit()
-        await event_bus.emit("employee.replaced", {"from": failing_agent_id, "to": replacement.id, "tasks": transferred_tasks})
+        await event_bus.emit(
+            "employee.replaced",
+            {
+                "from": failing_agent_id,
+                "to": replacement.id,
+                "tasks": transferred_tasks,
+                "bridge_session_cleanup": bridge_cleanup,
+            },
+        )
         return {
             "replaced_employee": failing_agent_id,
             "replacement_employee": replacement.id,
             "transferred_tasks": transferred_tasks,
             "transferred_files": transferred_files,
+            "bridge_session_cleanup": bridge_cleanup,
         }
+
+    async def _cleanup_bridge_session(
+        self,
+        db: AsyncSession,
+        failing: Agent,
+    ) -> dict[str, Any] | None:
+        """Best-effort DELETE /v1/sessions/{old_session_id} if the replaced employee used arena_local_bridge."""
+        old_session_id = failing.provider_session_id
+        old_account_id = failing.provider_account_id
+        sess_row: ProviderSession | None = None
+
+        if old_session_id:
+            sess_row = await db.get(ProviderSession, old_session_id)
+        else:
+            sess_res = await db.execute(
+                select(ProviderSession)
+                .where(ProviderSession.agent_id == failing.id, ProviderSession.status == "active")
+                .order_by(ProviderSession.created_at.desc())
+                .limit(1)
+            )
+            sess_row = sess_res.scalar_one_or_none()
+            if sess_row:
+                old_session_id = sess_row.id
+
+        if sess_row and not old_account_id:
+            old_account_id = sess_row.account_id
+
+        bridge_provider: AIProvider | None = None
+        if failing.provider_id:
+            cand = await db.get(AIProvider, failing.provider_id)
+            if cand and cand.provider_type == "arena_local_bridge":
+                bridge_provider = cand
+
+        if bridge_provider is None and old_account_id:
+            acct = await db.get(ProviderAccount, old_account_id)
+            if acct and acct.provider_id:
+                cand = await db.get(AIProvider, acct.provider_id)
+                if cand and cand.provider_type == "arena_local_bridge":
+                    bridge_provider = cand
+
+        if bridge_provider is None or not old_session_id:
+            return None
+
+        if sess_row:
+            sess_row.status = "closed"
+
+        adapter = ArenaLocalBridgeAdapter(
+            provider_id=bridge_provider.id,
+            endpoint_url=bridge_provider.endpoint_url,
+            credential_ref=bridge_provider.credential_ref,
+            default_model=bridge_provider.default_model,
+        )
+        try:
+            return await adapter.delete_session(old_session_id, account_id=old_account_id)
+        except Exception as exc:  # noqa: BLE001 - best-effort cleanup must never abort replacement
+            logger.warning(
+                "Best-effort bridge session cleanup failed for agent=%s session=%s: %s",
+                failing.id,
+                old_session_id,
+                type(exc).__name__,
+            )
+            return {
+                "deleted": False,
+                "session_id": old_session_id,
+                "account_id": old_account_id,
+                "status": "error",
+                "bridge_reachable": False,
+                "error": f"Bridge cleanup error: {type(exc).__name__}",
+            }
 
     async def emergency_stop(
         self,
