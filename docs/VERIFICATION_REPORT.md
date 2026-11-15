@@ -14,14 +14,14 @@ Multi-Device worker daemon, isolated per-agent Git worktrees, SSE bridge streami
 | Database migrations | `alembic upgrade head` | **PASSED** — head `6c3ab8f4d2e1` |
 | Backend lint | `ruff check backend` | **PASSED** — 0 errors |
 | Bridge lint | `ruff check --config backend/pyproject.toml bridge` | **PASSED** — 0 errors |
-| Backend tests | `pytest -q` | **PASSED** — 80/80 (0 warnings) |
-| ↳ E2E verification suite | `pytest tests/test_e2e_verification.py` | **PASSED** — 32/32 |
+| Backend tests | `pytest -q` | **PASSED** — 82/82 (0 warnings) |
+| ↳ E2E verification suite | `pytest tests/test_e2e_verification.py` | **PASSED** — 34/34 |
 | Bridge tests | `pytest -v bridge/tests/test_bridge.py` | **PASSED** — 8/8 |
 | Static secret scan | `python -m app.qa.engine` | **PASSED** — 0 findings (132 files) |
 | Frontend typecheck | `npm run lint` (`tsc --noEmit`) | **PASSED** — 0 errors |
 | Frontend unit tests | `npm run test` (vitest) | **PASSED** — 38/38 (2 files) |
 | Frontend production build | `npm run build` (vite) | **PASSED** (`1,584` modules) |
-| One-command pipeline | `scripts/ubuntu/verify.sh` | **PASSED** — 12/12 gates, exit 0 |
+| One-command pipeline | `scripts/ubuntu/verify.sh` | **PASSED** — 12/12 gates, exit 0 (`128` total tests) |
 | Live multi-device round trip | real uvicorn + daemon OS process | **PASSED** |
 
 ---
@@ -129,12 +129,13 @@ a remote host.
   central server, heartbeats, claims tasks, executes them inside an isolated local
   workspace and reports results. Configurable via CLI flags or `AATM_*` environment
   variables.
-- `backend/app/runtime/device_auth.py` — device-scoped tokens derived as
-  `HMAC-SHA256(SECRET_KEY, device_id)`. The token cannot be forged without the server
-  secret and is bound to exactly one device id. Nothing is persisted, so a database
-  leak does not expose device tokens.
+- `backend/app/runtime/device_auth.py` — version-bound device-scoped tokens derived as
+  `HMAC-SHA256(SECRET_KEY, f"{device_id}:v{token_version}")`. The token cannot be forged
+  without the server secret, is bound to one device id and its current `token_version`,
+  and can be revoked per device via `POST /api/v1/devices/{id}/revoke` without rotating
+  `SECRET_KEY`.
 - `backend/app/api/routes/devices.py` — the device work API: `register`, `heartbeat`,
-  `claim`, `report`, `status`, plus an offline-device sweep.
+  `claim`, `report`, `status`, `revoke`, plus an offline-device sweep.
 - `backend/app/runtime/sandbox.py` — the workspace-containment rules, now shared
   between the server runtime and the remote daemon so the two cannot drift apart.
 - `scripts/ubuntu/start-worker.sh` and `scripts/windows/start-worker.ps1` — daemon
@@ -145,12 +146,15 @@ a remote host.
 **Verified live** (real uvicorn process + daemon in a separate OS process): device
 registered → task claimed → executed in the remote isolated workspace → deliverable
 written to disk → server marked the task `completed` and attributed it to the device.
-A dead node's task is reclaimed by the self-healing sweep within the offline window.
+A dead node's task is reclaimed by the self-healing sweep within the offline window,
+and a revoked device token immediately returns `HTTP 401` and halts `WorkerDaemon`.
 
 ### A2 — End-to-End Test Suite (Division 11)
 
-`backend/tests/test_e2e_verification.py` — 23 tests covering all six verification areas
-plus the governance gate and the multi-device round trip. Every defect above has a
+`backend/tests/test_e2e_verification.py` — 34 tests covering all verification areas,
+the governance gate, the multi-device round trip, per-device token revocation, isolated
+per-agent git worktree lifecycle, self-healing orphaned worktree pruning, and
+`POST /api/v1/github/branches` branch approval enforcement. Every defect above has a
 regression test. The suite runs as part of `pytest` and of `scripts/ubuntu/verify.sh`.
 
 ### A3 — Deployment Hardening (Division 12)
@@ -177,13 +181,29 @@ regression test. The suite runs as part of `pytest` and of `scripts/ubuntu/verif
 - `.gitignore` — additionally excludes `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.pid` and
   `browser_profiles/`.
 
+### A4 — Isolated Per-Agent Git Worktrees, Self-Healing Pruning & Branch Governance (Divisions 07, 11 & 12)
+
+- `backend/app/git_workflows/manager.py` — `create_agent_worktree` and
+  `remove_agent_worktree` manage isolated git worktrees under `data/worktrees/<agent_id>/`
+  with strict `Path.resolve()` containment, branch-ref sanitization, and credential
+  redaction (`_sanitize_git_text`).
+- `backend/app/qa/engine.py` — `run_self_healing(db)` inspects `data/worktrees/` and
+  automatically prunes orphaned worktrees belonging to nonexistent, `offline`,
+  `replaced`, or `disabled` agents (`pruned_worktrees`), while preserving active agents'
+  worktrees.
+- `backend/app/api/routes/platform.py` — `POST /api/v1/github/branches` enforces
+  `ApprovalRequest.action_type == "branch"` and exact `repo` / `branch_name` /
+  `from_branch` payload matching before invoking `gh`.
+
 ---
 
 ## 4. Residual Risks & Recommendations
 
-1. **Device tokens cannot be revoked individually.** They are derived from
-   `SECRET_KEY`, so rotating that secret revokes every device token at once. A
-   per-device revocation list would be the next hardening step.
+1. **Per-device token revocation — RESOLVED (Round 2/3).** Device tokens are now derived
+   as `HMAC-SHA256(SECRET_KEY, f"{device_id}:v{token_version}")`, backed by Alembic
+   migration `6c3ab8f4d2e1` (`ExecutionDevice.token_version`) and
+   `POST /api/v1/devices/{id}/revoke`. Individual nodes can be revoked immediately
+   without rotating `SECRET_KEY`, and `WorkerDaemon` halts cleanly on `HTTP 401`.
 2. **A default `SECRET_KEY` makes device tokens forgeable.** The register endpoint
    returns `token_hardened: false` and a warning while the development secret is in
    use. Operators must set `SECRET_KEY` in production.

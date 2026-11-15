@@ -319,13 +319,20 @@ class QAAndIntelligenceEngine:
         }
 
     # ---------------------------------------------------------------- self healing
-    async def run_self_healing(self, db: AsyncSession) -> dict[str, Any]:
+    async def run_self_healing(
+        self,
+        db: AsyncSession,
+        *,
+        repo_path: Path | str | None = None,
+        worktrees_root: Path | str | None = None,
+    ) -> dict[str, Any]:
         stalled = await task_scheduler.detect_and_recover_stalled_tasks(db)
 
         # Recover tasks that were blocked by an Emergency Stop. Without this they stay
         # stranded forever: the scheduler only dispatches "queued" tasks and the stalled
         # sweep only inspects "in_progress" tasks.
         from app.api.routes.devices import sweep_offline_devices
+        from app.git_workflows.manager import git_workflow_manager
         from app.orchestration.replacement import replacement_service
 
         requeued = await replacement_service.resume_emergency_stopped_tasks(db, actor="self_healing")
@@ -348,6 +355,48 @@ class QAAndIntelligenceEngine:
             ag.current_task_id = None
             recovered_workers.append(ag.id)
 
+        # Prune orphaned git worktrees belonging to missing, offline, replaced, or disabled agents.
+        settings = get_settings()
+        effective_repo = Path(repo_path).resolve() if repo_path else settings.REPO_ROOT
+        wt_dir = (
+            Path(worktrees_root).resolve()
+            if worktrees_root
+            else (
+                (effective_repo / "data" / "worktrees").resolve()
+                if repo_path
+                else (settings.DATA_DIR / "worktrees").resolve()
+            )
+        )
+        all_agents = {
+            ag.id: ag for ag in (await db.execute(select(Agent))).scalars().all()
+        }
+        pruned_worktrees: list[str] = []
+        if wt_dir.is_dir():
+            for child in sorted(wt_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                candidate_id = child.name
+                ag = all_agents.get(candidate_id)
+                is_orphaned = (
+                    ag is None
+                    or not ag.is_enabled
+                    or ag.status in ("offline", "replaced", "disabled")
+                )
+                if not is_orphaned:
+                    continue
+                try:
+                    rm_res = await git_workflow_manager.remove_agent_worktree(
+                        candidate_id,
+                        db=db,
+                        repo_path=effective_repo,
+                        worktrees_root=wt_dir,
+                        actor="self_healing",
+                    )
+                    if rm_res.get("ok") or not child.exists():
+                        pruned_worktrees.append(candidate_id)
+                except Exception:
+                    continue
+
         db.add(
             AuditLog(
                 actor="self_healing",
@@ -360,10 +409,18 @@ class QAAndIntelligenceEngine:
                     "device_tasks_requeued": device_sweep["requeued_tasks"],
                     "browsers_recovered": recovered_browsers,
                     "workers_recovered": recovered_workers,
+                    "pruned_worktrees": pruned_worktrees,
                 },
             )
         )
-        if stalled or requeued or device_sweep["requeued_tasks"] or recovered_browsers or recovered_workers:
+        if (
+            stalled
+            or requeued
+            or device_sweep["requeued_tasks"]
+            or recovered_browsers
+            or recovered_workers
+            or pruned_worktrees
+        ):
             db.add(
                 Notification(
                     category="recovery",
@@ -373,7 +430,7 @@ class QAAndIntelligenceEngine:
                         f"Recovered {len(stalled)} stalled task(s), requeued {len(requeued)} "
                         f"emergency-stopped task(s), {len(device_sweep['requeued_tasks'])} "
                         f"offline-device task(s), {len(recovered_browsers)} browser(s), "
-                        f"{len(recovered_workers)} worker(s)."
+                        f"{len(recovered_workers)} worker(s), pruned {len(pruned_worktrees)} worktree(s)."
                     ),
                     link="/qa",
                 )
@@ -387,6 +444,7 @@ class QAAndIntelligenceEngine:
             "device_tasks_requeued": device_sweep["requeued_tasks"],
             "browsers_recovered": recovered_browsers,
             "workers_recovered": recovered_workers,
+            "pruned_worktrees": pruned_worktrees,
         }
 
 
