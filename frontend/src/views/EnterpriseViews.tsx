@@ -130,7 +130,7 @@ export function EmployeeCreatorAndOrgPanel({
     <div key={ag.id} className="space-y-2">
       <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
         <div className="min-w-0"><div className="truncate font-semibold text-white">{ag.name}</div>
-          <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode} • {t.enterprise.score} {ag.performance_score}</div>
+          <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode}</div>
         </div>
         {ag.role !== 'manager' && <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>}
       </div>
@@ -454,7 +454,7 @@ export function ArenaAccountsSessionsPanel({
               <div>
                 <div className="font-mono text-sky-400">{s.agent_id} → {s.conversation_id}</div>
                 <div className="text-slate-400">
-                  {t.enterprise.account}: {s.account_id} • {t.enterprise.health}: {s.health_score}%
+                  {t.enterprise.account}: {s.account_id} • {t.enterprise.health}: {s.health_score == null ? t.common.unknown : `${s.health_score}%`}
                 </div>
               </div>
               <Button size="sm" variant="secondary" onClick={() => recoverSession(s.id)}>
@@ -521,6 +521,9 @@ export function UserscriptsEnginesPanel({
 
       <Card className="space-y-3">
         <h3 className="text-sm font-semibold text-white">{t.enterprise.userscriptsTitle}</h3>
+        <p data-testid="userscripts-storage-only-notice" role="note" className="rounded border border-amber-500/30 bg-amber-950/20 p-2 text-xs text-amber-100">
+          {t.enterprise.userscriptsStorageNotice}
+        </p>
         {err && <div className="rounded border border-rose-500/40 bg-rose-950/30 p-2 text-xs text-rose-200">{err}</div>}
         <form onSubmit={createScript} className="space-y-2">
           <div className="grid gap-2 sm:grid-cols-2">

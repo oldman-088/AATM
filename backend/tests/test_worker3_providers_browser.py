@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.browser.engines import (
@@ -186,13 +187,61 @@ async def db_session():
         yield db
 
 
+def _enable_fake_live_browser(monkeypatch, manager: BrowserManager) -> None:
+    """Provide a deterministic live-context harness without installing Chromium in CI."""
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": True,
+            "executable_path": None,
+            "browser_source": "test-harness",
+            "engine_mode": "playwright",
+        },
+    )
+
+    async def allow_public_url(url: str) -> str:
+        return url
+
+    monkeypatch.setattr("app.browser.manager.validate_public_navigation_url", allow_public_url)
+
+    class FakePage:
+        def __init__(self, url: str):
+            self.url = url
+
+        async def title(self) -> str:
+            return "Test browser page"
+
+    class FakeContext:
+        def __init__(self, page: FakePage):
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class FakePlaywright:
+        async def stop(self) -> None:
+            return None
+
+    async def fake_launch(profile, _profile_dir, _caps, url):
+        page = FakePage(url or profile.current_url or "about:blank")
+        profile.current_url = page.url
+        profile.page_title = "Test browser page"
+        manager._active_contexts[profile.id] = (FakePlaywright(), FakeContext(page))
+        return True, None
+
+    monkeypatch.setattr(manager, "_launch_playwright_context", fake_launch)
+
+
 # ---------------------------------------------------------------------------
 # Division 05: AI Providers, Credential Indirection, Budgets & Failover
 # ---------------------------------------------------------------------------
 
 
-async def test_credential_ref_indirection_blocks_raw_secrets():
-    assert validate_credential_ref(None)[0] is True
+async def test_credential_ref_indirection_blocks_raw_secrets(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-env-indirection")
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-test-env-indirection")
+    assert validate_credential_ref(None)[0] is False
     assert validate_credential_ref("env:ANTHROPIC_API_KEY")[0] is True
     assert validate_credential_ref("env:ARENA_BRIDGE_TOKEN")[0] is True
 
@@ -229,12 +278,12 @@ async def test_arena_local_bridge_live_auth_and_offline(monkeypatch):
         assert health.status == "healthy"
         assert health.credentials_configured is True
 
-        # Dry-run never spends budget
+        # Dry-run never spends budget and never fabricates a successful completion
         dry = await adapter.generate(ProviderRequest(prompt="test", model="arena-reasoning-pro", dry_run=True))
-        assert dry.success is True
+        assert dry.success is False
         assert dry.estimated_cost_usd == 0.0
         assert dry.metadata["dry_run"] is True
-        assert dry.metadata["projected_cost_usd"] > 0.0
+        assert "Dry run" in (dry.error_message or "")
 
         # Live call reads OpenAI-compatible usage & content
         live = await adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
@@ -244,11 +293,12 @@ async def test_arena_local_bridge_live_auth_and_offline(monkeypatch):
         assert live.output_tokens == 7
         assert live.metadata["confirmed_usage"] is True
 
-        # Empty choices array handled gracefully without IndexError
+        # Empty choices array handled gracefully without IndexError and without fabricating success
         srv.empty_choices = True
         empty_resp = await adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
-        assert empty_resp.success is True
+        assert empty_resp.success is False
         assert empty_resp.content == ""
+        assert empty_resp.metadata.get("empty_response") is True
 
         # Wrong token yields degraded auth error on health check
         monkeypatch.setenv("ARENA_TEST_BRIDGE_TOKEN", "wrong-token")
@@ -323,9 +373,9 @@ async def test_anthropic_safe_diagnostic_and_live_confirmed_usage(db_session, mo
     assert h.credentials_configured is False
 
     diag = await adapter.generate(ProviderRequest(prompt="Analyze architecture", dry_run=False))
-    assert diag.success is True
+    assert diag.success is False
     assert diag.estimated_cost_usd == 0.0
-    assert diag.metadata["dry_run"] is True
+    assert diag.metadata["credential_not_configured"] is True
 
     # With API key + loopback mock Anthropic endpoint -> live confirmed usage logged
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -348,26 +398,39 @@ async def test_anthropic_safe_diagnostic_and_live_confirmed_usage(db_session, mo
 
         logs = (await db_session.execute(select(ProviderUsageLog).where(ProviderUsageLog.provider_id == "anthropic-claude"))).scalars().all()
         assert len(logs) == 1
-        assert logs[0].confirmed_cost_usd == resp.estimated_cost_usd
+        assert logs[0].estimated_cost_usd == resp.estimated_cost_usd
+        assert logs[0].confirmed_cost_usd is None
+        assert logs[0].input_tokens == 20
+        assert logs[0].input_tokens_estimated is False
 
 
-async def test_router_daily_monthly_spend_caps_and_failover(db_session):
+async def test_router_daily_monthly_spend_caps_and_failover(db_session, monkeypatch):
     router = ProviderRouter()
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "phase2-bridge-token")
+    monkeypatch.setenv("PHASE2_ANTHROPIC_KEY", "phase2-anthropic-key")
 
-    # Point arena-local-bridge to an unused loopback port so it is guaranteed offline
+    # Point the bridge to an unused loopback port and use a live local Anthropic mock
+    # as the real failover target; the arena_agent provider is intentionally a stub.
     bridge = await db_session.get(AIProvider, "arena-local-bridge")
     bridge.endpoint_url = "http://127.0.0.1:1"
+    anthropic = await db_session.get(AIProvider, "anthropic-claude")
+    assert anthropic is not None
+    anthropic.endpoint_url = "http://127.0.0.1:9/v1"
+    anthropic.credential_ref = "env:PHASE2_ANTHROPIC_KEY"
     await db_session.commit()
 
-    # Requesting a bridge-specific model fails over cleanly to arena-agent using arena-agent's compatible default model
-    failover = await router.route_and_execute(
-        db_session,
-        ProviderRequest(prompt="Failover test", model="arena-reasoning-pro", dry_run=False),
-        preferred_provider_id="arena-local-bridge",
-    )
-    assert failover.success is True
-    assert failover.provider_id == "arena-agent"
-    assert failover.model == "arena-agent-orchestrator"
+    with _MockBridgeServer(expected_api_key="phase2-anthropic-key") as srv:
+        anthropic.endpoint_url = f"{srv.base_url}/v1"
+        await db_session.commit()
+
+        failover = await router.route_and_execute(
+            db_session,
+            ProviderRequest(prompt="Failover test", model="arena-reasoning-pro", dry_run=False),
+            preferred_provider_id="arena-local-bridge",
+        )
+        assert failover.success is True
+        assert failover.provider_id == "anthropic-claude"
+        assert failover.model == "claude-sonnet-4-5"
 
     await db_session.refresh(bridge)
     assert bridge.health_status == "offline"
@@ -434,7 +497,25 @@ async def test_router_daily_monthly_spend_caps_and_failover(db_session):
         preferred_provider_id="anthropic-claude",
     )
     assert dry_ok.success is True
+    assert dry_ok.content == "Dry run: no provider request was sent."
     assert dry_ok.estimated_cost_usd == 0.0
+    assert dry_ok.metadata == {"dry_run": True, "mode": "dry_run"}
+
+    dry_stream = [
+        chunk
+        async for chunk in router.route_and_stream(
+            db_session,
+            ProviderRequest(prompt="Dry-run streaming diagnostic", dry_run=True),
+            preferred_provider_id="anthropic-claude",
+        )
+    ]
+    assert len(dry_stream) == 2
+    assert dry_stream[0].delta == "Dry run: no provider request was sent."
+    assert dry_stream[0].done is False
+    assert dry_stream[1].done is True and dry_stream[1].success is True
+    assert dry_stream[1].estimated_cost_usd == 0.0
+    assert dry_stream[1].metadata["mode"] == "dry_run"
+
     after_dry = await router.get_spend_summary(db_session)
     assert after_dry["global_monthly_spend_usd"] == summary["global_monthly_spend_usd"]
 
@@ -458,7 +539,7 @@ async def test_router_daily_monthly_spend_caps_and_failover(db_session):
 def test_playwright_capability_detection_and_url_validation(tmp_path, monkeypatch):
     caps = detect_playwright_capabilities()
     assert caps["playwright_installed"] is True
-    assert caps["engine_mode"] in ("playwright", "headless_fallback")
+    assert caps["engine_mode"] in ("playwright", "not_implemented")
     assert "browser_source" in caps
 
     # Verify PLAYWRIGHT_BROWSERS_PATH discovery works cleanly
@@ -483,8 +564,47 @@ def test_playwright_capability_detection_and_url_validation(tmp_path, monkeypatc
             validate_navigation_url(bad_url)
 
 
-async def test_browser_db_file_async_locks_stale_recovery_and_crash(db_session, tmp_path):
+async def test_browser_launch_refuses_to_fake_missing_chromium(db_session, tmp_path, monkeypatch):
     mgr = BrowserManager()
+    profile = BrowserProfile(
+        id="profile-no-chromium",
+        name="Unavailable Chromium Profile",
+        agent_id="worker-3",
+        profile_dir=str(tmp_path / "profile-no-chromium"),
+        mode="background",
+        status="ready",
+        current_url="about:blank",
+    )
+    db_session.add(profile)
+    await db_session.commit()
+    monkeypatch.setattr(
+        "app.browser.manager.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": False,
+            "executable_path": None,
+            "browser_source": None,
+            "engine_mode": "not_implemented",
+        },
+    )
+
+    with pytest.raises(HTTPException) as unavailable:
+        await mgr.launch_profile(db_session, profile, owner="worker-3", mode="background")
+
+    assert unavailable.value.status_code == 501
+    assert profile.status == "ready"
+    assert profile.lock_owner is None
+    assert profile.id not in mgr._active_contexts
+    assert not Path(profile.profile_dir).exists()
+    sessions = (
+        await db_session.execute(select(BrowserSession).where(BrowserSession.profile_id == profile.id))
+    ).scalars().all()
+    assert sessions == []
+
+
+async def test_browser_db_file_async_locks_stale_recovery_and_crash(db_session, tmp_path, monkeypatch):
+    mgr = BrowserManager()
+    _enable_fake_live_browser(monkeypatch, mgr)
     bp = BrowserProfile(
         id="profile-worker3-locktest",
         name="Worker 3 Lock Test Profile",
@@ -567,6 +687,7 @@ async def test_browser_db_file_async_locks_stale_recovery_and_crash(db_session, 
 
 async def test_browser_max_concurrency_limit(db_session, tmp_path, monkeypatch):
     mgr = BrowserManager()
+    _enable_fake_live_browser(monkeypatch, mgr)
     settings = get_settings()
     monkeypatch.setattr(settings, "MAX_CONCURRENT_BROWSERS", 1)
 
@@ -708,21 +829,21 @@ async def test_browser_engine_adapters_capabilities_and_policy():
     pw_caps = BROWSER_ENGINE_REGISTRY["playwright"].capabilities()
     real_caps = detect_playwright_capabilities()
     assert pw_caps["chromium_installed"] == real_caps["chromium_installed"]
-    assert pw_caps["status"] == ("ready" if real_caps["chromium_installed"] else "headless_fallback")
+    assert pw_caps["status"] == ("ready" if real_caps["chromium_installed"] else "not_implemented")
+    assert pw_caps["supports_userscripts"] is False
+    assert pw_caps["userscripts_mode"] == "storage_only"
 
     # Prohibited action rejected across engines
     rej = await BROWSER_ENGINE_REGISTRY["playwright"].execute_action("profile-1", "bypass_captcha", {})
     assert rej["status"] == "rejected"
 
-    # Automa workflow validates safe vs. unsafe steps
+    # A structurally valid workflow cannot report execution without a live browser context.
     automa = BROWSER_ENGINE_REGISTRY["automa"]
-    good_wf = await automa.execute_action(
-        "profile-1",
-        "run_workflow",
-        {"steps": [{"type": "navigate", "url": "https://fastapi.tiangolo.com"}, {"type": "snapshot"}]},
-    )
-    assert good_wf["status"] == "executed"
-    assert good_wf["steps_validated"] == 2
+    valid_steps = [{"type": "navigate", "url": "https://fastapi.tiangolo.com"}, {"type": "snapshot"}]
+    assert automa._validate_workflow_steps(valid_steps, require_executable=True)[0] is True
+    with pytest.raises(HTTPException) as unavailable:
+        await automa.execute_action("profile-1", "run_workflow", {"steps": valid_steps})
+    assert unavailable.value.status_code == 501
 
     bad_wf = await automa.execute_action(
         "profile-1",
@@ -737,12 +858,12 @@ async def test_browser_engine_adapters_capabilities_and_policy():
     )
     assert bad_sel["status"] == "rejected"
 
-    fill_res = await BROWSER_ENGINE_REGISTRY["playwright"].execute_action(
-        "profile-1", "fill_input", {"selector": "input[name='query']", "value": "private-query-value-42"}
-    )
-    assert fill_res["status"] in ("executed", "headless_fallback")
-    assert fill_res["params"]["value"] == "<redacted>"
-    assert fill_res["params"]["value_length"] == len("private-query-value-42")
+    with pytest.raises(HTTPException) as unavailable:
+        await BROWSER_ENGINE_REGISTRY["playwright"].execute_action(
+            "profile-1", "fill_input", {"selector": "input[name='query']", "value": "private-query-value-42"}
+        )
+    assert unavailable.value.status_code == 501
+    assert "private-query-value-42" not in str(unavailable.value.detail)
 
     bad_wf_sel = await automa.execute_action(
         "profile-1",
@@ -805,8 +926,7 @@ async def test_arena_bridge_adapter_delete_session_lifecycle(monkeypatch):
     assert offline["bridge_reachable"] is False
 
 
-async def test_browser_safe_actions_click_fill_snapshot_fallback_and_playwright_live(db_session, tmp_path, monkeypatch):
-    # Selector policy validation unit checks
+async def test_browser_safe_actions_fail_closed_without_live_playwright(db_session, tmp_path):
     assert validate_selector("#submit-button") == "#submit-button"
     assert validate_selector('input[name="search"]') == 'input[name="search"]'
     for bad_sel in (
@@ -834,61 +954,24 @@ async def test_browser_safe_actions_click_fill_snapshot_fallback_and_playwright_
     db_session.add(bp)
     await db_session.commit()
 
-    # Clicking or filling a stopped profile is rejected cleanly
     with pytest.raises(ValueError, match="must be running"):
         await mgr.click_element(db_session, bp, "#save-btn", actor="worker-3")
     with pytest.raises(ValueError, match="must be running"):
         await mgr.fill_input(db_session, bp, "input[name='note']", "hello", actor="worker-3")
 
-    # Force headless_fallback (Chromium absent) and start profile
-    monkeypatch.setattr(
-        "app.browser.manager.detect_playwright_capabilities",
-        lambda: {
-            "playwright_installed": True,
-            "chromium_installed": False,
-            "chromium_path": None,
-            "engine_mode": "headless_fallback",
-        },
-    )
-    await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background")
-    await mgr.navigate_profile(db_session, bp, "https://fastapi.tiangolo.com/tutorial/")
+    bp.status = "running"
+    with pytest.raises(HTTPException) as no_click:
+        await mgr.click_element(db_session, bp, "#nav-docs", actor="worker-3")
+    assert no_click.value.status_code == 501
+    with pytest.raises(HTTPException) as no_fill:
+        await mgr.fill_input(db_session, bp, "input[name='notes']", "confidential-form-entry", actor="worker-3")
+    assert no_fill.value.status_code == 501
+    with pytest.raises(HTTPException) as no_snapshot:
+        await mgr.capture_snapshot(db_session, bp, actor="worker-3")
+    assert no_snapshot.value.status_code == 501
+    assert not (await db_session.execute(select(AuditLog).where(AuditLog.resource_id == bp.id))).scalars().all()
 
-    # Prohibited CAPTCHA selector blocked even on a running profile
-    with pytest.raises(ValueError, match="Policy violation"):
-        await mgr.click_element(db_session, bp, "#recaptcha-anchor", actor="worker-3")
-    with pytest.raises(ValueError, match="Policy violation"):
-        await mgr.fill_input(db_session, bp, ".h-captcha textarea", "nope", actor="worker-3")
-
-    # 1. Headless fallback path: click_element, fill_input (redacted!), capture_snapshot
-    click_fb = await mgr.click_element(db_session, bp, "#nav-docs", actor="worker-3")
-    assert click_fb["ok"] is True
-    assert click_fb["engine_mode"] == "headless_fallback"
-    assert click_fb["executed_live"] is False
-    assert "fallback_reason" in click_fb
-
-    sensitive_val = "confidential-form-entry-987654"
-    fill_fb = await mgr.fill_input(db_session, bp, "input[name='notes']", sensitive_val, actor="worker-3")
-    assert fill_fb["ok"] is True
-    assert fill_fb["engine_mode"] == "headless_fallback"
-    assert fill_fb["executed_live"] is False
-    assert fill_fb["redacted"] is True
-    assert fill_fb["value_length"] == len(sensitive_val)
-    # Raw input text MUST NOT appear in SVG or AuditLog
-    assert sensitive_val not in (bp.last_snapshot_svg or "")
-    logs = (await db_session.execute(select(AuditLog).where(AuditLog.resource_id == bp.id))).scalars().all()
-    assert all(sensitive_val not in json.dumps(log.details) for log in logs)
-
-    snap_fb = await mgr.capture_snapshot(db_session, bp, actor="worker-3")
-    assert snap_fb["ok"] is True
-    assert snap_fb["engine_mode"] == "headless_fallback"
-    assert snap_fb["executed_live"] is False
-    assert snap_fb["format"] == "svg"
-    assert snap_fb["screenshot_base64"] is None
-    assert "<svg" in snap_fb["svg"]
-    assert snap_fb["lock_status"]["file_lock_present"] is True
-
-    # 2. Simulated live Playwright context path: verifies live click, fill, and PNG+SVG snapshot
-    class _FakePage:
+    class FakePage:
         def __init__(self) -> None:
             self.url = "https://fastapi.tiangolo.com/tutorial/submitted"
             self.clicked: list[str] = []
@@ -906,46 +989,38 @@ async def test_browser_safe_actions_click_fill_snapshot_fallback_and_playwright_
         async def screenshot(self, full_page: bool = False, type: str = "png") -> bytes:
             return b"\x89PNG\r\n\x1a\nFAKE_PNG_PAYLOAD"
 
-    class _FakeContext:
-        def __init__(self, page: _FakePage) -> None:
+    class FakeContext:
+        def __init__(self, page: FakePage) -> None:
             self.pages = [page]
 
         async def close(self) -> None:
             return None
 
-    class _FakePlaywright:
+    class FakePlaywright:
         async def stop(self) -> None:
             return None
 
-    fake_page = _FakePage()
-    mgr._active_contexts[bp.id] = (_FakePlaywright(), _FakeContext(fake_page))
+    fake_page = FakePage()
+    mgr._active_contexts[bp.id] = (FakePlaywright(), FakeContext(fake_page))
+    bp.engine_mode = "playwright"
 
     live_click = await mgr.click_element(db_session, bp, "button.primary-submit", actor="worker-3")
-    assert live_click["ok"] is True
-    assert live_click["engine_mode"] == "playwright"
-    assert live_click["executed_live"] is True
+    assert live_click["ok"] is True and live_click["executed_live"] is True
     assert fake_page.clicked == ["button.primary-submit"]
-    assert live_click["page_title"] == "FastAPI Tutorial Live"
 
-    live_val = "live-redacted-field-xyz"
-    live_fill = await mgr.fill_input(db_session, bp, "textarea#summary", live_val, actor="worker-3")
-    assert live_fill["ok"] is True
-    assert live_fill["engine_mode"] == "playwright"
-    assert live_fill["executed_live"] is True
+    secret_value = "live-redacted-field-xyz"
+    live_fill = await mgr.fill_input(db_session, bp, "textarea#summary", secret_value, actor="worker-3")
+    assert live_fill["ok"] is True and live_fill["executed_live"] is True
     assert live_fill["redacted"] is True
-    assert fake_page.filled == [("textarea#summary", live_val)]
-    assert live_val not in (bp.last_snapshot_svg or "")
+    assert secret_value not in json.dumps(live_fill)
+    assert fake_page.filled == [("textarea#summary", secret_value)]
 
-    live_snap = await mgr.capture_snapshot(db_session, bp, actor="worker-3", full_page=True)
-    assert live_snap["ok"] is True
-    assert live_snap["engine_mode"] == "playwright"
-    assert live_snap["executed_live"] is True
-    assert live_snap["format"] == "png+svg"
-    assert live_snap["screenshot_bytes"] == len(b"\x89PNG\r\n\x1a\nFAKE_PNG_PAYLOAD")
-    assert base64.b64decode(live_snap["screenshot_base64"]) == b"\x89PNG\r\n\x1a\nFAKE_PNG_PAYLOAD"
-    assert "<svg" in live_snap["svg"]
-
+    live_snapshot = await mgr.capture_snapshot(db_session, bp, actor="worker-3", full_page=True)
+    assert live_snapshot["ok"] is True and live_snapshot["executed_live"] is True
+    assert live_snapshot["format"] == "png"
+    assert base64.b64decode(live_snapshot["screenshot_base64"]).startswith(b"\x89PNG\r\n\x1a\n")
     await mgr.stop_profile(db_session, bp, actor="worker-3")
+
 
 
 async def test_replace_employee_best_effort_bridge_session_cleanup_online_and_offline(db_session, monkeypatch):
@@ -1220,6 +1295,19 @@ async def test_router_cross_account_session_override_guard_and_health_score_reco
     assert denied_exec.metadata.get("cross_account_denied") is True
     assert "Cross-account" in (denied_exec.error_message or "")
 
+    denied_dry_run = await router.route_and_execute(
+        db_session,
+        ProviderRequest(
+            prompt="Try dry-run hijacking B",
+            agent_id="emp-iso-a",
+            metadata={"session_id": "sess-iso-b"},
+            dry_run=True,
+        ),
+        preferred_provider_id="arena-local-bridge",
+    )
+    assert denied_dry_run.success is False
+    assert denied_dry_run.metadata.get("cross_account_denied") is True
+
     denied_stream = [
         c
         async for c in router.route_and_stream(
@@ -1232,6 +1320,23 @@ async def test_router_cross_account_session_override_guard_and_health_score_reco
     assert denied_stream[0].done is True
     assert denied_stream[0].success is False
     assert denied_stream[0].metadata.get("cross_account_denied") is True
+
+    denied_stream_dry = [
+        chunk
+        async for chunk in router.route_and_stream(
+            db_session,
+            ProviderRequest(
+                prompt="Try dry-run streaming hijacking B",
+                agent_id="emp-iso-a",
+                metadata={"session_id": "sess-iso-b"},
+                dry_run=True,
+            ),
+            preferred_provider_id="arena-local-bridge",
+        )
+    ]
+    assert len(denied_stream_dry) == 1
+    assert denied_stream_dry[0].success is False
+    assert denied_stream_dry[0].metadata.get("cross_account_denied") is True
 
     # 2. Dynamic health_score degradation on repeated HTTP errors and recovery on live success
     for pid in ("arena-agent", "anthropic-claude"):
@@ -1286,16 +1391,10 @@ async def test_router_cross_account_session_override_guard_and_health_score_reco
 
 
 async def test_automa_workflow_step_execution_redaction_and_policy_rejection(db_session, tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "app.browser.manager.detect_playwright_capabilities",
-        lambda: {
-            "playwright_installed": True,
-            "chromium_installed": False,
-            "chromium_path": None,
-            "engine_mode": "headless_fallback",
-        },
-    )
+    async def allow_public_url(url: str) -> str:
+        return url
 
+    monkeypatch.setattr("app.browser.manager.validate_public_navigation_url", allow_public_url)
     mgr = BrowserManager()
     bp = BrowserProfile(
         id="profile-automa-runner",
@@ -1303,16 +1402,13 @@ async def test_automa_workflow_step_execution_redaction_and_policy_rejection(db_
         agent_id="worker-3",
         profile_dir=str(tmp_path / "profile-automa-runner"),
         mode="background",
-        status="ready",
+        status="running",
         current_url="about:blank",
     )
     db_session.add(bp)
     await db_session.commit()
-    await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background")
-
     automa = AutomaWorkflowAdapter()
 
-    # 1. Fail-closed policy rejection when ANY step targets CAPTCHA — zero steps execute!
     rejected = await automa.execute_workflow(
         db_session,
         bp,
@@ -1328,73 +1424,82 @@ async def test_automa_workflow_step_execution_redaction_and_policy_rejection(db_
     assert rejected["trace"] == []
     assert bp.current_url == "about:blank"
 
-    # 2. Valid 5-step workflow executes sequentially in headless_fallback with strict value redaction
     secret_field_text = "automa-redacted-entry-554433"
-    res = await automa.execute_workflow(
-        db_session,
-        bp,
-        [
-            {"type": "navigate", "url": "https://fastapi.tiangolo.com/tutorial/"},
-            {"type": "fill_input", "selector": "input[name='q']", "value": secret_field_text},
-            {"type": "click_element", "selector": "button[type='submit']"},
-            {"type": "wait", "ms": 5},
-            {"type": "capture_snapshot"},
-        ],
-        manager=mgr,
-        actor="worker-3",
-    )
-    assert res["status"] == "completed"
-    assert res["steps_completed"] == 5
-    assert len(res["trace"]) == 5
-    assert [t["type"] for t in res["trace"]] == [
-        "navigate",
-        "fill_input",
-        "click_element",
-        "wait",
-        "capture_snapshot",
+    steps = [
+        {"type": "navigate", "url": "https://fastapi.tiangolo.com/tutorial/"},
+        {"type": "fill_input", "selector": "input[name='q']", "value": secret_field_text},
+        {"type": "click_element", "selector": "button[type='submit']"},
+        {"type": "extract_text", "selector": "#summary"},
+        {"type": "wait", "ms": 1},
+        {"type": "capture_snapshot"},
     ]
-    assert res["trace"][1]["redacted"] is True
-    assert res["trace"][1]["value_length"] == len(secret_field_text)
-    assert secret_field_text not in json.dumps(res)
-    assert secret_field_text not in (bp.last_snapshot_svg or "")
+    with pytest.raises(HTTPException) as unavailable:
+        await automa.execute_workflow(db_session, bp, steps, manager=mgr, actor="worker-3")
+    assert unavailable.value.status_code == 501
+    assert bp.current_url == "about:blank"
+    assert secret_field_text not in json.dumps(
+        (await db_session.execute(select(AuditLog).where(AuditLog.resource_id == bp.id))).scalars().all(),
+        default=str,
+    )
 
-    # 3. Also verify delegation through AutomaWorkflowAdapter.execute_action(..., params={db, profile, manager, steps})
-    class _FakePage:
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        async def inner_text(self, timeout: int = 5_000) -> str:
+            return "Build Passed! sessionid=never_expose_441"
+
+    class FakePage:
         def __init__(self) -> None:
-            self.url = "https://fastapi.tiangolo.com/live/"
-            self.clicked: list[str] = []
-            self.filled: list[tuple[str, str]] = []
+            self.url = "about:blank"
+            self.calls: list[tuple[str, str]] = []
 
-        async def goto(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 15000) -> None:
+        async def goto(self, url: str, timeout: int = 10_000) -> None:
             self.url = url
+            self.calls.append(("goto", url))
 
-        async def click(self, selector: str, timeout: int = 5000) -> None:
-            self.clicked.append(selector)
+        async def fill(self, selector: str, value: str, timeout: int = 5_000) -> None:
+            self.calls.append(("fill", selector))
 
-        async def fill(self, selector: str, value: str, timeout: int = 5000) -> None:
-            self.filled.append((selector, value))
+        async def click(self, selector: str, timeout: int = 5_000) -> None:
+            self.calls.append(("click", selector))
 
         async def title(self) -> str:
             return "Live Automa Page"
 
+        def locator(self, selector: str) -> FakeLocator:
+            self.calls.append(("extract_text", selector))
+            return FakeLocator()
+
         async def screenshot(self, full_page: bool = False, type: str = "png") -> bytes:
+            self.calls.append(("screenshot", "page"))
             return b"\x89PNG\r\n\x1a\nLIVE_AUTOMA"
 
-    class _FakeCtx:
-        def __init__(self, page: _FakePage) -> None:
+    class FakeContext:
+        def __init__(self, page: FakePage) -> None:
             self.pages = [page]
 
         async def close(self) -> None:
             return None
 
-    class _FakePW:
+    class FakePlaywright:
         async def stop(self) -> None:
             return None
 
-    fake_page = _FakePage()
-    mgr._active_contexts[bp.id] = (_FakePW(), _FakeCtx(fake_page))
+    fake_page = FakePage()
+    mgr._active_contexts[bp.id] = (FakePlaywright(), FakeContext(fake_page))
+    res = await automa.execute_workflow(db_session, bp, steps, manager=mgr, actor="worker-3")
+    assert res["status"] == "completed"
+    assert res["steps_completed"] == len(steps)
+    assert res["trace"][1]["redacted"] is True
+    assert res["trace"][1]["value_length"] == len(secret_field_text)
+    assert "never_expose_441" not in json.dumps(res)
+    assert secret_field_text not in json.dumps(res)
+    assert ("fill", "input[name='q']") in fake_page.calls
+    assert ("click", "button[type='submit']") in fake_page.calls
 
-    live_res = await automa.execute_action(
+    direct = await automa.execute_action(
         bp.id,
         "run_workflow",
         {
@@ -1402,35 +1507,18 @@ async def test_automa_workflow_step_execution_redaction_and_policy_rejection(db_
             "profile": bp,
             "manager": mgr,
             "actor": "worker-3",
-            "steps": [
-                {"type": "navigate", "url": "https://fastapi.tiangolo.com/live/"},
-                {"type": "fill_input", "selector": "#note", "value": "live-redacted-text"},
-                {"type": "click_element", "selector": "#go"},
-                {"type": "capture_snapshot"},
-            ],
+            "steps": [{"type": "click_element", "selector": "#go"}],
         },
     )
-    assert live_res["status"] == "completed"
-    assert live_res["steps_completed"] == 4
-    assert fake_page.filled == [("#note", "live-redacted-text")]
-    assert fake_page.clicked == ["#go"]
-    assert live_res["trace"][3]["format"] == "png+svg"
-    assert "live-redacted-text" not in json.dumps(live_res)
+    assert direct["status"] == "completed"
+    assert direct["steps_completed"] == 1
+    assert fake_page.calls[-1] == ("click", "#go")
 
     await mgr.stop_profile(db_session, bp, actor="worker-3")
 
 
-async def test_browser_manager_run_userscript_authorized_live_fallback_and_denied(db_session, tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "app.browser.manager.detect_playwright_capabilities",
-        lambda: {
-            "playwright_installed": True,
-            "chromium_installed": False,
-            "chromium_path": None,
-            "engine_mode": "headless_fallback",
-        },
-    )
 
+async def test_browser_manager_userscripts_remain_storage_only_even_with_live_context(db_session, tmp_path):
     mgr = BrowserManager()
     bp = BrowserProfile(
         id="profile-userscript-harness",
@@ -1438,98 +1526,71 @@ async def test_browser_manager_run_userscript_authorized_live_fallback_and_denie
         agent_id="worker-3",
         profile_dir=str(tmp_path / "profile-userscript-harness"),
         mode="background",
-        status="ready",
-        current_url="http://localhost:5173/dashboard",
+        status="running",
+        current_url="https://example.com/dashboard",
     )
     db_session.add(bp)
     await db_session.commit()
-    await mgr.launch_profile(db_session, bp, owner="worker-3", mode="background", url="http://localhost:5173/dashboard")
-
     approved_script = {
         "id": "us-safe-inspector",
         "name": "Safe Inspector",
         "is_enabled": True,
         "audit_status": "approved",
         "code": "return document.title;",
-        "match_patterns": ["http://localhost:*/*"],
+        "match_patterns": ["https://example.com/*"],
         "allowed_roles": ["worker"],
         "allowed_agent_ids": ["worker-3"],
     }
 
-    # 1. Authorized worker in headless_fallback mode succeeds & records AuditLog
-    fb = await mgr.run_userscript(
-        db_session,
-        bp,
-        approved_script,
-        agent_id="worker-3",
-        agent_role="worker",
-    )
-    assert fb["ok"] is True
-    assert fb["engine_mode"] == "headless_fallback"
-    assert fb["executed_live"] is False
-    assert fb["userscript_id"] == "us-safe-inspector"
-
-    # 2. Unauthorized role fails closed & records browser.userscript.denied AuditLog
-    with pytest.raises(ValueError, match="Userscript authorization denied"):
-        await mgr.run_userscript(db_session, bp, approved_script, agent_id="worker-3", agent_role="guest")
-
-    # 3. Non-matching URL fails closed
-    with pytest.raises(ValueError, match="Userscript authorization denied"):
+    with pytest.raises(HTTPException) as unavailable:
         await mgr.run_userscript(
-            db_session,
-            bp,
-            approved_script,
-            agent_id="worker-3",
-            agent_role="worker",
-            target_url="https://github.com/oldman-088/AATM",
+            db_session, bp, approved_script, agent_id="worker-3", agent_role="worker"
         )
+    assert unavailable.value.status_code == 501
+    assert "storage only" in unavailable.value.detail.lower()
 
-    # 4. Prohibited CAPTCHA/cookie script fails closed even if audit_status was claimed approved
-    evil_script = dict(approved_script, id="us-evil", code="return document.cookie;")
-    with pytest.raises(ValueError, match="Userscript authorization denied"):
-        await mgr.run_userscript(db_session, bp, evil_script, agent_id="worker-3", agent_role="worker")
-
-    denied_logs = (
-        await db_session.execute(
-            select(AuditLog).where(AuditLog.resource_id == bp.id, AuditLog.action == "browser.userscript.denied")
-        )
-    ).scalars().all()
-    assert len(denied_logs) == 3
-
-    # 5. Live Playwright execution path runs page.evaluate and returns structured result
-    class _EvalPage:
+    class EvalPage:
         def __init__(self) -> None:
             self.evaluated: list[str] = []
 
         async def evaluate(self, script: str) -> str:
             self.evaluated.append(script)
-            return "AATM Command Center"
+            return "should never execute"
 
-    class _EvalCtx:
-        def __init__(self, page: _EvalPage) -> None:
+    class EvalContext:
+        def __init__(self, page: EvalPage) -> None:
             self.pages = [page]
 
         async def close(self) -> None:
             return None
 
-    class _EvalPW:
+    class FakePlaywright:
         async def stop(self) -> None:
             return None
 
-    eval_page = _EvalPage()
-    mgr._active_contexts[bp.id] = (_EvalPW(), _EvalCtx(eval_page))
+    eval_page = EvalPage()
+    mgr._active_contexts[bp.id] = (FakePlaywright(), EvalContext(eval_page))
+    with pytest.raises(HTTPException) as live_unavailable:
+        await mgr.run_userscript(
+            db_session, bp, approved_script, agent_id="worker-3", agent_role="worker"
+        )
+    assert live_unavailable.value.status_code == 501
+    assert eval_page.evaluated == []
 
-    live = await mgr.run_userscript(db_session, bp, approved_script, agent_id="worker-3", agent_role="worker")
-    assert live["ok"] is True
-    assert live["engine_mode"] == "playwright"
-    assert live["executed_live"] is True
-    assert live["result"] == "AATM Command Center"
-    assert len(eval_page.evaluated) == 1
+    with pytest.raises(HTTPException) as adapter_unavailable:
+        await BROWSER_ENGINE_REGISTRY["playwright"].execute_action(bp.id, "run_userscript", {})
+    assert adapter_unavailable.value.status_code == 501
+    executions = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.resource_id == bp.id, AuditLog.action == "browser.userscript.executed")
+        )
+    ).scalars().all()
+    assert executions == []
 
-    await mgr.stop_profile(db_session, bp, actor="worker-3")
 
 
-async def test_replace_employee_stops_running_browser_profiles_and_releases_locks(db_session, tmp_path):
+async def test_replace_employee_stops_running_browser_profiles_and_releases_locks(db_session, tmp_path, monkeypatch):
+    _enable_fake_live_browser(monkeypatch, browser_manager)
     bp_dir = tmp_path / "profile-replace-lock"
     bp = BrowserProfile(
         id="profile-replace-lock",
@@ -1575,10 +1636,11 @@ async def test_replace_employee_stops_running_browser_profiles_and_releases_lock
 
 async def test_worker_daemon_inflight_keepalive_and_step_trace_report(tmp_path: Path):
     heartbeat_count = 0
+    model_turns = 0
     reported_payloads: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal heartbeat_count
+        nonlocal heartbeat_count, model_turns
         path = request.url.path
         if path.endswith("/heartbeat"):
             heartbeat_count += 1
@@ -1592,9 +1654,20 @@ async def test_worker_daemon_inflight_keepalive_and_step_trace_report(tmp_path: 
                         "title": "Long running task",
                         "description": "Verify in-flight keepalive heartbeats & step trace",
                         "expected_deliverables": ["keepalive_deliverable.md"],
+                        "employee": {"permissions": ["workspace_exec"]},
                     }
                 },
             )
+        if path.endswith("/model"):
+            model_turns += 1
+            content = (
+                '{"action":"write","path":"keepalive_deliverable.md","content":"Completed\\n"}'
+                if model_turns == 1
+                else '{"action":"done","summary":"Keepalive task complete.","deliverables":["keepalive_deliverable.md"]}'
+            )
+            return httpx.Response(200, json={"content": content})
+        if path.endswith("/progress"):
+            return httpx.Response(200, json={"status": "recorded"})
         if path.endswith("/report"):
             reported_payloads.append(json.loads(request.content.decode("utf-8")))
             return httpx.Response(200, json={"status": "completed"})
@@ -1632,8 +1705,9 @@ async def test_worker_daemon_inflight_keepalive_and_step_trace_report(tmp_path: 
     assert rep["success"] is True
     assert rep["keepalive_heartbeats"] >= 2
     assert rep["total_elapsed_ms"] >= 50.0
-    assert len(rep["trace"]) >= 1
-    assert rep["trace"][0]["step"] == "write_deliverable"
+    assert len(rep["trace"]) >= 2
+    assert rep["trace"][0]["step"] == "agent_iteration_1"
+    assert rep["trace"][0]["action"] == "write"
     assert rep["trace"][0]["exit_code"] == 0
 
 
@@ -1713,10 +1787,9 @@ async def test_worker_daemon_mid_task_keepalive_401_halts_immediately(
 
 
 @pytest.mark.asyncio
-async def test_browser_extract_text_policy_redaction_and_fallback(
-    db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_browser_extract_text_policy_redaction_and_live_context_only(
+    db_session, tmp_path: Path
 ) -> None:
-    # 1. Redaction helper scrubs tokens, cookies, session IDs, and JWTs while preserving safe prose
     bearer_tok = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiJ1c2VyLTEifQ." + "c2lnbmF0dXJlMTIzNDU2"
     raw_dom = (
         f"Dashboard Ready. Authorization: Bearer {bearer_tok} "
@@ -1731,55 +1804,40 @@ async def test_browser_extract_text_policy_redaction_and_fallback(
     assert "sess_secret_val_9981" not in masked
     assert "tok_secret_value_abc12345" not in masked
 
-    # 2. Headless fallback path + policy enforcement
     profile = BrowserProfile(
         id="bp-extract-test",
         name="Extract Profile",
         agent_id="worker-3",
         profile_dir=str(tmp_path / "bp-extract"),
+        mode="background",
         status="ready",
+        current_url="about:blank",
     )
     db_session.add(profile)
     await db_session.commit()
-
     mgr = BrowserManager()
-    monkeypatch.setattr(
-        "app.browser.manager.detect_playwright_capabilities",
-        lambda: {
-            "playwright_installed": True,
-            "chromium_installed": False,
-            "chromium_path": None,
-            "engine_mode": "headless_fallback",
-        },
-    )
 
     with pytest.raises(ValueError, match="must be running"):
         await mgr.extract_text(db_session, profile, "main")
-
-    await mgr.launch_profile(db_session, profile, owner="worker-3", mode="background")
-
+    profile.status = "running"
     with pytest.raises(ValueError, match="Policy violation"):
         await mgr.extract_text(db_session, profile, "#cf-turnstile")
+    with pytest.raises(HTTPException) as unavailable:
+        await mgr.extract_text(db_session, profile, "main", max_chars=250, actor="worker-3")
+    assert unavailable.value.status_code == 501
 
-    fb = await mgr.extract_text(db_session, profile, "main", max_chars=250, actor="worker-3")
-    assert fb["ok"] is True
-    assert fb["engine_mode"] == "headless_fallback"
-    assert fb["text"] == ""
-    assert fb["redacted_count"] == 0
-
-    # 3. Live Playwright mock path: redaction + max_chars truncation + no raw secret in AuditLog
-    class _FakeLocator:
+    class FakeLocator:
         def __init__(self, text_val: str) -> None:
             self._text_val = text_val
 
         @property
-        def first(self) -> "_FakeLocator":
+        def first(self) -> "FakeLocator":
             return self
 
-        async def inner_text(self, timeout: int = 5000) -> str:
+        async def inner_text(self, timeout: int = 5_000) -> str:
             return self._text_val
 
-    class _FakeExtractPage:
+    class FakeExtractPage:
         def __init__(self, text_val: str) -> None:
             self.url = "https://example.com/status"
             self._text_val = text_val
@@ -1787,23 +1845,24 @@ async def test_browser_extract_text_policy_redaction_and_fallback(
         async def title(self) -> str:
             return "Status Page"
 
-        def locator(self, selector: str) -> _FakeLocator:
-            return _FakeLocator(self._text_val)
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(self._text_val)
 
-    class _FakeExtractContext:
-        def __init__(self, page: _FakeExtractPage) -> None:
+    class FakeExtractContext:
+        def __init__(self, page: FakeExtractPage) -> None:
             self.pages = [page]
 
         async def close(self) -> None:
             return None
 
-    class _FakeExtractPw:
+    class FakeExtractPlaywright:
         async def stop(self) -> None:
             return None
 
+    profile.engine_mode = "playwright"
     mgr._active_contexts[profile.id] = (
-        _FakeExtractPw(),
-        _FakeExtractContext(_FakeExtractPage(raw_dom + " " + ("Z" * 120))),
+        FakeExtractPlaywright(),
+        FakeExtractContext(FakeExtractPage(raw_dom + " " + ("Z" * 120))),
     )
     live_res = await mgr.extract_text(db_session, profile, "article.status", max_chars=90, actor="worker-3")
     assert live_res["ok"] is True
@@ -1814,7 +1873,6 @@ async def test_browser_extract_text_policy_redaction_and_fallback(
     assert "sess_secret_val_9981" not in live_res["text"]
     assert bearer_tok not in live_res["text"]
 
-    # Confirm AuditLog recorded browser.extract_text without raw sensitive content
     audit_res = await db_session.execute(
         select(AuditLog).where(
             AuditLog.action == "browser.extract_text",
@@ -1822,7 +1880,7 @@ async def test_browser_extract_text_policy_redaction_and_fallback(
         )
     )
     audits = list(audit_res.scalars().all())
-    assert len(audits) == 2
+    assert len(audits) == 1
     for row in audits:
         dumped = json.dumps(row.details or {})
         assert "sess_secret_val_9981" not in dumped
@@ -1832,8 +1890,9 @@ async def test_browser_extract_text_policy_redaction_and_fallback(
     await mgr.stop_profile(db_session, profile, actor="worker-3")
 
 
+
 @pytest.mark.asyncio
-async def test_browser_use_and_openbrowser_real_step_and_workflow_execution(
+async def test_browser_use_and_openbrowser_workflows_run_against_live_context_mocks(
     db_session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     profile = BrowserProfile(
@@ -1841,7 +1900,8 @@ async def test_browser_use_and_openbrowser_real_step_and_workflow_execution(
         name="Real Engines Profile",
         agent_id="worker-3",
         profile_dir=str(tmp_path / "bp-engines"),
-        status="ready",
+        mode="background",
+        status="running",
     )
     db_session.add(profile)
     await db_session.commit()
@@ -1851,12 +1911,27 @@ async def test_browser_use_and_openbrowser_real_step_and_workflow_execution(
         "app.browser.manager.detect_playwright_capabilities",
         lambda: {
             "playwright_installed": True,
-            "chromium_installed": False,
-            "chromium_path": None,
-            "engine_mode": "headless_fallback",
+            "chromium_installed": True,
+            "executable_path": "/mock/chromium",
+            "browser_source": "test-harness",
+            "engine_mode": "playwright",
         },
     )
-    await mgr.launch_profile(db_session, profile, owner="worker-3", mode="background")
+    monkeypatch.setattr(
+        "app.browser.engines.detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": True,
+            "executable_path": "/mock/chromium",
+            "browser_source": "test-harness",
+            "engine_mode": "playwright",
+        },
+    )
+
+    async def allow_public_url(url: str) -> str:
+        return url
+
+    monkeypatch.setattr("app.browser.manager.validate_public_navigation_url", allow_public_url)
 
     class _FakeLoc:
         def __init__(self, selector: str, log: list[tuple[str, str]]) -> None:
@@ -1917,6 +1992,7 @@ async def test_browser_use_and_openbrowser_real_step_and_workflow_execution(
         adapter = BROWSER_ENGINE_REGISTRY[engine_key]
         caps = adapter.capabilities()
         assert caps["supports_step_execution"] is True
+        assert caps["status"] == "ready"
         assert "extract_text" in caps["supported_steps"]
 
         fake_page = _FakePage()
@@ -1979,10 +2055,10 @@ async def test_dynamic_team_skill_gap_analyzer_and_specialist_provisioning(
     settings = get_settings()
     monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
 
-    required = ["postgresql", "alembic", "playwright", "quantum_ml"]
+    required = ["indexing", "migrations", "browser_use", "quantum_ml"]
     gap_before = await analyze_team_skill_gaps(db_session, required, divisions=["D02", "D06"])
     assert gap_before["active_employee_count"] >= 1
-    for skill in ("postgresql", "alembic", "playwright", "quantum_ml"):
+    for skill in ("indexing", "migrations", "browser_use", "quantum_ml"):
         assert skill in gap_before["missing_skills"]
 
     rec_ids = [r["template_id"] for r in gap_before["recommended_templates"]]
@@ -2117,12 +2193,13 @@ async def test_replace_employee_allocates_replacement_session_and_cleans_stale_w
 
 
 @pytest.mark.asyncio
-async def test_provider_router_recover_degraded_sessions_online_and_offline(db_session) -> None:
-    with _MockBridgeServer() as srv:
+async def test_provider_router_recover_degraded_sessions_online_and_offline(db_session, monkeypatch) -> None:
+    monkeypatch.setenv("RECOVERY_BRIDGE_TOKEN", "session-recovery-token")
+    with _MockBridgeServer(expected_bearer="session-recovery-token") as srv:
         p_bridge = await db_session.get(AIProvider, "arena-local-bridge")
         assert p_bridge is not None
         p_bridge.endpoint_url = srv.base_url
-        p_bridge.credential_ref = None
+        p_bridge.credential_ref = "env:RECOVERY_BRIDGE_TOKEN"
         p_bridge.is_enabled = True
 
         acct_bridge = ProviderAccount(
@@ -2411,12 +2488,13 @@ async def test_scheduler_automatic_degraded_session_recovery_and_cooldown(
 
     settings = get_settings()
     monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
+    monkeypatch.setenv("SCHEDULER_BRIDGE_TOKEN", "scheduler-recovery-token")
 
-    with _MockBridgeServer() as srv:
+    with _MockBridgeServer(expected_bearer="scheduler-recovery-token") as srv:
         p_bridge = await db_session.get(AIProvider, "arena-local-bridge")
         assert p_bridge is not None
         p_bridge.endpoint_url = srv.base_url
-        p_bridge.credential_ref = None
+        p_bridge.credential_ref = "env:SCHEDULER_BRIDGE_TOKEN"
         p_bridge.is_enabled = True
 
         acct = ProviderAccount(
@@ -2515,5 +2593,3 @@ async def test_scheduler_automatic_degraded_session_recovery_and_cooldown(
         cycle3 = await scheduler.run_orchestration_cycle(db_session, force_session_recovery=True)
         assert "error" in cycle3["session_recovery"]
         assert any(d["task_id"] == local_task_2.id for d in cycle3["dispatched"])
-
-

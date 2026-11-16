@@ -12,7 +12,7 @@ class AIProvider(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    provider_type: Mapped[str] = mapped_column(String(48), nullable=False)  # arena_local_bridge|arena_agent|anthropic_claude
+    provider_type: Mapped[str] = mapped_column(String(48), nullable=False)  # arena_local_bridge|arena_agent|anthropic_claude|openai_compatible
     endpoint_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
     credential_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
     default_model: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -37,6 +37,8 @@ class ProviderUsageLog(Base):
     model_name: Mapped[str] = mapped_column(String(120), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    input_tokens_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    output_tokens_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     confirmed_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

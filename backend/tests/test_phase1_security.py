@@ -147,7 +147,19 @@ async def test_git_status_rejects_unregistered_repo_path(client: AsyncClient, ad
     assert ok_registered.status_code == 200
 
 
+def _disable_background_lifespan_loops(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.runtime.background_scheduler import BackgroundScheduler
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(BackgroundScheduler, "run_orchestration_forever", _noop)
+    monkeypatch.setattr(BackgroundScheduler, "run_self_healing_forever", _noop)
+    monkeypatch.setattr(get_settings(), "AGENT_LOOP_ENABLED", False)
+
+
 def test_websocket_requires_jwt_and_rejects_unauthenticated_within_timeout(monkeypatch: pytest.MonkeyPatch):
+    _disable_background_lifespan_loops(monkeypatch)
     monkeypatch.setattr(main_module, "WS_AUTH_TIMEOUT_SECONDS", 0.15)
     settings = get_settings()
     token = create_access_token(subject=settings.DEFAULT_ADMIN_EMAIL, role="admin")
@@ -179,6 +191,7 @@ def test_websocket_requires_jwt_and_rejects_unauthenticated_within_timeout(monke
 
 
 async def test_websocket_emits_only_to_authenticated_sockets(monkeypatch: pytest.MonkeyPatch):
+    _disable_background_lifespan_loops(monkeypatch)
     monkeypatch.setattr(main_module, "WS_AUTH_TIMEOUT_SECONDS", 0.15)
     settings = get_settings()
     token = create_access_token(subject=settings.DEFAULT_ADMIN_EMAIL, role="admin")

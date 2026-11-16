@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     REPO_ROOT: Path = ROOT_DIR
 
     ARENA_BRIDGE_URL: str = "http://127.0.0.1:4100"
+    ARENA_BRIDGE_TIMEOUT: float = 600.0
+    ARENA_BRIDGE_MAX_CONCURRENCY: int = Field(default=1, ge=1)
+    AGENT_LOOP_ENABLED: bool = True
+    AGENT_LOOP_POLL_SECONDS: float = Field(default=3.0, gt=0)
+    AGENT_MAX_ITERATIONS: int = Field(default=8, ge=1)
+    AGENT_MAX_PARALLEL: int = Field(default=1, ge=1)
+    AGENT_TASK_BUDGET_USD: float = Field(default=5.0, ge=0)
+    SCHEDULER_INTERVAL_SECONDS: float = Field(default=5.0, gt=0)
+    SELF_HEALING_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
+    PROVIDER_MAX_RETRIES: int = Field(default=2, ge=0)
+    PROVIDER_RETRY_AFTER_MAX_SECONDS: float = Field(default=30.0, ge=0)
     ANTHROPIC_API_KEY_REF: str = "env:ANTHROPIC_API_KEY"
     MONTHLY_BUDGET_USD: float = 100.0
     DAILY_BUDGET_USD: float = 20.0
@@ -105,6 +116,12 @@ class Settings(BaseSettings):
     SANDBOX_CPU_SECONDS: int = 30
     SANDBOX_MAX_PROCS: int = 64
     SANDBOX_DOCKER_IMAGE: str = "aatm-sandbox:latest"
+
+    @model_validator(mode="after")
+    def default_agent_parallel_from_bridge(self) -> "Settings":
+        if "AGENT_MAX_PARALLEL" not in self.model_fields_set:
+            self.AGENT_MAX_PARALLEL = max(1, self.ARENA_BRIDGE_MAX_CONCURRENCY)
+        return self
 
     # Supports 20+ concurrent AI employees subject to host capacity
     MAX_CONCURRENT_WORKERS: int = 25

@@ -27,7 +27,7 @@
     "approval_types": ["branch", "spend", "deploy", "merge", "delete", "credential", "security", "irreversible"],
     "memory_scopes": ["employee", "team", "organization", "global", "project", "agent", "task", "decision"],
     "browser_modes": ["visible", "background"],
-    "provider_types": ["arena_local_bridge", "arena_agent", "anthropic_claude"],
+    "provider_types": ["arena_local_bridge", "arena_agent", "anthropic_claude", "openai_compatible"],
     "execution_modes": ["manual", "automatic", "collaborative"],
     "autonomy_modes": ["supervised", "semi_autonomous", "highly_autonomous"],
     "allocation_modes": ["one_per_employee", "shared", "hybrid"],

@@ -131,7 +131,7 @@ async def test_task_dag_idempotency_and_orchestration(client: AsyncClient, auth_
     await client.patch(f"/api/v1/tasks/{child_id}", headers=auth_headers, json={"status": "completed"})
 
 
-async def test_providers_and_browser_profiles_lifecycle(client: AsyncClient, auth_headers):
+async def test_providers_and_browser_profiles_lifecycle(client: AsyncClient, auth_headers, monkeypatch):
     hc = await client.post("/api/v1/providers/health-check", headers=auth_headers)
     assert hc.status_code == 200
     assert len(hc.json()) == 3
@@ -146,13 +146,64 @@ async def test_providers_and_browser_profiles_lifecycle(client: AsyncClient, aut
 
     usage = await client.get("/api/v1/providers/usage", headers=auth_headers)
     assert usage.status_code == 200
-    assert len(usage.json()["logs"]) >= 1
+    assert dry.json()["estimated_cost_usd"] == 0.0
+    assert len(usage.json()["logs"]) == 0
 
-    # Browser launch, lock conflict, navigate, crash recovery, stop
+    # Exercise the HTTP lifecycle against a deterministic mocked live Playwright context;
+    # tests never pretend browser actions execute when Chromium is unavailable.
+    from app.browser import manager as browser_manager_module
+    from app.browser.manager import browser_manager
+
+    monkeypatch.setattr(
+        browser_manager_module,
+        "detect_playwright_capabilities",
+        lambda: {
+            "playwright_installed": True,
+            "chromium_installed": True,
+            "executable_path": None,
+            "browser_source": "test-harness",
+            "engine_mode": "playwright",
+            "playwright_browsers_path": None,
+        },
+    )
+
+    async def allow_test_url(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(browser_manager_module, "validate_public_navigation_url", allow_test_url)
+
+    class FakePage:
+        def __init__(self, url: str):
+            self.url = url
+
+        async def title(self) -> str:
+            return "Test browser page"
+
+    class FakeContext:
+        def __init__(self, page: FakePage):
+            self.pages = [page]
+
+        async def close(self) -> None:
+            return None
+
+    class FakePlaywright:
+        async def stop(self) -> None:
+            return None
+
+    async def fake_launch(profile, _profile_dir, _caps, url):
+        page = FakePage(url or profile.current_url or "about:blank")
+        profile.current_url = page.url
+        profile.page_title = "Test browser page"
+        browser_manager._active_contexts[profile.id] = (FakePlaywright(), FakeContext(page))
+        return True, None
+
+    monkeypatch.setattr(browser_manager, "_launch_playwright_context", fake_launch)
+
+    # Browser launch, lock conflict, crash recovery, stop
     launch = await client.post(
         "/api/v1/browsers/profile-frontend-preview/launch",
         headers=auth_headers,
-        json={"mode": "visible", "url": "http://localhost:5173", "owner": "worker-2"},
+        json={"mode": "visible", "url": "https://example.com/", "owner": "worker-2"},
     )
     assert launch.status_code == 200
     assert launch.json()["status"] == "running"
@@ -214,11 +265,11 @@ async def test_memory_git_protected_branch_approval_and_qa(client: AsyncClient, 
     heal = await client.post("/api/v1/qa/self-heal", headers=auth_headers)
     assert heal.status_code == 200
 
-    # Manager Chat directive
+    # Manager Chat directive (with no configured model provider, refuses fake task creation)
     chat = await client.post(
         "/api/v1/chat",
         headers=auth_headers,
         json={"content": "orchestrate and report team telemetry"},
     )
     assert chat.status_code == 201
-    assert "Manager Directive Acknowledged" in chat.json()["manager_reply"]["content"]
+    assert "No model provider configured" in chat.json()["manager_reply"]["content"]

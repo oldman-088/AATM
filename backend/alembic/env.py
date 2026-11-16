@@ -22,6 +22,9 @@ class _OfflineMockInspector:
     def get_columns(self, _table_name: str, **_kw: Any) -> list[dict[str, Any]]:
         return []
 
+    def get_indexes(self, _table_name: str, **_kw: Any) -> list[dict[str, Any]]:
+        return []
+
     def get_table_names(self, **_kw: Any) -> list[str]:
         return []
 

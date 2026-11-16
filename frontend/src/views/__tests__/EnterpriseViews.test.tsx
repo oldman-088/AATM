@@ -70,6 +70,7 @@ describe('Enterprise panels — i18n, RTL & backend wiring', () => {
     const { calls } = installFetchMock()
     renderWithLocale(<EmployeeCreatorAndOrgPanel agents={AGENTS} templates={TEMPLATES} onReload={noop} />)
 
+    expect(screen.queryByText(/Score 97|Score 88|Score 91/)).not.toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('Employee Name (e.g., API Specialist)'), {
       target: { value: 'API Specialist' },
     })
@@ -176,8 +177,10 @@ describe('Enterprise panels — i18n, RTL & backend wiring', () => {
     const { calls } = installFetchMock()
     const sessions = [
       { id: 'sess-1', agent_id: 'worker-1', conversation_id: 'conv-9', account_id: 'acc-1', health_score: 98 },
+      { id: 'sess-new', agent_id: 'worker-2', conversation_id: 'conv-10', account_id: 'acc-1', health_score: null },
     ]
     renderWithLocale(<ArenaAccountsSessionsPanel accounts={[]} sessions={sessions} onReload={noop} />)
+    expect(screen.getByText(/Health: Unknown/)).toBeInTheDocument()
 
     fireEvent.change(screen.getByPlaceholderText('Account Label'), { target: { value: 'Arena Team' } })
     fireEvent.change(screen.getByPlaceholderText('account@arena.ai'), { target: { value: 'team@arena.ai' } })
@@ -188,7 +191,7 @@ describe('Enterprise panels — i18n, RTL & backend wiring', () => {
       expect(post?.body).toMatchObject({ label: 'Arena Team', account_identifier: 'team@arena.ai' })
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /^Recover$/ }))
+    fireEvent.click(screen.getAllByRole('button', { name: /^Recover$/ })[0])
     await waitFor(() => {
       expect(calls.find((c) => c.path === '/api/v1/sessions/sess-1/recover' && c.method === 'POST')).toBeDefined()
     })
@@ -197,6 +200,10 @@ describe('Enterprise panels — i18n, RTL & backend wiring', () => {
   it('registers a Tampermonkey userscript and defaults to a non-localhost match pattern', async () => {
     const { calls } = installFetchMock()
     renderWithLocale(<UserscriptsEnginesPanel engines={{ playwright: { status: 'ready' } }} userscripts={[]} onReload={noop} />)
+    const notice = screen.getByTestId('userscripts-storage-only-notice')
+    expect(notice).toHaveTextContent('stored and audited only')
+    expect(notice).toHaveTextContent("window['ev'+'al']")
+    expect(notice).toHaveTextContent('not a security boundary')
 
     // No localhost / 127.0.0.1 may be pre-filled in the @match field
     const patternInput = screen.getByPlaceholderText('@match pattern') as HTMLInputElement

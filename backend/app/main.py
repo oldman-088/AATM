@@ -26,15 +26,40 @@ WS_AUTH_TIMEOUT_SECONDS = 5.0
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     validate_runtime_security(get_settings())
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
+
+    from app.runtime.background_scheduler import BackgroundScheduler
+
+    background_scheduler = BackgroundScheduler()
+    app.state.background_scheduler = background_scheduler
+    orchestration_scheduler_task = asyncio.create_task(
+        background_scheduler.run_orchestration_forever(), name="aatm-orchestration-scheduler"
+    )
+    self_healing_task = asyncio.create_task(
+        background_scheduler.run_self_healing_forever(), name="aatm-self-healing"
+    )
+
+    agent_loop_task: asyncio.Task[None] | None = None
+    if get_settings().AGENT_LOOP_ENABLED:
+        from app.runtime.agent_loop import AgentLoop
+
+        loop = AgentLoop()
+        app.state.agent_loop = loop
+        agent_loop_task = asyncio.create_task(loop.run_forever(), name="aatm-agent-loop")
     try:
         yield
     finally:
+        running_tasks = [orchestration_scheduler_task, self_healing_task]
+        if agent_loop_task is not None:
+            running_tasks.append(agent_loop_task)
+        for task in running_tasks:
+            task.cancel()
+        await asyncio.gather(*running_tasks, return_exceptions=True)
         await browser_manager.shutdown_all()
 
 

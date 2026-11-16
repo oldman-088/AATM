@@ -254,6 +254,7 @@ export const fa: Translations = {
     recover: 'بازیابی',
     enginesTitle: 'موتورهای ماژولار اتوماسیون مرورگر',
     userscriptsTitle: 'اسکریپت‌های Tampermonkey (ممیزی‌شده با سیاست)',
+    userscriptsStorageNotice: "اسکریپت‌ها فقط ذخیره و بررسی می‌شوند؛ AATM آن‌ها را تزریق یا اجرا نمی‌کند. دور زدن بررسی‌های سیاست مبتنی بر عبارت منظم آسان است، برای نمونه window['ev'+'al']، و این بررسی‌ها مرز امنیتی نیستند. فعال یا غیرفعال کردن فقط فرادادهٔ ذخیره‌سازی را تغییر می‌دهد.",
     userscriptPolicyError: 'خطای سیاست اسکریپت',
     userscriptNamePlaceholder: 'نام اسکریپت',
     matchPatternPlaceholder: 'الگوی @match',

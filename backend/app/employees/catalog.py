@@ -1,5 +1,5 @@
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from sqlalchemy import func, select
@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models import Agent, AuditLog, BrowserProfile, ProviderAccount, ProviderSession
+from app.runtime.sandbox import WorkspaceSandboxError, resolve_contained_path
 
 ROLE_TEMPLATES: list[dict[str, Any]] = [
     {"id": "ceo_manager", "title": "CEO / AI Manager", "divisions": ["D01", "D12"], "skills": ["strategy", "architecture", "delegation", "review"], "permissions": ["assign_tasks", "create_employees", "review_code", "request_approval", "orchestrate"]},
@@ -29,10 +30,27 @@ ROLE_TEMPLATES: list[dict[str, Any]] = [
 
 
 def ensure_employee_workspace(agent_id: str) -> Path:
-    settings = get_settings()
-    ws = (settings.WORKSPACES_DIR / agent_id).resolve()
-    ws.mkdir(parents=True, exist_ok=True)
-    return ws
+    """Create one direct-child workspace without following symlinks outside the configured root."""
+    if (
+        not isinstance(agent_id, str)
+        or not agent_id.strip()
+        or agent_id in {".", ".."}
+        or "/" in agent_id
+        or "\\" in agent_id
+        or "\x00" in agent_id
+        or PureWindowsPath(agent_id).drive
+    ):
+        raise WorkspaceSandboxError("Employee workspace identifiers must be simple path components.")
+
+    root = Path(get_settings().WORKSPACES_DIR).resolve()
+    requested = root / agent_id
+    if requested.is_symlink():
+        raise WorkspaceSandboxError("Employee workspace roots may not be symbolic links.")
+    workspace = resolve_contained_path(root, agent_id)
+    if workspace.parent != root:
+        raise WorkspaceSandboxError("Employee workspaces must be direct children of the configured root.")
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
 
 
 async def allocate_account_and_session(

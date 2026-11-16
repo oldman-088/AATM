@@ -1,12 +1,16 @@
 import inspect
 import logging
+import os
+import re
 import shutil
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.manager import browser_manager
+from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.employees.catalog import allocate_account_and_session, ensure_employee_workspace
@@ -23,8 +27,98 @@ from app.models import (
     Task,
 )
 from app.providers.adapters import ArenaLocalBridgeAdapter
+from app.runtime.sandbox import WorkspaceSandboxError, is_sensitive_workspace_path, resolve_contained_path
 
 logger = logging.getLogger(__name__)
+
+MAX_HANDOFF_FILES = 1_000
+MAX_HANDOFF_FILE_BYTES = 5 * 1024 * 1024
+MAX_HANDOFF_TOTAL_BYTES = 25 * 1024 * 1024
+
+
+def copy_workspace_handoff(source_agent_id: str, recipient_agent_id: str) -> tuple[str | None, list[str]]:
+    """Copy bounded, non-sensitive regular files into a recipient's isolated handoff directory."""
+    if source_agent_id == recipient_agent_id:
+        return None, []
+
+    settings = get_settings()
+    workspace_root = Path(settings.WORKSPACES_DIR).resolve()
+    id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+    def _workspace(agent_id: str) -> Path:
+        if not isinstance(agent_id, str) or not id_pattern.fullmatch(agent_id):
+            raise WorkspaceSandboxError("Employee workspace identifiers must be simple, non-empty path components.")
+        requested = workspace_root / agent_id
+        if requested.is_symlink():
+            raise WorkspaceSandboxError("Employee workspace roots may not be symbolic links.")
+        expected = resolve_contained_path(workspace_root, agent_id)
+        if expected.parent != workspace_root:
+            raise WorkspaceSandboxError("Employee workspace must be a direct child of the configured workspace root.")
+        actual = ensure_employee_workspace(agent_id)
+        if actual != expected:
+            raise WorkspaceSandboxError("Employee workspace resolved outside its configured workspace root.")
+        return actual
+
+    source_root = _workspace(source_agent_id)
+    recipient_root = _workspace(recipient_agent_id)
+    handoff_name = f"handoff_from_{source_agent_id}"
+    handoff_candidate = recipient_root / handoff_name
+    if handoff_candidate.is_symlink():
+        raise WorkspaceSandboxError("A handoff directory may not be a symbolic link.")
+    handoff_candidate.mkdir(parents=True, exist_ok=True)
+    handoff_root = resolve_contained_path(recipient_root, handoff_name)
+
+    copied_files: list[str] = []
+    copied_bytes = 0
+    for current_dir, dirnames, filenames in os.walk(source_root, topdown=True, followlinks=False):
+        current = Path(current_dir)
+        safe_dirs: list[str] = []
+        for name in sorted(dirnames):
+            directory = current / name
+            relative_dir = directory.relative_to(source_root).as_posix()
+            if directory.is_symlink() or is_sensitive_workspace_path(relative_dir):
+                continue
+            safe_dirs.append(name)
+        dirnames[:] = safe_dirs
+
+        for name in sorted(filenames):
+            source = current / name
+            relative = source.relative_to(source_root).as_posix()
+            if source.is_symlink() or is_sensitive_workspace_path(relative) or not source.is_file():
+                continue
+            try:
+                contained_source = resolve_contained_path(source_root, relative)
+                file_size = contained_source.stat().st_size
+            except (OSError, WorkspaceSandboxError):
+                continue
+            if file_size > MAX_HANDOFF_FILE_BYTES or copied_bytes + file_size > MAX_HANDOFF_TOTAL_BYTES:
+                continue
+
+            cursor = handoff_root
+            has_symlink = False
+            for part in Path(relative).parts:
+                cursor = cursor / part
+                if cursor.is_symlink():
+                    has_symlink = True
+                    break
+            if has_symlink:
+                continue
+            try:
+                destination = resolve_contained_path(handoff_root, relative)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+                    continue
+                shutil.copyfile(contained_source, destination)
+            except (OSError, WorkspaceSandboxError):
+                continue
+
+            copied_files.append(relative)
+            copied_bytes += file_size
+            if len(copied_files) >= MAX_HANDOFF_FILES:
+                return handoff_name, copied_files
+
+    return handoff_name, copied_files
+
 
 # Marker written into `Task.error_message` so tasks halted by an Emergency Stop can be
 # identified later and resumed. Without it a globally stopped task stays "blocked"
@@ -62,11 +156,12 @@ class ReplacementAndEmergencyService:
         failing_skills = set(failing.skills or [])
         failing_divs = set(failing.divisions or [])
 
-        def score(cand: Agent) -> tuple[int, int, float]:
+        def score(cand: Agent) -> tuple[int, int]:
             skill_overlap = len(failing_skills & set(cand.skills or []))
             div_overlap = len(failing_divs & set(cand.divisions or []))
             idle_bonus = 2 if cand.status == "idle" else 0
-            return (skill_overlap + div_overlap + idle_bonus, -cand.tasks_failed, cand.performance_score)
+            # performance_score is a legacy default, not measured telemetry.
+            return (skill_overlap + div_overlap + idle_bonus, -cand.tasks_failed)
 
         replacement = max(candidates, key=score)
 
@@ -78,17 +173,8 @@ class ReplacementAndEmergencyService:
             )
         )
         transferred_tasks: list[str] = []
-        src_ws = ensure_employee_workspace(failing_agent_id)
+        _, transferred_files = copy_workspace_handoff(failing_agent_id, replacement.id)
         dst_ws = ensure_employee_workspace(replacement.id)
-        transferred_files: list[str] = []
-
-        if src_ws.exists():
-            handoff_dir = dst_ws / f"handoff_from_{failing_agent_id}"
-            handoff_dir.mkdir(parents=True, exist_ok=True)
-            for item in src_ws.iterdir():
-                if item.is_file():
-                    shutil.copy2(item, handoff_dir / item.name)
-                    transferred_files.append(item.name)
 
         for task in tasks_res.scalars().all():
             task.assigned_agent_id = replacement.id

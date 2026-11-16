@@ -69,8 +69,8 @@ async def seed_initial_data(db: AsyncSession) -> None:
             provider_type="arena_local_bridge",
             endpoint_url=settings.ARENA_BRIDGE_URL,
             credential_ref="env:ARENA_BRIDGE_TOKEN",
-            default_model="arena-bridge-default",
-            available_models=["arena-bridge-default", "arena-reasoning-pro", "arena-fast"],
+            default_model="agent",
+            available_models=["agent", "ping"],
             priority=1,
             is_enabled=True,
             health_status="unknown",
@@ -86,7 +86,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             available_models=["arena-agent-orchestrator", "arena-agent-coder"],
             priority=2,
             is_enabled=True,
-            health_status="healthy",
+            health_status="unknown",
             daily_limit_usd=15.0,
         ),
         AIProvider(
@@ -161,7 +161,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
             id="manager-0",
             name="Chief AI Engineering Manager",
             role="manager",
+            role_template="ceo_manager",
             specialty="Architecture, Planning, Coordination, Integration & Delivery",
+            skills=["strategy", "architecture", "planning", "delegation", "review"],
             divisions=["D01", "D12"],
             permissions=["assign_tasks", "rebalance_workers", "review_code", "request_approval", "orchestrate"],
             status="idle",
@@ -173,7 +175,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
             id="worker-1",
             name="Worker 1 — Backend Engineer",
             role="worker",
+            role_template="backend_developer",
             specialty="FastAPI, PostgreSQL/SQLAlchemy, Alembic, REST APIs, Auth & Audit",
+            skills=["python", "fastapi", "sqlalchemy", "postgresql", "alembic", "rest_api", "auth", "audit"],
             divisions=["D01", "D02", "D09"],
             permissions=["edit_backend", "run_migrations", "run_backend_tests"],
             status="idle",
@@ -186,7 +190,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
             id="worker-2",
             name="Worker 2 — Frontend Engineer",
             role="worker",
+            role_template="frontend_developer",
             specialty="React, TypeScript, Vite, Tailwind, shadcn/ui, EN/AR/FA & RTL",
+            skills=["react", "typescript", "vite", "tailwind", "rtl", "i18n", "accessibility"],
             divisions=["D03", "D04"],
             permissions=["edit_frontend", "run_frontend_tests", "build_ui"],
             status="idle",
@@ -199,7 +205,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
             id="worker-3",
             name="Worker 3 — AI Provider & Browser Engineer",
             role="worker",
+            role_template="ai_engineer",
             specialty="Arena Local Bridge, Claude API, Routing, Playwright & Browser Wall",
+            skills=["llm", "arena", "anthropic", "provider_routing", "playwright", "browser_automation"],
             divisions=["D05", "D06"],
             permissions=["configure_providers", "manage_browsers", "run_integration_tests"],
             status="idle",
@@ -212,7 +220,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
             id="worker-4",
             name="Worker 4 — Orchestration & QA Engineer",
             role="worker",
+            role_template="qa_engineer",
             specialty="DAG Scheduling, Concurrency, GitHub/Worktrees, QA Engine & Self-Healing",
+            skills=["dag_scheduling", "concurrency", "github", "worktrees", "qa", "self_healing"],
             divisions=["D07", "D08", "D09", "D10", "D11", "D12"],
             permissions=["schedule_tasks", "manage_worktrees", "run_qa", "recover_workers"],
             status="idle",
@@ -223,8 +233,14 @@ async def seed_initial_data(db: AsyncSession) -> None:
         ),
     ]
     for ag in agents:
-        if not await db.get(Agent, ag.id):
+        existing_agent = await db.get(Agent, ag.id)
+        if existing_agent is None:
             db.add(ag)
+        else:
+            if not existing_agent.role_template and ag.role_template:
+                existing_agent.role_template = ag.role_template
+            if not existing_agent.skills and ag.skills:
+                existing_agent.skills = ag.skills
 
     # 6. Initial Tasks covering all 12 Divisions
     existing_tasks = await db.execute(select(Task).limit(1))

@@ -90,10 +90,19 @@ async def test_browser_engines_and_tampermonkey_userscript_policy(client: AsyncC
         },
     )
     assert good.status_code == 201
-    sid = good.json()["id"]
+    created = good.json()
+    sid = created["id"]
+    assert created["storage_only"] is True
+    assert created["execution_supported"] is False
+    assert created["policy_checks_security_boundary"] is False
+    assert "execution_count" not in created and "last_executed_at" not in created
+    listed = (await client.get("/api/v1/userscripts", headers=auth_headers)).json()
+    assert any(row["id"] == sid and row["storage_only"] is True for row in listed)
+
     tog = await client.patch(f"/api/v1/userscripts/{sid}/toggle", headers=auth_headers)
     assert tog.status_code == 200
     assert tog.json()["is_enabled"] is False
+    assert tog.json()["execution_supported"] is False
 
 
 async def test_agent_messaging_workspace_isolation_and_sdlc_execution(client: AsyncClient, auth_headers):

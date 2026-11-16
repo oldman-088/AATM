@@ -10,11 +10,15 @@ ENV_CREDENTIAL_REF_PATTERN = re.compile(r"^env:[A-Z_][A-Z0-9_]*$")
 
 
 def validate_credential_ref(credential_ref: str | None) -> tuple[bool, str]:
-    """Enforce env:* indirection; reject raw inline secrets or non-env credential references."""
-    if credential_ref is None or credential_ref == "":
-        return True, "none"
-    if ENV_CREDENTIAL_REF_PATTERN.fullmatch(credential_ref.strip()):
-        return True, "env_ref"
+    """Require a valid env reference whose value is present and non-empty at runtime."""
+    if credential_ref is None or not credential_ref.strip():
+        return False, "Credential is not configured."
+    normalized = credential_ref.strip()
+    if ENV_CREDENTIAL_REF_PATTERN.fullmatch(normalized):
+        resolved = resolve_credential_ref(normalized)
+        if resolved and resolved.strip():
+            return True, "env_ref"
+        return False, f"Credential {normalized} is not configured in the environment."
     return (
         False,
         "Invalid credential_ref: must use 'env:<ENV_VAR_NAME>' indirection (inline secrets are prohibited).",
@@ -47,6 +51,11 @@ class ProviderResponse:
     success: bool = True
     error_message: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    retryable: bool = False
+    retry_after_s: float | None = None
+    input_tokens_estimated: bool = False
+    output_tokens_estimated: bool = False
+    confirmed_cost_usd: float | None = None
 
 
 @dataclass
@@ -63,6 +72,11 @@ class ProviderStreamChunk:
     success: bool = True
     error_message: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    retryable: bool = False
+    retry_after_s: float | None = None
+    input_tokens_estimated: bool = False
+    output_tokens_estimated: bool = False
+    confirmed_cost_usd: float | None = None
 
 
 @dataclass
@@ -80,7 +94,18 @@ class BaseProviderAdapter(ABC):
         self.endpoint_url = endpoint_url
         self.credential_ref = credential_ref
         self.default_model = default_model
-        self.credential_ref_valid, self.credential_ref_error = validate_credential_ref(credential_ref)
+        self._credential_ref_valid, self._credential_ref_error = validate_credential_ref(credential_ref)
+
+    @property
+    def credential_ref_valid(self) -> bool:
+        """Re-check credentials at use time so runtime environment changes are respected."""
+        self._credential_ref_valid, self._credential_ref_error = validate_credential_ref(self.credential_ref)
+        return self._credential_ref_valid
+
+    @property
+    def credential_ref_error(self) -> str:
+        self.credential_ref_valid
+        return self._credential_ref_error
 
     def resolve_credential(self) -> str | None:
         if not self.credential_ref_valid:
@@ -88,10 +113,11 @@ class BaseProviderAdapter(ABC):
         return resolve_credential_ref(self.credential_ref)
 
     def safe_credential_label(self) -> str:
-        if not self.credential_ref:
+        if not self.credential_ref or not self.credential_ref.strip():
             return "unconfigured"
-        if self.credential_ref_valid:
-            return self.credential_ref.strip()
+        normalized = self.credential_ref.strip()
+        if ENV_CREDENTIAL_REF_PATTERN.fullmatch(normalized):
+            return normalized
         return "<invalid-credential-ref>"
 
     @abstractmethod
@@ -119,6 +145,11 @@ class BaseProviderAdapter(ABC):
                 success=False,
                 error_message=resp.error_message,
                 metadata=dict(resp.metadata),
+                retryable=resp.retryable,
+                retry_after_s=resp.retry_after_s,
+                input_tokens_estimated=resp.input_tokens_estimated,
+                output_tokens_estimated=resp.output_tokens_estimated,
+                confirmed_cost_usd=resp.confirmed_cost_usd,
             )
             return
         if resp.content:
@@ -141,6 +172,9 @@ class BaseProviderAdapter(ABC):
             latency_ms=resp.latency_ms,
             success=True,
             metadata=dict(resp.metadata),
+            input_tokens_estimated=resp.input_tokens_estimated,
+            output_tokens_estimated=resp.output_tokens_estimated,
+            confirmed_cost_usd=resp.confirmed_cost_usd,
         )
 
     @staticmethod
