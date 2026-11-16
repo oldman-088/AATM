@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aatm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aatm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aatm_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aatm}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - aatm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aatm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    image: python:3.11-slim
+    container_name: aatm-worker
+    user: "65534:65534"
+    working_dir: /workspace
+    command: ["python", "-m", "app.runtime.worker_daemon"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      PYTHONPATH: /app/backend
+      PYTHONDONTWRITEBYTECODE: "1"
+      AATM_SERVER_URL: ${AATM_SERVER_URL:-http://host.docker.internal:8000}
+      AATM_DEVICE_ID: ${AATM_DEVICE_ID:-docker-worker-01}
+      AATM_DEVICE_TOKEN: ${AATM_DEVICE_TOKEN:-}
+      AATM_WORKER_WORKSPACE: /workspace
+      AATM_SANDBOX_MODE: ${AATM_SANDBOX_MODE:-process}
+    volumes:
+      - ./backend:/app/backend:ro
+      - aatm_worker_workspaces:/workspace:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  aatm_pgdata:
+  aatm_worker_workspaces:
