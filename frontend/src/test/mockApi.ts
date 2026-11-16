@@ -303,7 +303,7 @@ export const fixtures: Record<string, RouteValue> = {
   '/api/health': {
     status: 'ok',
     service: 'aatm-backend',
-    version: '3.1.0',
+    version: '3.2.0',
     environment: 'development',
     sandbox: { status: 'READY', available: true, mode: 'process', image: 'aatm-sandbox:latest', reason: null },
     model_status: {

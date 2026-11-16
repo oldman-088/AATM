@@ -119,6 +119,18 @@ result back. `scripts/*/stop.sh` stops the daemon along with the backend and fro
 - Use `POST /api/v1/auth/logout` (automatically triggered by UI Sign Out) to revoke active JWTs via `token_version` rotation, and inspect `GET /api/v1/governance/security-posture` for live sandbox, header, and warning telemetry.
 - Run the daemon under a restricted user or inside a container: the workspace sandbox restricts paths and tools, but it is not an OS-level jail. In `ENVIRONMENT=production`, `AATM_SANDBOX_MODE=process` is rejected (`SANDBOX_UNAVAILABLE`) unless Docker + `aatm-sandbox:latest` is available.
 
+## 7b. Demo mode (showing the bridge without a model)
+
+Set `DEMO_MODE=true` in `.env` and restart (`scripts/ubuntu/restart.sh`). The bridge then renders a
+scripted feed from `GET /api/v1/demo/code-stream` so the workstations, stage lights and console can be
+demonstrated with no model key, repository or crew.
+
+* every frame carries `demo: true`, `/api/health` reports `demo_mode: true`, and the HUD shows an amber
+  "وضع العرض / Demo mode" badge — demo output can never be mistaken for a real run;
+* it is read-only: no database writes, no model calls, no agent workspace access;
+* it is refused when `ENVIRONMENT=production`, and it is off by default;
+* while it is on, the bridge ignores the live `agent.code` stream, so real and demo frames never mix.
+
 ## 8. Operations Scripts
 
 | Script | Purpose |

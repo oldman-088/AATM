@@ -46,7 +46,9 @@ The data model uses SQLAlchemy 2 async models with Alembic migrations, and verif
 Events go out on `/ws/events` (authenticated). The live agent log streams `agent.iteration` events, and
 `agent.code` carries the per-agent live code stream (file content/diffs, pytest + ruff output, review
 comments) that the Command Bridge renders on the workstation screens. The buffer behind it is read with
-`GET /api/v1/agents/{id}/code-stream?limit=` (see `docs/design/BRIDGE_BACKEND_MAP.md`).
+`GET /api/v1/agents/{id}/code-stream?limit=` (see `docs/design/BRIDGE_BACKEND_MAP.md`). With
+`DEMO_MODE=true` the same screens render a scripted, labelled feed from `GET /api/v1/demo/code-stream`
+instead (`demo: true` on every frame, amber badge in the HUD, refused in production).
 
 ## 3. Bridge (`bridge/`)
 A loopback FastAPI daemon (`127.0.0.1:4100`) with three parts:
