@@ -56,10 +56,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const changePassword = async (currentPassword: string, newPassword: string) => {
-    const res = await apiFetch<{ ok: boolean; user: UserProfile }>('/auth/change-password', {
+    const res = await apiFetch<{ ok: boolean; access_token?: string; user: UserProfile }>('/auth/change-password', {
       method: 'POST',
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     })
+    if (res.access_token) {
+      setToken(res.access_token)
+    }
     setUser(res.user)
   }
 

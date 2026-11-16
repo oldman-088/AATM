@@ -50,6 +50,23 @@ if (-not (Test-Path $Python)) {
 }
 
 New-Item -ItemType Directory -Force -Path "$RootDir\logs" | Out-Null
+
+$SandboxMode = if ($env:AATM_SANDBOX_MODE) { $env:AATM_SANDBOX_MODE.ToLower() } else { "docker" }
+if ($SandboxMode -eq "docker") {
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        docker image inspect aatm-sandbox:latest *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[AATM Worker] Building sandbox image aatm-sandbox:latest from docker/sandbox.Dockerfile..."
+            docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile .
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Sandbox image build failed (SANDBOX_UNAVAILABLE; not falling back to process mode)."
+            }
+        }
+    } else {
+        Write-Warning "docker not found while AATM_SANDBOX_MODE=docker (SANDBOX_UNAVAILABLE)."
+    }
+}
+
 if (-not $WorkspaceRoot) { $WorkspaceRoot = "$RootDir\data\remote_workspaces" }
 $Workspace = Join-Path $WorkspaceRoot $DeviceId
 $LogFile = "$RootDir\logs\worker-$DeviceId.log"

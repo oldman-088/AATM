@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
     CORS_ORIGINS: str = "http://localhost:5173"
+    TRUSTED_PROXIES: str = ""
 
     DATABASE_URL: str = f"sqlite+aiosqlite:///{ROOT_DIR / 'data' / 'aatm.db'}"
     SYNC_DATABASE_URL: str = f"sqlite:///{ROOT_DIR / 'data' / 'aatm.db'}"
@@ -132,6 +133,9 @@ class Settings(BaseSettings):
         origins = [o.strip() for o in (self.CORS_ORIGINS or "").split(",") if o.strip()]
         return origins or ["http://localhost:5173"]
 
+    def get_trusted_proxies(self) -> set[str]:
+        return {p.strip() for p in (self.TRUSTED_PROXIES or "").split(",") if p.strip()}
+
     @property
     def AATM_GITHUB_WEBHOOK_SECRET(self) -> str:
         return self.GITHUB_WEBHOOK_SECRET
@@ -165,6 +169,29 @@ _PLACEHOLDER_PASSWORDS = frozenset(
         "password",
     }
 )
+KNOWN_DEFAULT_PASSWORDS = frozenset(
+    _PLACEHOLDER_PASSWORDS
+    | {
+        "changeme",
+        "aatm-admin",
+        "admin123",
+        "password123",
+        "123456",
+        "12345678",
+    }
+)
+
+
+def is_placeholder_password(password: str) -> bool:
+    """Return True if `password` matches any known default/placeholder password."""
+    raw = password or ""
+    lowered = raw.strip().lower()
+    return (
+        raw in KNOWN_DEFAULT_PASSWORDS
+        or lowered in KNOWN_DEFAULT_PASSWORDS
+        or lowered.startswith("change-me")
+        or lowered.startswith("change-this")
+    )
 
 
 def validate_runtime_security(settings: Settings) -> None:

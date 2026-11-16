@@ -52,6 +52,14 @@ PY
   echo "[AATM Ubuntu Install] Generated admin password (shown once — save it now): ${GENERATED_ADMIN_PW}"
 fi
 
+if command -v docker >/dev/null 2>&1; then
+  echo "[AATM Ubuntu Install] Building sandbox image aatm-sandbox:latest..."
+  docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile . || \
+    echo "[AATM Ubuntu Install] WARNING: Docker sandbox image build failed (sandbox will report SANDBOX_UNAVAILABLE until built)."
+else
+  echo "[AATM Ubuntu Install] WARNING: docker not found - sandbox image aatm-sandbox:latest was not built (SANDBOX_UNAVAILABLE in docker mode)."
+fi
+
 if command -v npm >/dev/null 2>&1; then
   echo "[AATM Ubuntu Install] Installing and building frontend..."
   (cd frontend && npm install && npm run build)

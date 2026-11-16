@@ -88,6 +88,11 @@ export interface Translations {
     systemResources: string
     intelligence: string
     liveFeed: string
+    sandboxStatus: string
+    sandboxUnavailable: string
+    sandboxReady: string
+    sandboxModeLabel: string
+    sandboxBuildHint: string
   }
   chat: {
     title: string

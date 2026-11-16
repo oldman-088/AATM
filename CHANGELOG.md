@@ -2,6 +2,22 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.5.1-phase1b] - 2026-11-16 — Phase 1B: Security Review Follow-Up Fixes
+
+### Added
+- `Settings.TRUSTED_PROXIES` (default empty) and CIDR/IP-aware `X-Forwarded-For` validation in `POST /api/v1/auth/login`, plus an independent per-email sliding-window rate limit so rotating `X-Forwarded-For` still triggers `429`.
+- `User.token_version` (`backend/alembic/versions/c2d4e6f8a1b3_add_user_token_version_and_flag_default_passwords.py`), embedded in JWT claims, verified in `get_current_user`, `get_current_user_optional`, and `/ws/events`, and incremented on password change to revoke older tokens immediately.
+- Startup and migration detection (`c2d4e6f8a1b3` + `seed_initial_data`) flagging existing accounts whose password matches known default/placeholder passwords with `must_change_password=True`.
+- `get_sandbox_status()` in `backend/app/runtime/sandbox.py`, surfaced in `GET /api/health`, `GET /api/v1/dashboard/overview`, and the localized Dashboard UI (`SANDBOX_UNAVAILABLE` warning banner when Docker or `aatm-sandbox:latest` is missing).
+
+### Changed
+- Enforced `must_change_password` server-side in `get_current_user` (`403 {"code": "PASSWORD_CHANGE_REQUIRED"}` on all endpoints except `GET /api/v1/auth/me` and `POST /api/v1/auth/change-password`) and rejected unrotated accounts (`4403`) in `/ws/events`.
+- Hardened `build_isolated_command` with `--pull=never` and default `docker` mode (no silent fallback to `process`), and updated `scripts/ubuntu/{install,start,start-worker}.sh` and `scripts/windows/{install,start,start-worker}.ps1` to build `aatm-sandbox:latest` from `docker/sandbox.Dockerfile` when Docker is available.
+- Configured `docker-compose.yml` `worker` service with `AATM_SANDBOX_MODE=process` and `AATM_ALLOW_PROCESS_SANDBOX=true` (treating the non-root `read_only`, `cap_drop=ALL` container as the sandbox without mounting `docker.sock`).
+- Restricted `/ws/events` authentication strictly to the first WebSocket message (`?token=` query strings are ignored).
+- Cleaned up `POST /api/v1/auth/change-password` validation to reject any placeholder/default password and any password equal to the user's email.
+- Expanded `backend/tests/test_phase1_security.py` with full all-method route enumeration, `lifespan` task tests, and regression tests for all 8 security fixes.
+
 ## [2.5.0-phase1] - 2026-11-15 — Phase 1: Security Hardening
 
 ### Added

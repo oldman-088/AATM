@@ -29,7 +29,20 @@ async def auth_headers(client: AsyncClient):
         json={"email": settings.DEFAULT_ADMIN_EMAIL, "password": settings.DEFAULT_ADMIN_PASSWORD},
     )
     assert resp.status_code == 200
-    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+    data = resp.json()
+    token = data["access_token"]
+    if data["user"].get("must_change_password"):
+        rot = await client.post(
+            "/api/v1/auth/change-password",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "current_password": settings.DEFAULT_ADMIN_PASSWORD,
+                "new_password": "TestSuiteRotatedPassword!2026",
+            },
+        )
+        assert rot.status_code == 200
+        token = rot.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 async def test_dynamic_employees_20_plus_and_arena_sessions(client: AsyncClient, auth_headers):

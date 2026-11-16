@@ -18,6 +18,7 @@ from app.models import (
     User,
 )
 from app.qa.engine import qa_engine
+from app.runtime.sandbox import get_sandbox_status
 from app.schemas.common import ApprovalCreate, ApprovalDecision, SettingUpdate
 
 router = APIRouter(tags=["governance-qa-dashboard"], dependencies=[Depends(get_current_user)])
@@ -66,6 +67,7 @@ async def dashboard_overview(db: AsyncSession = Depends(get_db)):
         "resources": intel["resources"],
         "recommendations": intel["recommendations"],
         "recent_events": event_bus.recent_events(15),
+        "sandbox": get_sandbox_status(),
     }
 
 

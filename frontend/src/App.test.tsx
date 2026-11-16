@@ -652,11 +652,13 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
 
     await waitFor(() => expect(calls.some((c) => c.path === '/api/v1/dashboard/overview')).toBe(true))
     expect(wsMock.instances.length).toBe(1)
+    expect(wsMock.instances[0].url).not.toContain('?token=')
     wsMock.instances[0].onopen?.({})
     expect(wsMock.instances[0].sent[0]).toBe(JSON.stringify({ token: 'test-jwt-token' }))
   })
 
   it('forces password change when must_change_password is true before revealing workspace', async () => {
+    const wsMock = installWebSocketMock()
     localStorage.setItem('aatm_jwt_token', 'first-login-jwt')
     const { calls } = installFetchMock({
       '/api/v1/auth/me': {
@@ -673,6 +675,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
 
     expect(await screen.findByText('Password Change Required')).toBeInTheDocument()
     expect(calls.some((c) => c.path === '/api/v1/dashboard/overview')).toBe(false)
+    expect(wsMock.instances.length).toBe(0)
 
     fireEvent.change(screen.getByLabelText('Current Password'), { target: { value: 'initial-pw-123' } })
     fireEvent.change(screen.getByLabelText('New Password'), { target: { value: 'short' } })
@@ -697,5 +700,51 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
       })
     })
     await waitFor(() => expect(screen.getAllByText('Executive Dashboard').length).toBeGreaterThan(0))
+    expect(localStorage.getItem('aatm_jwt_token')).toBe('dummy-rotated-jwt-token')
+    expect(wsMock.instances.length).toBe(1)
+    expect(wsMock.instances[0].url).not.toContain('?token=')
+    wsMock.instances[0].onopen?.({})
+    expect(wsMock.instances[0].sent[0]).toBe(JSON.stringify({ token: 'dummy-rotated-jwt-token' }))
+  })
+
+  it('displays SANDBOX_UNAVAILABLE status banner on Dashboard when sandbox image or Docker is missing', async () => {
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+    installWebSocketMock()
+    installFetchMock({
+      '/api/v1/dashboard/overview': {
+        kpis: {
+          active_workers: 0,
+          idle_workers: 3,
+          completion_rate: 0,
+          healthy_providers: 0,
+          total_providers: 3,
+          running_browsers: 0,
+          total_browsers: 1,
+          pending_approvals: 0,
+        },
+        divisions: [{ code: 'D01', progress_percent: 0, completed_tasks: 0, total_tasks: 0 }],
+        resources: {
+          cpu_count: 4,
+          cpu_percent: 10,
+          ram_used_gb: 2,
+          ram_total_gb: 8,
+          ram_percent: 25,
+          disk_free_gb: 50,
+          disk_percent: 20,
+        },
+        recommendations: [],
+        recent_events: [],
+        sandbox: {
+          status: 'SANDBOX_UNAVAILABLE',
+          available: false,
+          mode: 'docker',
+          image: 'aatm-sandbox:latest',
+          reason: "Sandbox image 'aatm-sandbox:latest' is missing.",
+        },
+      },
+    })
+    await renderWorkspace()
+    expect(await screen.findByText('SANDBOX_UNAVAILABLE')).toBeInTheDocument()
+    expect(screen.getByText(/Sandbox image 'aatm-sandbox:latest' is missing\./)).toBeInTheDocument()
   })
 })

@@ -38,6 +38,13 @@ export const fixtures: Record<string, RouteValue> = {
     },
     recommendations: ['Scale workers before the merge window'],
     recent_events: [],
+    sandbox: {
+      status: 'READY',
+      available: true,
+      mode: 'docker',
+      image: 'aatm-sandbox:latest',
+      reason: null,
+    },
   },
   '/api/v1/agents': [
     {
@@ -191,6 +198,8 @@ export const fixtures: Record<string, RouteValue> = {
   },
   '/api/v1/auth/change-password': {
     ok: true,
+    access_token: 'dummy-rotated-jwt-token',
+    token_type: 'bearer',
     user: {
       id: 'director-1',
       email: 'director@aatm.ai',

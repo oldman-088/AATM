@@ -21,6 +21,7 @@ from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.models import User
+from app.runtime.sandbox import get_sandbox_status
 
 WS_AUTH_TIMEOUT_SECONDS = 5.0
 
@@ -81,17 +82,24 @@ app.add_middleware(
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException):
+    payload: dict = {
+        "detail": exc.detail,
+        "error": {
+            "code": f"HTTP_{exc.status_code}",
+            "message": str(exc.detail),
+            "request_id": str(uuid.uuid4()),
+        },
+    }
+    if isinstance(exc.detail, dict) and exc.detail.get("code"):
+        code = str(exc.detail["code"])
+        payload["code"] = code
+        payload["error"]["code"] = code
+        if "message" in exc.detail:
+            payload["error"]["message"] = str(exc.detail["message"])
     return JSONResponse(
         status_code=exc.status_code,
         headers=exc.headers,
-        content={
-            "detail": exc.detail,
-            "error": {
-                "code": f"HTTP_{exc.status_code}",
-                "message": str(exc.detail),
-                "request_id": str(uuid.uuid4()),
-            },
-        },
+        content=payload,
     )
 
 
@@ -102,6 +110,7 @@ async def health():
         "service": "aatm-backend",
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
+        "sandbox": get_sandbox_status(),
     }
 
 
@@ -116,48 +125,58 @@ app.include_router(platform.public_router, prefix=API_PREFIX)
 app.include_router(devices.router, prefix=API_PREFIX)
 
 
-async def _authenticate_websocket(websocket: WebSocket) -> User | None:
-    token = (websocket.query_params.get("token") or "").strip()
-    if not token:
+async def _authenticate_websocket(websocket: WebSocket) -> tuple[User | None, int, str]:
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        return None, 4401, "Unauthorized"
+
+    token = ""
+    stripped = raw.strip()
+    if stripped.startswith("{"):
         try:
-            raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SECONDS)
-        except (asyncio.TimeoutError, WebSocketDisconnect):
-            return None
-        stripped = raw.strip()
-        if stripped.startswith("{"):
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, dict):
-                    token = str(parsed.get("token") or "").strip()
-            except json.JSONDecodeError:
-                token = ""
-        else:
-            token = stripped
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                token = str(parsed.get("token") or "").strip()
+        except json.JSONDecodeError:
+            token = ""
+    else:
+        token = stripped
 
     if not token:
-        return None
+        return None, 4401, "Unauthorized"
     try:
         payload = decode_access_token(token)
     except jwt.PyJWTError:
-        return None
+        return None, 4401, "Unauthorized"
     if not payload or not payload.get("sub"):
-        return None
+        return None, 4401, "Unauthorized"
+
+    raw_version = payload.get("token_version")
+    if raw_version is None or isinstance(raw_version, bool):
+        return None, 4401, "Unauthorized"
+    try:
+        token_version = int(raw_version)
+    except (TypeError, ValueError):
+        return None, 4401, "Unauthorized"
 
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(User).where(User.email == str(payload["sub"])))
         user = res.scalar_one_or_none()
-        if not user or not user.is_active:
-            return None
-        return user
+        if not user or not user.is_active or int(user.token_version) != token_version:
+            return None, 4401, "Unauthorized"
+        if user.must_change_password:
+            return None, 4403, "PASSWORD_CHANGE_REQUIRED"
+        return user, 0, ""
 
 
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
     await websocket.accept()
-    user = await _authenticate_websocket(websocket)
+    user, close_code, close_reason = await _authenticate_websocket(websocket)
     if user is None:
         try:
-            await websocket.close(code=4401, reason="Unauthorized")
+            await websocket.close(code=close_code, reason=close_reason)
         except Exception:
             pass
         return

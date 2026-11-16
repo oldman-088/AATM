@@ -8,9 +8,13 @@ execution stay consistent across local and remote execution nodes.
 
 import os
 import shutil
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
+from typing import Any
+
+from app.core.config import get_settings
 
 try:
     import resource
@@ -319,19 +323,19 @@ def build_isolated_command(
     docker_image: str = DEFAULT_DOCKER_IMAGE,
     docker_bin: str | None = None,
 ) -> list[str]:
-    """Build the execution command for `process` (default) or hardened `docker` sandbox mode.
+    """Build the execution command for `process` or hardened `docker` (default) sandbox mode.
 
     Always validates `command` against `ALLOWED_WORKSPACE_BINARIES`. In `docker` mode,
     wraps the command in a non-networked, read-only, capability-dropped container mounted
-    strictly to `workspace` and fails closed with `WorkspaceSandboxError` if the `docker`
-    CLI binary is unavailable.
+    strictly to `workspace` with `--pull=never` and fails closed with `WorkspaceSandboxError`
+    if the `docker` CLI binary is unavailable.
     """
     exe = assert_allowed_binary(command)
     mode = (
         sandbox_mode
         if sandbox_mode is not None
-        else os.environ.get("AATM_SANDBOX_MODE", "process")
-    ).strip().lower() or "process"
+        else os.environ.get("AATM_SANDBOX_MODE", "docker")
+    ).strip().lower() or "docker"
 
     if mode not in ALLOWED_SANDBOX_MODES:
         raise WorkspaceSandboxError(
@@ -359,6 +363,7 @@ def build_isolated_command(
         resolved_docker,
         "run",
         "--rm",
+        "--pull=never",
         "--network=none",
         "--read-only",
         "--tmpfs",
@@ -375,3 +380,95 @@ def build_isolated_command(
         image,
         *container_cmd,
     ]
+
+
+def get_sandbox_status() -> dict[str, Any]:
+    """Inspect sandbox availability without ever falling back silently to process mode."""
+    settings = get_settings()
+    mode = (
+        os.environ.get("AATM_SANDBOX_MODE")
+        or os.environ.get("SANDBOX_MODE")
+        or settings.AATM_SANDBOX_MODE
+        or "docker"
+    ).strip().lower()
+    image = (
+        os.environ.get("AATM_SANDBOX_DOCKER_IMAGE")
+        or settings.SANDBOX_DOCKER_IMAGE
+        or DEFAULT_DOCKER_IMAGE
+    ).strip() or DEFAULT_DOCKER_IMAGE
+
+    if mode not in ALLOWED_SANDBOX_MODES:
+        return {
+            "status": "SANDBOX_UNAVAILABLE",
+            "available": False,
+            "mode": mode,
+            "image": image,
+            "reason": f"Unsupported sandbox mode '{mode}'.",
+        }
+
+    if mode == "process":
+        allow_env = os.environ.get("AATM_ALLOW_PROCESS_SANDBOX", "").strip().lower()
+        allow_process = allow_env in {"1", "true", "yes"} or bool(settings.AATM_ALLOW_PROCESS_SANDBOX)
+        env_name = (os.environ.get("ENVIRONMENT") or settings.ENVIRONMENT or "").strip().lower()
+        if env_name == "production" and not allow_process:
+            return {
+                "status": "SANDBOX_UNAVAILABLE",
+                "available": False,
+                "mode": "process",
+                "image": None,
+                "reason": "Process sandbox mode is disabled in production unless AATM_ALLOW_PROCESS_SANDBOX=true.",
+            }
+        return {
+            "status": "READY",
+            "available": True,
+            "mode": "process",
+            "image": None,
+            "reason": None,
+        }
+
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        return {
+            "status": "SANDBOX_UNAVAILABLE",
+            "available": False,
+            "mode": "docker",
+            "image": image,
+            "reason": "Docker CLI is not installed or not on PATH; docker sandbox cannot run.",
+        }
+
+    try:
+        proc = subprocess.run(
+            [docker_bin, "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "status": "SANDBOX_UNAVAILABLE",
+            "available": False,
+            "mode": "docker",
+            "image": image,
+            "reason": f"Failed to inspect sandbox image '{image}': {exc}",
+        }
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        reason = f"Sandbox image '{image}' is missing or Docker daemon is unreachable."
+        if detail:
+            reason = f"{reason} ({detail.splitlines()[0][:180]})"
+        return {
+            "status": "SANDBOX_UNAVAILABLE",
+            "available": False,
+            "mode": "docker",
+            "image": image,
+            "reason": reason,
+        }
+
+    return {
+        "status": "READY",
+        "available": True,
+        "mode": "docker",
+        "image": image,
+        "reason": None,
+    }

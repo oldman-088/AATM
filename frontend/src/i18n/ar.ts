@@ -88,6 +88,11 @@ export const ar: Translations = {
     systemResources: 'موارد الخادم (المعالج / الذاكرة / القرص)',
     intelligence: 'توصيات ذكاء الفريق',
     liveFeed: 'البث المباشر للأحداث',
+    sandboxStatus: 'بيئة العزل التنفيذية',
+    sandboxUnavailable: 'SANDBOX_UNAVAILABLE',
+    sandboxReady: 'بيئة العزل جاهزة',
+    sandboxModeLabel: 'الوضع',
+    sandboxBuildHint: 'لبناء الصورة: docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile .',
   },
   chat: {
     title: 'محادثة المدير الهندسي للذكاء الاصطناعي',

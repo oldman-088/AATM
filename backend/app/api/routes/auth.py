@@ -1,9 +1,11 @@
+import ipaddress
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.core.config import get_settings
+from app.core.config import get_settings, is_placeholder_password
 from app.core.rate_limit import login_rate_limiter
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
@@ -25,21 +27,56 @@ def _serialize_user(user: User) -> dict:
     }
 
 
+def _is_trusted_proxy(peer_host: str, trusted_proxies: set[str]) -> bool:
+    if not peer_host or not trusted_proxies:
+        return False
+    if peer_host in trusted_proxies:
+        return True
+    try:
+        peer_addr = ipaddress.ip_address(peer_host)
+    except ValueError:
+        return False
+    for entry in trusted_proxies:
+        try:
+            if "/" in entry:
+                if peer_addr in ipaddress.ip_network(entry, strict=False):
+                    return True
+            elif peer_addr == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    if forwarded:
-        return forwarded
-    return request.client.host if request.client else "unknown"
+    peer_host = request.client.host if request.client and request.client.host else "unknown"
+    trusted_proxies = get_settings().get_trusted_proxies()
+    if _is_trusted_proxy(peer_host, trusted_proxies):
+        forwarded_raw = request.headers.get("x-forwarded-for", "")
+        hops = [part.strip() for part in forwarded_raw.split(",") if part.strip()]
+        # Walk right-to-left skipping trusted proxy hops to pick the leftmost client-facing hop
+        # appended by our edge, falling back to the first hop if all are untrusted.
+        for hop in reversed(hops):
+            if not _is_trusted_proxy(hop, trusted_proxies):
+                return hop
+        if hops:
+            return hops[0]
+    return peer_host
 
 
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     client_ip = _client_ip(request)
     email_key = body.email.strip().lower()
-    rate_key = f"{client_ip}:{email_key}"
+    ip_email_key = f"ip_email:{client_ip}:{email_key}"
+    email_only_key = f"email:{email_key}"
 
-    allowed, retry_after = login_rate_limiter.check_allowed(rate_key)
-    if not allowed:
+    allowed_ip_email, retry_ip_email = login_rate_limiter.check_allowed(ip_email_key)
+    allowed_email, retry_email = (
+        login_rate_limiter.check_allowed(email_only_key) if email_key else (True, 0)
+    )
+    if not allowed_ip_email or not allowed_email:
+        retry_after = max(retry_ip_email, retry_email)
         db.add(
             AuditLog(
                 actor=email_key or "anonymous",
@@ -60,7 +97,8 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     res = await db.execute(select(User).where(User.email == body.email))
     user = res.scalar_one_or_none()
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
-        failures = login_rate_limiter.record_failure(rate_key)
+        failures_ip_email = login_rate_limiter.record_failure(ip_email_key)
+        failures_email = login_rate_limiter.record_failure(email_only_key) if email_key else 0
         db.add(
             AuditLog(
                 actor=email_key or "anonymous",
@@ -68,14 +106,20 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
                 severity="warning",
                 resource_type="user",
                 resource_id=user.id if user else None,
-                details={"ip": client_ip, "attempts": failures},
+                details={"ip": client_ip, "attempts": max(failures_ip_email, failures_email)},
             )
         )
         await db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    login_rate_limiter.reset_key(rate_key)
-    token = create_access_token(subject=user.email, role=user.role)
+    login_rate_limiter.reset_key(ip_email_key)
+    if email_key:
+        login_rate_limiter.reset_key(email_only_key)
+    token = create_access_token(
+        subject=user.email,
+        role=user.role,
+        token_version=user.token_version,
+    )
     db.add(
         AuditLog(
             actor=user.email,
@@ -119,21 +163,34 @@ async def change_password(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect")
     if body.new_password == body.current_password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must differ from current password")
+    if body.new_password.strip().lower() == user.email.strip().lower():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must not match your email address")
     settings = get_settings()
-    if body.new_password == settings.DEFAULT_ADMIN_PASSWORD and body.new_password == "aatm-admin-2026":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Default placeholder password is not allowed")
+    if is_placeholder_password(body.new_password) or body.new_password == settings.DEFAULT_ADMIN_PASSWORD:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Default or placeholder password is not allowed")
 
     user.password_hash = hash_password(body.new_password)
     user.must_change_password = False
+    user.token_version = int(user.token_version or 1) + 1
+    new_token = create_access_token(
+        subject=user.email,
+        role=user.role,
+        token_version=user.token_version,
+    )
     db.add(
         AuditLog(
             actor=user.email,
             action="auth.password_changed",
             resource_type="user",
             resource_id=user.id,
-            details={},
+            details={"token_version": user.token_version},
         )
     )
     await db.commit()
     await db.refresh(user)
-    return {"ok": True, "user": _serialize_user(user)}
+    return {
+        "ok": True,
+        "access_token": new_token,
+        "token_type": "bearer",
+        "user": _serialize_user(user),
+    }

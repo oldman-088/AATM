@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +8,23 @@ from app.db.session import get_db
 from app.models import User
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+PASSWORD_CHANGE_ALLOWED_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/v1/auth/me"),
+        ("POST", "/api/v1/auth/change-password"),
+    }
+)
+
+
+def _token_version_matches(payload: dict, user: User) -> bool:
+    raw_version = payload.get("token_version")
+    if raw_version is None or isinstance(raw_version, bool):
+        return False
+    try:
+        return int(raw_version) == int(user.token_version)
+    except (TypeError, ValueError):
+        return False
 
 
 async def get_current_user_optional(
@@ -22,21 +39,47 @@ async def get_current_user_optional(
         if not email:
             return None
         res = await db.execute(select(User).where(User.email == email))
-        return res.scalar_one_or_none()
+        user = res.scalar_one_or_none()
+        if not user or not user.is_active or user.must_change_password:
+            return None
+        if not _token_version_matches(payload, user):
+            return None
+        return user
     except Exception:
         return None
 
 
 async def get_current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     if not creds:
-        # Check if dev auto-session is used ONLY when explicitly disabled? No: enforce bearer or return 401
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-    user = await get_current_user_optional(creds, db)
-    if not user or not user.is_active:
+    try:
+        payload = decode_access_token(creds.credentials)
+        email = payload.get("sub")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from None
+
+    if not email:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    res = await db.execute(select(User).where(User.email == email))
+    user = res.scalar_one_or_none()
+    if not user or not user.is_active or not _token_version_matches(payload, user):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    if user.must_change_password:
+        route_key = (request.method.upper(), request.url.path)
+        if route_key not in PASSWORD_CHANGE_ALLOWED_ROUTES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "PASSWORD_CHANGE_REQUIRED",
+                    "message": "Password change is required before accessing this endpoint.",
+                },
+            )
     return user
 
 

@@ -1,8 +1,8 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
-from app.core.security import hash_password
+from app.core.config import KNOWN_DEFAULT_PASSWORDS, get_settings, is_placeholder_password
+from app.core.security import hash_password, verify_password
 from app.employees.catalog import ensure_employee_workspace
 from app.models import (
     Agent,
@@ -28,7 +28,7 @@ from app.models import (
 async def seed_initial_data(db: AsyncSession) -> None:
     settings = get_settings()
 
-    # 1. Default Admin User
+    # 1. Default Admin User & startup placeholder-password check
     user_res = await db.execute(select(User).where(User.email == settings.DEFAULT_ADMIN_EMAIL))
     if not user_res.scalar_one_or_none():
         db.add(
@@ -40,8 +40,21 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 language="en",
                 theme="dark",
                 must_change_password=True,
+                token_version=1,
             )
         )
+
+    # Ensure existing installs whose accounts still use a known default/placeholder
+    # password are flagged for mandatory rotation on next login.
+    candidates = set(KNOWN_DEFAULT_PASSWORDS)
+    if is_placeholder_password(settings.DEFAULT_ADMIN_PASSWORD):
+        candidates.add(settings.DEFAULT_ADMIN_PASSWORD)
+    unflagged = (
+        await db.execute(select(User).where(User.must_change_password.is_(False)))
+    ).scalars().all()
+    for existing_user in unflagged:
+        if any(verify_password(pw, existing_user.password_hash) for pw in candidates):
+            existing_user.must_change_password = True
 
     # 2. Default Project (AATM)
     proj_res = await db.execute(select(Project).where(Project.slug == "aatm-core"))
