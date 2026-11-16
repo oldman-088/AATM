@@ -496,6 +496,7 @@ function AATMWorkspace() {
               onRefresh={() => loadAll()}
               onRunCycle={() => apiFetch('/orchestration/cycle', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
               onSelfHeal={() => apiFetch('/qa/self-heal', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
+              onOpenProvidersWizard={() => setTab('providers')}
             />
           )}
           {tab === 'chat' && (
@@ -504,7 +505,7 @@ function AATMWorkspace() {
           {tab === 'agents' && (
             <div className="space-y-6">
               <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={() => loadAll()} />
-              <AgentsView agents={agents} onReload={() => loadAll()} />
+              <AgentsView agents={agents} providers={providers} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'tasks' && (
@@ -522,8 +523,8 @@ function AATMWorkspace() {
           )}
           {tab === 'providers' && (
             <div className="space-y-6">
-              <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
               <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} onReload={() => loadAll()} />
+              <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'projects' && (

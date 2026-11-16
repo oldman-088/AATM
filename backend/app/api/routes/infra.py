@@ -7,10 +7,11 @@ from app.browser.engines import BROWSER_ENGINE_REGISTRY
 from app.browser.manager import browser_manager, detect_playwright_capabilities
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import AIProvider, BrowserProfile, BrowserSession, ProviderUsageLog, User
+from app.models import Agent, AIProvider, AuditLog, BrowserProfile, BrowserSession, ProviderUsageLog, User
+from app.providers.adapters import build_adapter
 from app.providers.base import ProviderRequest
 from app.providers.base import validate_credential_ref as validate_provider_credential_ref
-from app.providers.router import provider_router
+from app.providers.router import get_model_configuration_status, provider_router
 from app.schemas.common import (
     BrowserCreateRequest,
     BrowserExtractTextRequest,
@@ -20,6 +21,8 @@ from app.schemas.common import (
     ProviderCreateOrUpdate,
     ProviderTestRequest,
     ProviderUsageResponse,
+    ProviderWizardConfigureRequest,
+    ProviderWizardTestRequest,
 )
 from app.schemas.common import (
     validate_credential_ref as validate_credential_ref_format,
@@ -123,6 +126,220 @@ async def upsert_provider(
     return _serialize_provider(p)
 
 
+@router.get("/providers/wizard/presets")
+async def get_provider_wizard_presets(db: AsyncSession = Depends(get_db)):
+    settings = get_settings()
+    model_status = await get_model_configuration_status(db)
+    return {
+        "model_status": model_status,
+        "options": [
+            {
+                "id": "anthropic-claude",
+                "provider_type": "anthropic_claude",
+                "title": "Anthropic Claude API",
+                "endpoint_url": "https://api.anthropic.com/v1",
+                "credential_ref": settings.ANTHROPIC_API_KEY_REF or "env:ANTHROPIC_API_KEY",
+                "default_model": "claude-sonnet-4-5",
+                "suggested_models": ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+            },
+            {
+                "id": "openai-compatible",
+                "provider_type": "openai_compatible",
+                "title": "OpenAI-Compatible (Ollama / OpenRouter / LiteLLM / vLLM / LM Studio)",
+                "endpoint_url": "http://127.0.0.1:11434/v1",
+                "credential_ref": "env:OLLAMA_API_KEY",
+                "default_model": "qwen2.5-coder:7b",
+                "suggested_models": [
+                    "qwen2.5-coder:7b",
+                    "llama3.1:8b",
+                    "deepseek-coder-v2",
+                    "gpt-4o-mini",
+                    "gpt-4o",
+                ],
+                "sub_presets": [
+                    {
+                        "id": "ollama",
+                        "label": "Ollama (Local)",
+                        "endpoint_url": "http://127.0.0.1:11434/v1",
+                        "credential_ref": "env:OLLAMA_API_KEY",
+                        "default_model": "qwen2.5-coder:7b",
+                    },
+                    {
+                        "id": "openrouter",
+                        "label": "OpenRouter",
+                        "endpoint_url": "https://openrouter.ai/api/v1",
+                        "credential_ref": "env:OPENROUTER_API_KEY",
+                        "default_model": "anthropic/claude-sonnet-4",
+                    },
+                    {
+                        "id": "litellm",
+                        "label": "LiteLLM Proxy",
+                        "endpoint_url": "http://127.0.0.1:4000/v1",
+                        "credential_ref": "env:LITELLM_API_KEY",
+                        "default_model": "gpt-4o-mini",
+                    },
+                    {
+                        "id": "vllm",
+                        "label": "vLLM / LM Studio",
+                        "endpoint_url": "http://127.0.0.1:1234/v1",
+                        "credential_ref": "env:OPENAI_API_KEY",
+                        "default_model": "local-model",
+                    },
+                ],
+            },
+            {
+                "id": "arena-local-bridge",
+                "provider_type": "arena_local_bridge",
+                "title": "Arena Local Bridge (with upstream)",
+                "endpoint_url": settings.ARENA_BRIDGE_URL,
+                "credential_ref": "env:ARENA_BRIDGE_TOKEN",
+                "default_model": "arena-bridge-default",
+                "suggested_models": ["arena-bridge-default", "arena-reasoning-pro", "arena-fast"],
+            },
+        ],
+    }
+
+
+@router.post("/providers/wizard/test-connection", dependencies=[Depends(require_role("admin", "operator"))])
+async def test_provider_wizard_connection(body: ProviderWizardTestRequest):
+    try:
+        validate_credential_ref_format(body.credential_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    adapter = build_adapter(
+        body.provider_type,
+        f"wizard-{body.provider_type}",
+        body.endpoint_url,
+        body.credential_ref,
+        body.model,
+    )
+    resp = await adapter.generate(
+        ProviderRequest(
+            prompt="Reply with ok.",
+            system_prompt="",
+            model=body.model,
+            max_tokens=1,
+            temperature=0.0,
+            dry_run=False,
+            allow_diagnostic_fallback=False,
+        )
+    )
+    return {
+        "success": resp.success,
+        "provider_type": body.provider_type,
+        "model": resp.model,
+        "latency_ms": resp.latency_ms,
+        "pricing_known": resp.pricing_known,
+        "detail": (
+            f"Connected to {resp.model} in {resp.latency_ms} ms"
+            if resp.success
+            else (resp.error_message or "Connection check failed")
+        ),
+        "error_message": resp.error_message,
+        "response_excerpt": resp.content[:120] if resp.success else "",
+    }
+
+
+@router.post("/providers/wizard/configure", status_code=200, dependencies=[Depends(require_role("admin", "operator"))])
+async def configure_provider_wizard(
+    body: ProviderWizardConfigureRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        validate_credential_ref_format(body.credential_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    default_ids = {
+        "anthropic_claude": "anthropic-claude",
+        "openai_compatible": "openai-compatible",
+        "arena_local_bridge": "arena-local-bridge",
+    }
+    default_names = {
+        "anthropic_claude": "Anthropic Claude API",
+        "openai_compatible": "OpenAI-Compatible Provider",
+        "arena_local_bridge": "Arena Local Bridge",
+    }
+    pid = body.id or default_ids[body.provider_type]
+    name = (body.name or "").strip() or default_names[body.provider_type]
+    models = list(dict.fromkeys([body.default_model, *(body.available_models or [])]))
+
+    existing_all = list((await db.execute(select(AIProvider))).scalars().all())
+    for item in existing_all:
+        if item.id != pid and item.priority <= 1:
+            item.priority = max(2, item.priority + 1)
+
+    provider = await db.get(AIProvider, pid)
+    if provider is None:
+        provider = AIProvider(
+            id=pid,
+            name=name,
+            provider_type=body.provider_type,
+            endpoint_url=body.endpoint_url,
+            credential_ref=body.credential_ref,
+            default_model=body.default_model,
+            available_models=models,
+            priority=1,
+            is_enabled=True,
+            daily_limit_usd=body.daily_limit_usd,
+        )
+        db.add(provider)
+    else:
+        provider.name = name
+        provider.provider_type = body.provider_type
+        provider.endpoint_url = body.endpoint_url
+        provider.credential_ref = body.credential_ref
+        provider.default_model = body.default_model
+        provider.available_models = models
+        provider.priority = 1
+        provider.is_enabled = True
+        provider.daily_limit_usd = body.daily_limit_usd
+
+    await db.flush()
+    updated_agents: list[str] = []
+    if body.assign_to_manager or body.assign_to_workers:
+        agents = list((await db.execute(select(Agent))).scalars().all())
+        for ag in agents:
+            if (body.assign_to_manager and ag.role == "manager") or (
+                body.assign_to_workers and ag.role == "worker"
+            ):
+                ag.provider_id = provider.id
+                ag.model_name = body.default_model
+                updated_agents.append(ag.id)
+
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="provider.wizard_configure",
+            resource_type="ai_provider",
+            resource_id=provider.id,
+            details={
+                "provider_type": provider.provider_type,
+                "default_model": provider.default_model,
+                "credential_ref": provider.credential_ref,
+                "updated_agents": updated_agents,
+            },
+        )
+    )
+    await db.commit()
+    await db.refresh(provider)
+    health = await provider_router.check_provider_health(db, provider)
+    model_status = await get_model_configuration_status(db)
+    return {
+        "provider": _serialize_provider(provider),
+        "health": {
+            "status": health.status,
+            "latency_ms": health.latency_ms,
+            "detail": health.detail,
+            "credentials_configured": health.credentials_configured,
+        },
+        "model_status": model_status,
+        "updated_agents": updated_agents,
+    }
+
+
 @router.post("/providers/health-check", dependencies=[Depends(require_role("admin", "operator"))])
 async def health_check_all_providers(
     user: User = Depends(get_current_user),
@@ -194,6 +411,7 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
     in_tok, out_tok, total_cost = tot_res.one()
 
     budget_summary = await provider_router.get_spend_summary(db)
+    has_unknown_pricing = any(not bool(lg.pricing_known) for lg in logs)
 
     return {
         "budget_summary": budget_summary,
@@ -201,6 +419,8 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
             "total_input_tokens": int(in_tok or 0),
             "total_output_tokens": int(out_tok or 0),
             "total_estimated_cost_usd": round(float(total_cost or 0.0), 6),
+            "pricing_known": not has_unknown_pricing if logs else True,
+            "has_unknown_pricing": has_unknown_pricing,
         },
         "logs": [
             {
@@ -214,6 +434,7 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
                 "output_tokens_estimated": lg.output_tokens_estimated,
                 "estimated_cost_usd": lg.estimated_cost_usd,
                 "confirmed_cost_usd": lg.confirmed_cost_usd,
+                "pricing_known": bool(lg.pricing_known),
                 "latency_ms": lg.latency_ms,
                 "success": lg.success,
                 "error_message": lg.error_message,

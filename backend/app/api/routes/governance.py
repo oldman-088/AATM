@@ -17,6 +17,7 @@ from app.models import (
     Task,
     User,
 )
+from app.providers.router import get_model_configuration_status
 from app.qa.engine import qa_engine
 from app.runtime.sandbox import get_sandbox_status
 from app.schemas.common import ApprovalCreate, ApprovalDecision, SettingUpdate
@@ -68,6 +69,7 @@ async def dashboard_overview(db: AsyncSession = Depends(get_db)):
         "recommendations": intel["recommendations"],
         "recent_events": event_bus.recent_events(15),
         "sandbox": get_sandbox_status(),
+        "model_status": await get_model_configuration_status(db),
     }
 
 

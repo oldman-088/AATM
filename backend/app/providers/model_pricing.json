@@ -1,0 +1,60 @@
+{
+  "version": "2026-11-16",
+  "models": {
+    "claude-sonnet-4-5": {
+      "input_per_1k_usd": 0.003,
+      "output_per_1k_usd": 0.015,
+      "pricing_known": true
+    },
+    "claude-opus-4-1": {
+      "input_per_1k_usd": 0.015,
+      "output_per_1k_usd": 0.075,
+      "pricing_known": true
+    },
+    "claude-haiku-4-5": {
+      "input_per_1k_usd": 0.0008,
+      "output_per_1k_usd": 0.004,
+      "pricing_known": true
+    },
+    "gpt-4o": {
+      "input_per_1k_usd": 0.0025,
+      "output_per_1k_usd": 0.01,
+      "pricing_known": true
+    },
+    "gpt-4o-mini": {
+      "input_per_1k_usd": 0.00015,
+      "output_per_1k_usd": 0.0006,
+      "pricing_known": true
+    },
+    "arena-reasoning-pro": {
+      "input_per_1k_usd": 0.0,
+      "output_per_1k_usd": 0.0,
+      "pricing_known": false
+    },
+    "arena-fast": {
+      "input_per_1k_usd": 0.0,
+      "output_per_1k_usd": 0.0,
+      "pricing_known": false
+    },
+    "arena-agent": {
+      "input_per_1k_usd": 0.0,
+      "output_per_1k_usd": 0.0,
+      "pricing_known": false
+    },
+    "arena-agent-coder": {
+      "input_per_1k_usd": 0.0,
+      "output_per_1k_usd": 0.0,
+      "pricing_known": false
+    },
+    "arena-bridge-default": {
+      "input_per_1k_usd": 0.0,
+      "output_per_1k_usd": 0.0,
+      "pricing_known": false
+    },
+    "arena-default": {
+      "input_per_1k_usd": 0.0,
+      "output_per_1k_usd": 0.0,
+      "pricing_known": false
+    }
+  }
+}

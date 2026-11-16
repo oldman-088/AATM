@@ -231,6 +231,7 @@ class ProviderRouter:
                 output_tokens_estimated=response.output_tokens_estimated,
                 estimated_cost_usd=cost,
                 confirmed_cost_usd=confirmed_cost,
+                pricing_known=bool(response.pricing_known or confirmed_cost is not None),
                 latency_ms=max(0.0, float(response.latency_ms)),
                 success=response.success,
                 error_message=response.error_message,
@@ -818,6 +819,51 @@ class ProviderRouter:
             "threshold": health_threshold,
             "sessions": recovered,
         }
+
+
+async def get_model_configuration_status(db: AsyncSession) -> dict[str, Any]:
+    """Inspect enabled AI providers and distinguish real configured models from diagnostic-only local bridge."""
+    settings = get_settings()
+    res = await db.execute(select(AIProvider).where(AIProvider.is_enabled.is_(True)).order_by(AIProvider.priority.asc()))
+    providers = list(res.scalars().all())
+    upstream_url = os.environ.get("ARENA_BRIDGE_UPSTREAM_URL", "").strip()
+    default_bridge_urls = {
+        "",
+        "http://127.0.0.1:4100",
+        "http://localhost:4100",
+        (settings.ARENA_BRIDGE_URL or "").strip().rstrip("/"),
+    }
+
+    configured_providers: list[str] = []
+    diagnostic_only_providers: list[str] = []
+    for p in providers:
+        if p.provider_type == "arena_agent":
+            continue
+        has_cred, _ = validate_credential_ref(p.credential_ref)
+        if p.provider_type == "arena_local_bridge":
+            ep = (p.endpoint_url or "").strip().rstrip("/")
+            if has_cred and (upstream_url or (ep not in default_bridge_urls)):
+                configured_providers.append(p.id)
+            else:
+                diagnostic_only_providers.append(p.id)
+        elif has_cred:
+            configured_providers.append(p.id)
+
+    configured = len(configured_providers) > 0
+    return {
+        "status": "CONFIGURED" if configured else "NO_MODEL_CONFIGURED",
+        "configured": configured,
+        "configured_providers": configured_providers,
+        "diagnostic_only_providers": diagnostic_only_providers,
+        "reason": (
+            None
+            if configured
+            else (
+                "No real AI model provider is configured. Configure Claude API, an OpenAI-compatible/Ollama endpoint, "
+                "or Arena Local Bridge with ARENA_BRIDGE_UPSTREAM_URL."
+            )
+        ),
+    }
 
 
 provider_router = ProviderRouter()

@@ -747,4 +747,66 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
     expect(await screen.findByText('SANDBOX_UNAVAILABLE')).toBeInTheDocument()
     expect(screen.getByText(/Sandbox image 'aatm-sandbox:latest' is missing\./)).toBeInTheDocument()
   })
+
+  it('displays NO_MODEL_CONFIGURED banner with link to Provider Setup Wizard and renders Unknown cost', async () => {
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+    installWebSocketMock()
+    const { calls } = installFetchMock({
+      '/api/v1/dashboard/overview': {
+        kpis: {
+          active_workers: 0,
+          idle_workers: 4,
+          completion_rate: 0,
+          healthy_providers: 0,
+          total_providers: 3,
+          running_browsers: 0,
+          total_browsers: 4,
+          pending_approvals: 0,
+        },
+        divisions: [{ code: 'D01', progress_percent: 0, completed_tasks: 0, total_tasks: 0 }],
+        resources: {
+          cpu_count: 4,
+          cpu_percent: 10,
+          ram_used_gb: 2,
+          ram_total_gb: 8,
+          ram_percent: 25,
+          disk_free_gb: 50,
+          disk_percent: 20,
+        },
+        recommendations: [],
+        recent_events: [],
+        sandbox: { status: 'READY', available: true, mode: 'docker', image: 'aatm-sandbox:latest', reason: null },
+        model_status: {
+          status: 'NO_MODEL_CONFIGURED',
+          configured: false,
+          configured_providers: [],
+          diagnostic_only_providers: ['arena-local-bridge'],
+          reason: 'No real model configured.',
+        },
+      },
+      '/api/v1/providers/usage': {
+        summary: {
+          total_input_tokens: 500,
+          total_output_tokens: 100,
+          total_estimated_cost_usd: 0,
+          pricing_known: false,
+          has_unknown_pricing: true,
+        },
+        logs: [],
+      },
+    })
+    await renderWorkspace()
+    expect(await screen.findByText('NO_MODEL_CONFIGURED')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Open Provider Setup Wizard/i }))
+
+    expect(await screen.findByText('Model Provider Setup Wizard')).toBeInTheDocument()
+    expect(screen.getByText('Unknown cost')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Test Connection/i }))
+    await waitFor(() => {
+      const testCall = calls.find((c) => c.path === '/api/v1/providers/wizard/test-connection')
+      expect(testCall).toBeDefined()
+    })
+    expect(await screen.findByText(/Connected to claude-sonnet-4-5 in 42\.5 ms/)).toBeInTheDocument()
+  })
 })

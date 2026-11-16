@@ -547,7 +547,8 @@ def create_app(
             "status": "ok",
             "service": "aatm-arena-local-bridge",
             "version": BRIDGE_VERSION,
-            "mode": "upstream_proxy" if upstream else "local_reference",
+            "mode": "upstream_proxy" if upstream else "diagnostic_only",
+            "diagnostic_only": not bool(upstream),
             "auth_required": token_configured,
             "streaming_supported": True,
             "persistence_enabled": store.state_file is not None,
@@ -794,6 +795,8 @@ def create_app(
             "total_tokens": prompt_tokens + completion_tokens,
         }
         session_summary = updated.to_summary()
+        bridge_mode = "upstream_proxy" if upstream_url else "diagnostic_only"
+        is_diagnostic_only = not bool(upstream_url)
 
         if body.stream:
             async def sse_events() -> AsyncIterator[str]:
@@ -802,6 +805,8 @@ def create_app(
                     "object": "chat.completion.chunk",
                     "created": created_ts,
                     "model": body.model,
+                    "mode": bridge_mode,
+                    "diagnostic_only": is_diagnostic_only,
                     "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
                     "session": session_summary,
                 }
@@ -822,6 +827,8 @@ def create_app(
                     "object": "chat.completion.chunk",
                     "created": created_ts,
                     "model": body.model,
+                    "mode": bridge_mode,
+                    "diagnostic_only": is_diagnostic_only,
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                     "usage": usage_payload,
                     "session": session_summary,
@@ -843,6 +850,8 @@ def create_app(
             "object": "chat.completion",
             "created": created_ts,
             "model": body.model,
+            "mode": bridge_mode,
+            "diagnostic_only": is_diagnostic_only,
             "choices": [
                 {
                     "index": 0,

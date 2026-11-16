@@ -17,7 +17,6 @@ from app.employees.catalog import ensure_employee_workspace
 from app.models import (
     Agent,
     AgentMessage,
-    AIProvider,
     ApprovalRequest,
     AuditLog,
     ChatMessage,
@@ -25,8 +24,8 @@ from app.models import (
     Project,
     Task,
 )
-from app.providers.base import ProviderRequest, ProviderResponse, validate_credential_ref
-from app.providers.router import ProviderRouter
+from app.providers.base import ProviderRequest, ProviderResponse
+from app.providers.router import ProviderRouter, get_model_configuration_status
 from app.providers.router import provider_router as shared_provider_router
 from app.runtime.temporal import to_naive_utc
 from app.schemas.manager import ManagerPlan
@@ -557,15 +556,8 @@ class TaskScheduler:
                 )
 
     async def _has_configured_model_provider(self, db: AsyncSession) -> bool:
-        result = await db.execute(select(AIProvider).where(AIProvider.is_enabled.is_(True)))
-        for provider in result.scalars().all():
-            # The legacy Arena Agent adapter is intentionally a non-functional stub.
-            if provider.provider_type == "arena_agent":
-                continue
-            credential_configured, _ = validate_credential_ref(provider.credential_ref)
-            if credential_configured:
-                return True
-        return False
+        status = await get_model_configuration_status(db)
+        return bool(status["configured"])
 
     async def _request_manager_plan(
         self,
@@ -733,6 +725,22 @@ class TaskScheduler:
                 "The manager profile is unavailable, so I could not process this directive. No tasks were created.",
                 actions_taken,
             )
+
+        if isinstance(self.provider_router, ProviderRouter):
+            model_status = await get_model_configuration_status(db)
+            if not model_status["configured"]:
+                actions_taken.append("NO_MODEL_CONFIGURED: No real AI model provider is configured; directive not dispatched.")
+                return await self._save_manager_reply(
+                    db,
+                    project_id,
+                    (
+                        "No model provider configured (NO_MODEL_CONFIGURED). "
+                        "Open the Provider Setup Wizard to connect Claude API, an OpenAI-compatible/Ollama endpoint, "
+                        "or Arena Local Bridge with an upstream before issuing directives, so no tasks were created."
+                    ),
+                    actions_taken,
+                    metadata={"model_status": model_status},
+                )
 
         employees, context = await self._manager_context(db, project_id)
         prompt = self._manager_user_prompt(content, context)

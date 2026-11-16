@@ -358,6 +358,16 @@ export function ProvidersView({
   const [agentId, setAgentId] = useState('')
   const [sessionId, setSessionId] = useState('')
   const [budget, setBudget] = useState<BudgetLimits | null>(null)
+  const [wizardPresets, setWizardPresets] = useState<any[]>([])
+  const [wizardType, setWizardType] = useState<'anthropic_claude' | 'openai_compatible' | 'arena_local_bridge'>('anthropic_claude')
+  const [wizardEndpoint, setWizardEndpoint] = useState('https://api.anthropic.com/v1')
+  const [wizardCredRef, setWizardCredRef] = useState('env:ANTHROPIC_API_KEY')
+  const [wizardModel, setWizardModel] = useState('claude-sonnet-4-5')
+  const [wizardAssignManager, setWizardAssignManager] = useState(true)
+  const [wizardAssignWorkers, setWizardAssignWorkers] = useState(true)
+  const [wizardTesting, setWizardTesting] = useState(false)
+  const [wizardSaving, setWizardSaving] = useState(false)
+  const [wizardStatus, setWizardStatus] = useState<{ ok: boolean; text: string } | null>(null)
 
   // Budget limits live in the `budgets` system setting (GET /settings returns key -> {value}).
   // Best-effort: the usage card falls back to provider caps when this is unavailable.
@@ -365,7 +375,90 @@ export function ProvidersView({
     apiFetch<Record<string, { value?: any }>>('/settings')
       .then((settings) => setBudget(extractBudgetLimits(settings)))
       .catch(() => setBudget(null))
+    apiFetch<{ options?: any[] }>('/providers/wizard/presets')
+      .then((data) => {
+        if (Array.isArray(data?.options)) setWizardPresets(data.options)
+      })
+      .catch(() => setWizardPresets([]))
   }, [])
+
+  const selectWizardPreset = (ptype: 'anthropic_claude' | 'openai_compatible' | 'arena_local_bridge') => {
+    setWizardType(ptype)
+    setWizardStatus(null)
+    const fromServer = wizardPresets.find((opt) => opt.provider_type === ptype)
+    if (fromServer) {
+      setWizardEndpoint(fromServer.endpoint_url || '')
+      setWizardCredRef(fromServer.credential_ref || '')
+      setWizardModel(fromServer.default_model || '')
+      return
+    }
+    if (ptype === 'anthropic_claude') {
+      setWizardEndpoint('https://api.anthropic.com/v1')
+      setWizardCredRef('env:ANTHROPIC_API_KEY')
+      setWizardModel('claude-sonnet-4-5')
+    } else if (ptype === 'openai_compatible') {
+      setWizardEndpoint('https://openrouter.ai/api/v1')
+      setWizardCredRef('env:OPENROUTER_API_KEY')
+      setWizardModel('qwen2.5-coder:7b')
+    } else {
+      setWizardEndpoint('')
+      setWizardCredRef('env:ARENA_BRIDGE_TOKEN')
+      setWizardModel('arena-bridge-default')
+    }
+  }
+
+  const testWizardConnection = async () => {
+    setWizardTesting(true)
+    setWizardStatus(null)
+    try {
+      const res = await apiFetch<any>('/providers/wizard/test-connection', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider_type: wizardType,
+          endpoint_url: wizardEndpoint || null,
+          credential_ref: wizardCredRef,
+          model: wizardModel,
+        }),
+      })
+      setWizardStatus({
+        ok: Boolean(res.success),
+        text: `${res.detail || (res.success ? 'Connected' : res.error_message)} (${res.model}, ${formatNumber(res.latency_ms)} ms)`,
+      })
+    } catch (err: any) {
+      setWizardStatus({ ok: false, text: err?.message || 'Connection test failed' })
+    } finally {
+      setWizardTesting(false)
+    }
+  }
+
+  const saveWizardConfig = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setWizardSaving(true)
+    setWizardStatus(null)
+    try {
+      const res = await apiFetch<any>('/providers/wizard/configure', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider_type: wizardType,
+          endpoint_url: wizardEndpoint || null,
+          credential_ref: wizardCredRef,
+          default_model: wizardModel,
+          available_models: [wizardModel],
+          assign_to_manager: wizardAssignManager,
+          assign_to_workers: wizardAssignWorkers,
+        }),
+      })
+      setWizardStatus({
+        ok: true,
+        text: `${res.provider?.name || wizardType} (${res.provider?.default_model || wizardModel}) — ${res.model_status?.status || 'CONFIGURED'}`,
+      })
+      onReload()
+    } catch (err: any) {
+      setWizardStatus({ ok: false, text: err?.message || 'Unable to save provider configuration' })
+    } finally {
+      setWizardSaving(false)
+    }
+  }
 
   const providerDailyCap = providers.reduce(
     (sum, p) => sum + (typeof p.daily_limit_usd === 'number' ? p.daily_limit_usd : 0),
@@ -386,6 +479,9 @@ export function ProvidersView({
     onReload()
   }
 
+  const activePreset = wizardPresets.find((opt) => opt.provider_type === wizardType)
+  const hasUnknownSummaryCost = Boolean(usage?.summary?.has_unknown_pricing || usage?.summary?.pricing_known === false)
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -398,6 +494,136 @@ export function ProvidersView({
           {t.providers.healthCheckAll}
         </Button>
       </div>
+
+      {/* Provider Setup Wizard */}
+      <Card className="space-y-4 border-indigo-500/30 bg-slate-900/80">
+        <div className="space-y-1">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
+            <Sparkles className="h-4 w-4 text-indigo-400" />
+            {t.providers.wizardTitle}
+          </h3>
+          <p className="text-xs text-slate-400">{t.providers.wizardSubtitle}</p>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-3">
+          <Button
+            type="button"
+            variant={wizardType === 'anthropic_claude' ? 'primary' : 'secondary'}
+            onClick={() => selectWizardPreset('anthropic_claude')}
+          >
+            {t.providers.presetAnthropic}
+          </Button>
+          <Button
+            type="button"
+            variant={wizardType === 'openai_compatible' ? 'primary' : 'secondary'}
+            onClick={() => selectWizardPreset('openai_compatible')}
+          >
+            {t.providers.presetOpenAICompatible}
+          </Button>
+          <Button
+            type="button"
+            variant={wizardType === 'arena_local_bridge' ? 'primary' : 'secondary'}
+            onClick={() => selectWizardPreset('arena_local_bridge')}
+          >
+            {t.providers.presetBridge}
+          </Button>
+        </div>
+
+        {wizardType === 'openai_compatible' && Array.isArray(activePreset?.sub_presets) && (
+          <div className="flex flex-wrap gap-2">
+            {activePreset.sub_presets.map((sub: any) => (
+              <Button
+                key={sub.id}
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setWizardEndpoint(sub.endpoint_url || '')
+                  setWizardCredRef(sub.credential_ref || '')
+                  setWizardModel(sub.default_model || '')
+                }}
+              >
+                {sub.label}
+              </Button>
+            ))}
+          </div>
+        )}
+
+        <form onSubmit={saveWizardConfig} className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="space-y-1 text-xs text-slate-300">
+              <span>{t.providers.endpointUrlLabel}</span>
+              <Input
+                aria-label={t.providers.endpointUrlLabel}
+                value={wizardEndpoint}
+                onChange={(e) => setWizardEndpoint(e.target.value)}
+                placeholder="https://api.anthropic.com/v1"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-slate-300">
+              <span>{t.providers.credentialRefLabel}</span>
+              <Input
+                aria-label={t.providers.credentialRefLabel}
+                value={wizardCredRef}
+                onChange={(e) => setWizardCredRef(e.target.value)}
+                placeholder="env:ANTHROPIC_API_KEY"
+                required
+              />
+            </label>
+            <label className="space-y-1 text-xs text-slate-300">
+              <span>{t.providers.modelNameLabel}</span>
+              <Input
+                aria-label={t.providers.modelNameLabel}
+                value={wizardModel}
+                onChange={(e) => setWizardModel(e.target.value)}
+                placeholder="claude-sonnet-4-5"
+                required
+              />
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4 text-xs text-slate-300">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={wizardAssignManager}
+                onChange={(e) => setWizardAssignManager(e.target.checked)}
+              />
+              {t.providers.applyToManager}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={wizardAssignWorkers}
+                onChange={(e) => setWizardAssignWorkers(e.target.checked)}
+              />
+              {t.providers.applyToWorkers}
+            </label>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" disabled={wizardTesting} onClick={testWizardConnection}>
+              {wizardTesting ? t.providers.testingConnection : t.providers.testConnection}
+            </Button>
+            <Button type="submit" disabled={wizardSaving}>
+              {wizardSaving ? t.providers.savingProvider : t.providers.saveAndActivate}
+            </Button>
+          </div>
+        </form>
+
+        {wizardStatus && (
+          <div
+            role="status"
+            className={`rounded-lg border px-3 py-2 text-xs ${
+              wizardStatus.ok
+                ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
+                : 'border-rose-500/40 bg-rose-950/30 text-rose-200'
+            }`}
+          >
+            {wizardStatus.text}
+          </div>
+        )}
+      </Card>
 
       {testResult && (
         <Card className="border-sky-500/40 bg-sky-950/30 text-sm text-sky-200">{testResult}</Card>
@@ -451,9 +677,30 @@ export function ProvidersView({
             </div>
             <div>
               {t.providers.totalCost}:{' '}
-              <span className="font-bold text-emerald-400">${formatUsd(usage.summary.total_estimated_cost_usd)}</span>
+              {hasUnknownSummaryCost && Number(usage.summary.total_estimated_cost_usd || 0) === 0 ? (
+                <span className="font-bold text-amber-300">{t.providers.unknownCost}</span>
+              ) : (
+                <span className="font-bold text-emerald-400">
+                  ${formatUsd(usage.summary.total_estimated_cost_usd)}
+                  {hasUnknownSummaryCost ? ` · ${t.providers.pricingUnknownBadge}` : ''}
+                </span>
+              )}
             </div>
           </div>
+          {Array.isArray(usage.logs) && usage.logs.length > 0 && (
+            <div className="max-h-40 space-y-1 overflow-y-auto text-xs">
+              {usage.logs.slice(0, 10).map((lg: any, idx: number) => (
+                <div key={lg.id || `${lg.created_at || 'log'}-${idx}`} className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/50 px-2.5 py-1.5">
+                  <span className="font-mono text-slate-200">
+                    {lg.provider_id} · {lg.model_name}
+                  </span>
+                  <span className={lg.pricing_known === false ? 'text-amber-300' : 'text-emerald-300'}>
+                    {lg.pricing_known === false ? t.providers.unknownCost : `$${formatUsd(lg.estimated_cost_usd)}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
           <BudgetHeadroom usage={usage} budget={budget} fallbackDailyLimit={providerDailyCap} />
         </Card>
       )}

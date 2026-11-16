@@ -93,7 +93,16 @@ async def update_agent(
     agent = await db.get(Agent, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    for field in ("status", "provider_id", "model_name", "is_enabled", "permissions"):
+    if body.provider_id is not None:
+        from app.models import AIProvider
+
+        provider = await db.get(AIProvider, body.provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail=f"Provider '{body.provider_id}' not found")
+        agent.provider_id = provider.id
+        if body.model_name is None and not agent.model_name:
+            agent.model_name = provider.default_model
+    for field in ("status", "model_name", "is_enabled", "permissions"):
         val = getattr(body, field)
         if val is not None:
             setattr(agent, field, val)
@@ -262,15 +271,17 @@ async def send_chat(
     db.add(user_msg)
     await db.commit()
     await db.refresh(user_msg)
+    user_payload = {
+        "id": user_msg.id,
+        "sender_type": user_msg.sender_type,
+        "sender_id": user_msg.sender_id,
+        "content": user_msg.content,
+        "created_at": user_msg.created_at,
+    }
     reply = await task_scheduler.handle_manager_directive(db, body.project_id, body.content)
+    await db.refresh(reply)
     return {
-        "user_message": {
-            "id": user_msg.id,
-            "sender_type": user_msg.sender_type,
-            "sender_id": user_msg.sender_id,
-            "content": user_msg.content,
-            "created_at": user_msg.created_at,
-        },
+        "user_message": user_payload,
         "manager_reply": {
             "id": reply.id,
             "sender_type": reply.sender_type,

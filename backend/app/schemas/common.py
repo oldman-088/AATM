@@ -55,6 +55,7 @@ class EmployeeCreate(BaseModel):
     divisions: list[str] | None = None
     permissions: list[str] | None = None
     provider_id: str = "arena-agent"
+    model_name: str | None = Field(default=None, max_length=120)
     allocation_mode: str = Field(default="hybrid", pattern="^(one_per_employee|shared|hybrid)$")
     preferred_account_id: str | None = None
     create_browser_profile: bool = True
@@ -152,6 +153,8 @@ class ProviderUsageTotals(BaseModel):
     total_input_tokens: int
     total_output_tokens: int
     total_estimated_cost_usd: float
+    pricing_known: bool = True
+    has_unknown_pricing: bool = False
 
 
 class ProviderUsageLogEntry(BaseModel):
@@ -165,10 +168,35 @@ class ProviderUsageLogEntry(BaseModel):
     output_tokens_estimated: bool
     estimated_cost_usd: float
     confirmed_cost_usd: float | None
+    pricing_known: bool = False
     latency_ms: float
     success: bool
     error_message: str | None
     created_at: datetime
+
+
+class ProviderWizardTestRequest(BaseModel):
+    provider_type: str = Field(pattern="^(anthropic_claude|openai_compatible|arena_local_bridge)$")
+    endpoint_url: str | None = None
+    credential_ref: str = Field(
+        description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",
+    )
+    model: str = Field(min_length=1, max_length=120)
+
+
+class ProviderWizardConfigureRequest(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    provider_type: str = Field(pattern="^(anthropic_claude|openai_compatible|arena_local_bridge)$")
+    endpoint_url: str | None = None
+    credential_ref: str = Field(
+        description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",
+    )
+    default_model: str = Field(min_length=1, max_length=120)
+    available_models: list[str] = Field(default_factory=list)
+    daily_limit_usd: float = 20.0
+    assign_to_manager: bool = False
+    assign_to_workers: bool = False
 
 
 class ProviderUsageResponse(BaseModel):

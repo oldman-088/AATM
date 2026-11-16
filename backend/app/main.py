@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import jwt
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.models  # noqa: F401
 from app.api.routes import auth, devices, governance, infra, orchestration, platform, projects
@@ -19,8 +20,9 @@ from app.core.events import event_bus
 from app.core.security import decode_access_token
 from app.db.base import Base
 from app.db.seed import seed_initial_data
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import AsyncSessionLocal, engine, get_db
 from app.models import User
+from app.providers.router import get_model_configuration_status
 from app.runtime.sandbox import get_sandbox_status
 
 WS_AUTH_TIMEOUT_SECONDS = 5.0
@@ -104,13 +106,24 @@ async def http_exception_handler(_: Request, exc: HTTPException):
 
 
 @app.get("/api/health")
-async def health():
+async def health(db: AsyncSession = Depends(get_db)):
+    try:
+        model_status = await get_model_configuration_status(db)
+    except Exception:
+        model_status = {
+            "status": "NO_MODEL_CONFIGURED",
+            "configured": False,
+            "configured_providers": [],
+            "diagnostic_only_providers": [],
+            "reason": "Provider table unavailable.",
+        }
     return {
         "status": "ok",
         "service": "aatm-backend",
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
         "sandbox": get_sandbox_status(),
+        "model_status": model_status,
     }
 
 

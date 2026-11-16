@@ -45,6 +45,13 @@ export const fixtures: Record<string, RouteValue> = {
       image: 'aatm-sandbox:latest',
       reason: null,
     },
+    model_status: {
+      status: 'CONFIGURED',
+      configured: true,
+      configured_providers: ['anthropic-claude'],
+      diagnostic_only_providers: [],
+      reason: null,
+    },
   },
   '/api/v1/agents': [
     {
@@ -94,8 +101,51 @@ export const fixtures: Record<string, RouteValue> = {
   '/api/v1/browsers/engines': { playwright: { status: 'ready' }, chromium_cdp: { status: 'ready' } },
   '/api/v1/userscripts': [],
   '/api/v1/providers': [],
+  '/api/v1/providers/wizard/presets': {
+    model_status: { status: 'CONFIGURED', configured: true, configured_providers: ['anthropic-claude'], diagnostic_only_providers: [] },
+    options: [
+      {
+        id: 'anthropic-claude',
+        provider_type: 'anthropic_claude',
+        title: 'Anthropic Claude API',
+        endpoint_url: 'https://api.anthropic.com/v1',
+        credential_ref: 'env:ANTHROPIC_API_KEY',
+        default_model: 'claude-sonnet-4-5',
+      },
+      {
+        id: 'openai-compatible',
+        provider_type: 'openai_compatible',
+        title: 'OpenAI-Compatible',
+        endpoint_url: 'https://openrouter.ai/api/v1',
+        credential_ref: 'env:OPENROUTER_API_KEY',
+        default_model: 'qwen2.5-coder:7b',
+        sub_presets: [
+          { id: 'ollama', label: 'Ollama (Local)', endpoint_url: 'https://ollama.example.test/v1', credential_ref: 'env:OLLAMA_API_KEY', default_model: 'qwen2.5-coder:7b' },
+        ],
+      },
+      {
+        id: 'arena-local-bridge',
+        provider_type: 'arena_local_bridge',
+        title: 'Arena Local Bridge',
+        endpoint_url: '',
+        credential_ref: 'env:ARENA_BRIDGE_TOKEN',
+        default_model: 'arena-bridge-default',
+      },
+    ],
+  },
+  '/api/v1/providers/wizard/test-connection': (_path: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body || '{}'))
+    return { success: true, provider_type: body.provider_type, model: body.model, latency_ms: 42.5, detail: `Connected to ${body.model} in 42.5 ms` }
+  },
+  '/api/v1/providers/wizard/configure': (_path: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body || '{}'))
+    return {
+      provider: { id: body.provider_type === 'anthropic_claude' ? 'anthropic-claude' : 'openai-compatible', name: body.provider_type, default_model: body.default_model },
+      model_status: { status: 'CONFIGURED', configured: true },
+    }
+  },
   '/api/v1/providers/usage': {
-    summary: { total_input_tokens: 1200, total_output_tokens: 800, total_estimated_cost_usd: 0.02 },
+    summary: { total_input_tokens: 1200, total_output_tokens: 800, total_estimated_cost_usd: 0.02, pricing_known: true, has_unknown_pricing: false },
     logs: [],
   },
   '/api/v1/settings': {

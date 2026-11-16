@@ -826,3 +826,21 @@ async def test_bridge_upstream_sse_safe_error_chunk_fallback(monkeypatch: pytest
             assert "data: [DONE]" in raw_res.text
             assert '"upstream_stream_error"' in raw_res.text
             assert up_secret not in raw_res.text
+
+
+def test_bridge_reports_diagnostic_only_mode_without_upstream(monkeypatch):
+    monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_URL", "")
+    from fastapi.testclient import TestClient
+
+    from bridge.server import app as bridge_app
+
+    with TestClient(bridge_app) as client:
+        health = client.get("/health").json()
+        assert health["mode"] == "diagnostic_only"
+        assert health["diagnostic_only"] is True
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "arena-bridge-default", "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        ).json()
+        assert resp["mode"] == "diagnostic_only"
+        assert resp["diagnostic_only"] is True

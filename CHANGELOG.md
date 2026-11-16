@@ -2,6 +2,21 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.6.0-phase2] - 2026-11-16 — Phase 2: Real Model Connection & Setup Wizard
+
+### Added
+- `backend/app/providers/model_pricing.json` & `compute_cost_details()`: Externalized model rate catalog where real API models record `pricing_known=True` and Arena/unlisted models record `0.0` with `pricing_known=False`.
+- `ProviderUsageLog.pricing_known` (`backend/alembic/versions/d8f1a3b5c7e9_add_provider_usage_pricing_known.py`, revising `c2d4e6f8a1b3`), surfaced in `GET /api/v1/providers/usage` (`summary.has_unknown_pricing`, `summary.pricing_known`, per-log `pricing_known`) and rendered in the UI as `"Unknown cost"` / `"تكلفة غير معروفة"` / `"هزینه نامشخص"`.
+- `get_model_configuration_status()` in `backend/app/providers/router.py`, surfaced in `GET /api/health` and `GET /api/v1/dashboard/overview`, plus `NO_MODEL_CONFIGURED` gating in `TaskScheduler.handle_manager_directive` and `AgentLoop._execute_message`.
+- Provider Setup Wizard API (`GET /api/v1/providers/wizard/presets`, `POST /api/v1/providers/wizard/test-connection` running a live `max_tokens=1, dry_run=False` probe, and `POST /api/v1/providers/wizard/configure` enforcing `env:`-only credentials).
+- Localized UI (`en`, `ar`, `fa`): red `NO_MODEL_CONFIGURED` Dashboard banner linking directly to the 3-option Provider Setup Wizard, per-employee provider/model assignment controls in `AgentsView`, and `Unknown cost` badges in `ProvidersView`.
+- `backend/tests/test_phase2_real_model_wizard.py` & `bridge/tests/test_bridge.py`: Tests covering pricing catalog, `diagnostic_only` bridge labeling/rejection, wizard endpoints, per-employee model assignment, and an Arabic directive end-to-end execution creating `hello.py` + `test_hello.py` and passing `pytest`.
+
+### Changed
+- Labeled `bridge/server.py` `/health` and `/v1/chat/completions` payloads with `mode: "diagnostic_only"` / `diagnostic_only: true` when `ARENA_BRIDGE_UPSTREAM_URL` is unset, and blocked `ArenaLocalBridgeAdapter.generate()` when `allow_diagnostic_fallback=False`.
+- Fixed `POST /api/v1/chat` (`backend/app/api/routes/orchestration.py`) to snapshot `user_message` fields before `handle_manager_directive` commits, preventing `MissingGreenlet` errors under live provider execution.
+- Updated `PATCH /api/v1/agents/{id}` and `POST /api/v1/employees` (`backend/app/employees/catalog.py`) to validate `provider_id` and accept per-employee `model_name`.
+
 ## [2.5.1-phase1b] - 2026-11-16 — Phase 1B: Security Review Follow-Up Fixes
 
 ### Added

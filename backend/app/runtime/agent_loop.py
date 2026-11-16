@@ -37,7 +37,7 @@ from app.models import (
 from app.orchestration.replacement import copy_workspace_handoff
 from app.orchestration.scheduler import task_scheduler
 from app.providers.base import ProviderRequest, ProviderResponse
-from app.providers.router import ProviderRouter
+from app.providers.router import ProviderRouter, get_model_configuration_status
 from app.runtime.agent_protocol import (
     ACTION_PROTOCOL as _ACTION_PROTOCOL,
 )
@@ -342,6 +342,13 @@ class AgentLoop:
             if agent.status == "working" and agent.current_task_id not in {None, task.id}:
                 await self._unclaim_in_session(db, message)
                 return
+            if isinstance(self.provider_router, ProviderRouter):
+                model_status = await get_model_configuration_status(db)
+                if not model_status["configured"]:
+                    raise RuntimeError(
+                        "NO_MODEL_CONFIGURED: No real AI model provider is configured; refusing diagnostic_only execution."
+                    )
+
             if not await task_scheduler.acquire_lock(db, task, agent.id):
                 await self._unclaim_in_session(db, message)
                 return
