@@ -21,12 +21,14 @@ from app.core.security import sanitize_untrusted_content
 from app.db.base import utcnow
 from app.db.session import AsyncSessionLocal
 from app.employees.catalog import ROLE_TEMPLATES
+from app.git_workflows.manager import git_workflow_manager
 from app.memory.engine import memory_engine
 from app.models import (
     Agent,
     AgentMessage,
     ApprovalRequest,
     AuditLog,
+    GitWorkflowRecord,
     MemoryEntry,
     Project,
     ProviderUsageLog,
@@ -37,7 +39,7 @@ from app.models import (
 from app.orchestration.replacement import copy_workspace_handoff
 from app.orchestration.scheduler import task_scheduler
 from app.providers.base import ProviderRequest, ProviderResponse
-from app.providers.router import ProviderRouter
+from app.providers.router import ProviderRouter, get_model_configuration_status
 from app.runtime.agent_protocol import (
     ACTION_PROTOCOL as _ACTION_PROTOCOL,
 )
@@ -342,6 +344,13 @@ class AgentLoop:
             if agent.status == "working" and agent.current_task_id not in {None, task.id}:
                 await self._unclaim_in_session(db, message)
                 return
+            if isinstance(self.provider_router, ProviderRouter):
+                model_status = await get_model_configuration_status(db)
+                if not model_status["configured"]:
+                    raise RuntimeError(
+                        "NO_MODEL_CONFIGURED: No real AI model provider is configured; refusing diagnostic_only execution."
+                    )
+
             if not await task_scheduler.acquire_lock(db, task, agent.id):
                 await self._unclaim_in_session(db, message)
                 return
@@ -350,6 +359,7 @@ class AgentLoop:
             agent.last_heartbeat = utcnow()
             await db.commit()
 
+            work_root = await self._resolve_execution_workspace(db, task, agent)
             dependency_handoffs = await self._prepare_dependency_handoffs(db, task, agent)
             history = list((message.response_payload or {}).get("iterations", []))
             first_iteration = len(history) + 1
@@ -364,7 +374,7 @@ class AgentLoop:
                         f"Per-task cost budget reached (${spent:.4f} of ${cost_limit:.4f}); execution stopped before another model turn."
                     )
 
-                prompt = await self._build_prompt(db, message, task, agent, history, dependency_handoffs)
+                prompt = await self._build_prompt(db, message, task, agent, history, dependency_handoffs, work_root=work_root)
                 request = ProviderRequest(
                     prompt=prompt,
                     system_prompt=self._system_prompt(agent),
@@ -421,7 +431,7 @@ class AgentLoop:
                     continue
 
                 try:
-                    result, completed = await self._execute_action(db, message, task, agent, action)
+                    result, completed = await self._execute_action(db, message, task, agent, action, work_root=work_root)
                 except ActionRejected as exc:
                     correction = f"Action rejected by safety policy: {exc} Choose a permitted workspace action or request approval."
                     record = await self._persist_iteration(
@@ -479,14 +489,72 @@ class AgentLoop:
                 )
                 history.append(record)
                 if completed:
+                    target_status = "completed"
+                    outcome_extra: dict[str, Any] = {}
+                    if task.worktree_path and Path(task.worktree_path).is_dir():
+                        commit_res = await git_workflow_manager.commit_task_worktree(
+                            task.worktree_path,
+                            agent_name=agent.name,
+                            task_id=task.id,
+                            task_title=task.title,
+                        )
+                        if commit_res.get("ok") and commit_res.get("commit_sha"):
+                            task.commit_sha = commit_res["commit_sha"]
+                        outcome_extra["git_commit"] = commit_res
+
+                        project = await db.get(Project, task.project_id)
+                        proj_cfg = (project.config or {}) if project and isinstance(project.config, dict) else {}
+                        auto_pr = bool(proj_cfg.get("auto_pr", True))
+                        repo_slug = None
+                        if project and project.repo_url and "github.com" in project.repo_url:
+                            m_slug = re.search(r"github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$", project.repo_url)
+                            if m_slug:
+                                repo_slug = m_slug.group(1)
+
+                        if commit_res.get("committed") and auto_pr and task.branch_name:
+                            pr_res = await git_workflow_manager.push_and_create_draft_pr(
+                                task.worktree_path,
+                                branch_name=task.branch_name,
+                                base_branch=project.default_branch if project else "main",
+                                title=f"AATM({agent.name}): {task.title}",
+                                body=(
+                                    f"{action.summary}\n\n"
+                                    f"AATM-Task: {task.id}\n"
+                                    f"Agent: {agent.id} ({agent.name})\n"
+                                    f"Commit: {task.commit_sha or 'n/a'}"
+                                ),
+                                repo_slug=repo_slug,
+                            )
+                            outcome_extra["draft_pr"] = pr_res
+                            if pr_res.get("ok"):
+                                task.pr_number = pr_res.get("pr_number")
+                                task.pr_url = pr_res.get("pr_url")
+                                task.pr_status = pr_res.get("pr_status") or "draft"
+                                target_status = "pr_open"
+
+                        wf = (
+                            await db.execute(select(GitWorkflowRecord).where(GitWorkflowRecord.task_id == task.id))
+                        ).scalar_one_or_none()
+                        if wf:
+                            wf.last_commit_sha = task.commit_sha
+                            wf.pr_number = task.pr_number
+                            wf.pr_url = task.pr_url
+                            wf.pr_status = task.pr_status or ("committed" if commit_res.get("committed") else "clean")
+
                     message.execution_status = "completed"
                     message.response_payload = {
                         **(message.response_payload or {}),
                         "outcome": result,
                         "iterations": history,
+                        **outcome_extra,
                     }
-                    await task_scheduler.complete_task(db, task, summary=action.summary)
-                    await self._store_outcome_memory(db, task, agent, "completed", action.summary)
+                    await task_scheduler.complete_task(
+                        db,
+                        task,
+                        summary=action.summary,
+                        target_status=target_status,
+                    )
+                    await self._store_outcome_memory(db, task, agent, target_status, action.summary)
                     return
 
             raise RuntimeError(f"Agent iteration limit reached ({self.max_iterations}) before verified completion.")
@@ -603,6 +671,62 @@ class AgentLoop:
             )
         return handoffs
 
+    async def _resolve_execution_workspace(
+        self,
+        db: AsyncSession,
+        task: Task,
+        agent: Agent,
+    ) -> Path:
+        """Resolve the isolated execution directory: per-task git worktree if enabled, else employee workspace."""
+        if task.worktree_path:
+            existing_wt = Path(task.worktree_path).resolve()
+            if existing_wt.is_dir():
+                return existing_wt
+
+        project = await db.get(Project, task.project_id)
+        if project is not None:
+            settings = get_settings()
+            repo_dir = Path(project.repo_path).resolve()
+            is_git_repo = (repo_dir / ".git").exists()
+            proj_cfg = project.config if isinstance(project.config, dict) else {}
+            explicit_mode = proj_cfg.get("worktree_mode")
+            is_default_repo = project.repo_path in {".", str(settings.REPO_ROOT)} or repo_dir == settings.REPO_ROOT.resolve()
+            should_use_worktree = is_git_repo and (explicit_mode is True or (not is_default_repo and explicit_mode is not False))
+
+            if should_use_worktree:
+                wt_res = await git_workflow_manager.create_task_worktree(
+                    task.id,
+                    task.title,
+                    repo_path=repo_dir,
+                    base_branch=project.default_branch or "main",
+                    db=db,
+                    actor=agent.id,
+                )
+                if wt_res.get("ok") and wt_res.get("worktree_path"):
+                    task.worktree_path = str(wt_res["worktree_path"])
+                    task.branch_name = str(wt_res["branch_name"])
+                    agent.git_branch = task.branch_name
+                    existing_wf = (
+                        await db.execute(select(GitWorkflowRecord).where(GitWorkflowRecord.task_id == task.id))
+                    ).scalar_one_or_none()
+                    if existing_wf is None:
+                        db.add(
+                            GitWorkflowRecord(
+                                project_id=project.id,
+                                task_id=task.id,
+                                branch_name=task.branch_name,
+                                worktree_path=task.worktree_path,
+                                owner_agent_id=agent.id,
+                                base_branch=str(wt_res.get("base_branch") or project.default_branch or "main"),
+                                pr_status="pending",
+                            )
+                        )
+                    await db.commit()
+                    return Path(task.worktree_path).resolve()
+                raise RuntimeError(wt_res.get("error") or "Failed to provision task git worktree.")
+
+        return _safe_workspace(agent.id)
+
     async def _build_prompt(
         self,
         db: AsyncSession,
@@ -611,9 +735,11 @@ class AgentLoop:
         agent: Agent,
         history: list[dict[str, Any]],
         dependency_handoffs: list[dict[str, Any]],
+        *,
+        work_root: Path | None = None,
     ) -> str:
         project = await db.get(Project, task.project_id)
-        root = _safe_workspace(agent.id)
+        root = work_root if work_root is not None else _safe_workspace(agent.id)
         tree = _file_tree(root)
         query = f"{task.title} {task.description} {message.instructions}"
         file_contents = _relevant_file_contents(root, tree, query)
@@ -687,8 +813,10 @@ class AgentLoop:
         task: Task,
         agent: Agent,
         action: Action,
+        *,
+        work_root: Path | None = None,
     ) -> tuple[str, bool]:
-        root = _safe_workspace(agent.id)
+        root = work_root if work_root is not None else _safe_workspace(agent.id)
         if isinstance(action, ReadAction):
             target = _path_for_action(root, action.path)
             if not target.is_file():
@@ -739,12 +867,17 @@ class AgentLoop:
             if not self._can_run(agent):
                 raise ActionRejected("This employee's role permissions do not allow test or lint execution.")
             safe_command = self._validate_run_command(root, action.command)
+            exec_kwargs: dict[str, Any] = {
+                "project_id": task.project_id,
+                "task_id": task.id,
+            }
+            if task.worktree_path:
+                exec_kwargs["workspace_root"] = root
             result = await self.executor.run_workspace_command(
                 db,
                 agent.id,
                 safe_command,
-                project_id=task.project_id,
-                task_id=task.id,
+                **exec_kwargs,
             )
             text = (
                 f"Command exit code: {result['exit_code']}\n"
@@ -842,12 +975,17 @@ class AgentLoop:
 
             test_files = self._existing_test_files(root)
             if test_files:
+                exec_kwargs: dict[str, Any] = {
+                    "project_id": task.project_id,
+                    "task_id": task.id,
+                }
+                if task.worktree_path:
+                    exec_kwargs["workspace_root"] = root
                 test_result = await self.executor.run_workspace_command(
                     db,
                     agent.id,
                     ["pytest", "-q", *test_files],
-                    project_id=task.project_id,
-                    task_id=task.id,
+                    **exec_kwargs,
                 )
                 if int(test_result["exit_code"]) != 0:
                     raise RuntimeError(
@@ -882,6 +1020,8 @@ class AgentLoop:
     def _existing_test_files(root: Path) -> list[str]:
         files: list[str] = []
         for item in sorted(root.rglob("*.py")):
+            if any(part in _IGNORED_TREE_DIRS for part in item.relative_to(root).parts):
+                continue
             relative = item.relative_to(root).as_posix()
             if item.is_symlink() or is_sensitive_workspace_path(relative):
                 continue

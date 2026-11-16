@@ -2,6 +2,73 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.0.0] - 2026-11-16 — Phase 8: Packaging, Installers, Docs & Release Verification
+
+### Changed
+- **Release `v3.0.0` Version Parity**: Updated `APP_VERSION` in `backend/app/core/config.py` and `frontend/package.json` to `3.0.0`.
+- **Single-Head Migration Gate**: Updated `scripts/ubuntu/verify.sh` and `scripts/windows/verify.ps1` to verify `alembic heads` resolves to a single head alongside `alembic upgrade head`.
+- **Documentation & Packaging**: Updated `README.md` and `docs/DEPLOYMENT.md` for `v3.0.0` installer-generated admin credentials, security posture, live PNG browser snapshots, hardened sandbox, and cross-platform verification gates.
+- **Phase 8 Test Suite**: Added `backend/tests/test_phase8_packaging_docs.py` verifying `3.0.0` version parity, `/api/health`, single Alembic head, `bash -n` syntax on all Ubuntu scripts, Windows PowerShell parity, Dockerfiles, CI workflow, and README credential hygiene.
+
+## [2.6.0-phase7] - 2026-11-16 — Phase 7: Frontend UX, RTL/LTR & Real Live Status
+
+### Added
+- **Full 12-Tab Mobile Navigation**: Replaced truncated 6-tab mobile header nav with a full 12-tab horizontally scrollable navigation bar in `App.tsx`.
+- **Real WebSocket Live Status & Auto-Reconnect**: Added `wsStatus` (`live` / `connecting` / `offline`) indicator badge in the workspace header driven by real `/ws/events` `auth.ok` frames with reconnect backoff.
+- **Crisp Light-Mode Surface Palette**: Added `html.light` contrast rules in `frontend/src/index.css` so toggling Light ↔ Dark updates surfaces, borders, and typography across views.
+- **Runtime Security Posture Card in QAView**: Wired `GET /api/v1/governance/security-posture` into `QAView` with localized EN/AR/FA labels.
+
+## [2.6.0-phase6] - 2026-11-16 — Phase 6: Security & Governance Hardening
+
+### Added
+- **Security Headers & No-Store Auth Cache**: Added HTTP security headers middleware (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, `Content-Security-Policy`) and `Cache-Control: no-store` on `/api/v1/auth/*` responses.
+- **Server-Side Logout Token Revocation**: Added `POST /api/v1/auth/logout` incrementing `token_version` + recording `auth.logout` audit events (allowed even during forced password change), wired into `AuthContext.logout()`.
+- **Approval Replay Protection & Payload/Audit Redaction**: `decide_approval` rejects re-deciding already decided approvals (`409 Conflict`); `redact_sensitive_mapping` strips secret/token/password keys from approval payloads and audit detail responses.
+- **Security Posture Endpoint**: Added `GET /api/v1/governance/security-posture` reporting sandbox, model, password-change, warning, device, and header enforcement status.
+- **Phase 6 Test Suite**: Added `backend/tests/test_phase6_security_governance.py`.
+
+## [2.6.0-phase5] - 2026-11-16 — Phase 5: Real Browser Engine & Live PNG Snapshots
+
+### Added
+- **Live Playwright PNG Snapshots & Streaming**: `BrowserManager` caches real Playwright PNG screenshots (`capture_snapshot` and live navigation actions) and exposes `POST /api/v1/browsers/{profile_id}/snapshot` and `GET /api/v1/browsers/{profile_id}/snapshot` (`image/png`), returning HTTP `501` when no live Playwright context exists.
+- **Real Chromium RSS Memory Telemetry**: `BrowserManager._measure_profile_memory_mb` measures actual RSS MB of Chromium processes bound to each profile directory via `psutil` (`memory_status: "measured"` when running, `"not_measured"` otherwise).
+- **Browser Wall UI**: `BrowserWallView` displays live PNG screenshots, includes a Snapshot capture trigger, and shows honest `role="alert"` error banners when Chromium is unavailable (`501`).
+- **Phase 5 Test Suite**: Added `backend/tests/test_phase5_real_browser_engine.py`.
+
+## [2.6.0-phase4] - 2026-11-16 — Phase 4: Worker Sandbox & Hardening
+
+### Added
+- **Docker Non-Root & Fail-Closed Enforcement**: `build_isolated_command` adds explicit `--user 10001:10001`, `--env HOME=/tmp`, and `--env PYTHONDONTWRITEBYTECODE=1` alongside `--pull=never`, `--network=none`, `--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and resource limits; blocks `process` mode at runtime in `production` unless `AATM_ALLOW_PROCESS_SANDBOX=true`.
+- **Non-Blocking Async Sandbox Subprocesses**: `AgentRuntimeExecutor.run_workspace_command` uses `asyncio.create_subprocess_exec` with `asyncio.wait_for` timeout kill and bounded stdout/stderr capture so concurrent worker tasks never block the event loop.
+- **Sandbox Policy Endpoint**: Added `GET /api/v1/sandbox/status` exposing live sandbox availability (`READY` vs `SANDBOX_UNAVAILABLE`) and active `SandboxExecutionPolicy` resource bounds.
+- **Phase 4 Test Suite**: Added `backend/tests/test_phase4_sandbox_hardening.py`.
+
+## [2.6.0-phase3] - 2026-11-16 — Phase 3: Isolated Task Worktrees, Auto-Commit, Draft PRs & Webhook Lifecycle
+
+### Added
+- **Per-Task Git Worktrees (`aatm/<task-id-short>-<slug>`)**: `GitWorkflowManager.create_task_worktree` creates isolated per-task git worktrees under `data/worktrees/task-<short>/` and `AgentLoop` executes worker actions directly inside the task's worktree when `worktree_mode` is enabled on the project.
+- **Worktree `.git` Sandbox Isolation**: `safe_workspace_path` and `validate_run_command` block `.git` file/directory access inside task worktrees while allowing `read`, `write`, `pytest`, and `ruff` on project files.
+- **Auto-Commit & Draft PR Automation**: `GitWorkflowManager.commit_task_worktree` stages and commits worktree edits as `AATM(<agent_name>): <task title>` with an `AATM-Task: <task_id>` trailer, and `push_and_create_draft_pr` pushes to `origin` and opens a draft PR via `gh pr create --draft` using `asyncio.create_subprocess_exec`.
+- **Extended Task Lifecycle & Alembic Migration (`e4b2c9d7a1f3`)**: Added `branch_name`, `worktree_path`, `commit_sha`, `pr_number`, `pr_url`, and `pr_status` on `tasks` and `task_id` / `pr_url` on `git_workflow_records`; supports `pending → in_progress → pr_open → in_review → changes_requested → approved → merged → done`.
+- **GitHub Webhook Lifecycle & Post-Merge Cleanup**: `POST /api/v1/github/webhooks` updates linked `Task` and `GitWorkflowRecord` lifecycle statuses on `pull_request` / `pull_request_review` events and runs `cleanup_task_worktree` after PR merge or cancellation.
+- **Migration-Only Startup**: Removed `Base.metadata.create_all` from `backend/app/main.py` lifespan and added `alembic upgrade head` to `scripts/ubuntu/start.sh` and `scripts/windows/start.ps1`.
+- **Phase 3 Test Suite**: Added `backend/tests/test_phase3_worktrees_pr_lifecycle.py`.
+
+## [2.6.0-phase2] - 2026-11-16 — Phase 2: Real Model Connection & Setup Wizard
+
+### Added
+- `backend/app/providers/model_pricing.json` & `compute_cost_details()`: Externalized model rate catalog where real API models record `pricing_known=True` and Arena/unlisted models record `0.0` with `pricing_known=False`.
+- `ProviderUsageLog.pricing_known` (`backend/alembic/versions/d8f1a3b5c7e9_add_provider_usage_pricing_known.py`, revising `c2d4e6f8a1b3`), surfaced in `GET /api/v1/providers/usage` (`summary.has_unknown_pricing`, `summary.pricing_known`, per-log `pricing_known`) and rendered in the UI as `"Unknown cost"` / `"تكلفة غير معروفة"` / `"هزینه نامشخص"`.
+- `get_model_configuration_status()` in `backend/app/providers/router.py`, surfaced in `GET /api/health` and `GET /api/v1/dashboard/overview`, plus `NO_MODEL_CONFIGURED` gating in `TaskScheduler.handle_manager_directive` and `AgentLoop._execute_message`.
+- Provider Setup Wizard API (`GET /api/v1/providers/wizard/presets`, `POST /api/v1/providers/wizard/test-connection` running a live `max_tokens=1, dry_run=False` probe, and `POST /api/v1/providers/wizard/configure` enforcing `env:`-only credentials).
+- Localized UI (`en`, `ar`, `fa`): red `NO_MODEL_CONFIGURED` Dashboard banner linking directly to the 3-option Provider Setup Wizard, per-employee provider/model assignment controls in `AgentsView`, and `Unknown cost` badges in `ProvidersView`.
+- `backend/tests/test_phase2_real_model_wizard.py` & `bridge/tests/test_bridge.py`: Tests covering pricing catalog, `diagnostic_only` bridge labeling/rejection, wizard endpoints, per-employee model assignment, and an Arabic directive end-to-end execution creating `hello.py` + `test_hello.py` and passing `pytest`.
+
+### Changed
+- Labeled `bridge/server.py` `/health` and `/v1/chat/completions` payloads with `mode: "diagnostic_only"` / `diagnostic_only: true` when `ARENA_BRIDGE_UPSTREAM_URL` is unset, and blocked `ArenaLocalBridgeAdapter.generate()` when `allow_diagnostic_fallback=False`.
+- Fixed `POST /api/v1/chat` (`backend/app/api/routes/orchestration.py`) to snapshot `user_message` fields before `handle_manager_directive` commits, preventing `MissingGreenlet` errors under live provider execution.
+- Updated `PATCH /api/v1/agents/{id}` and `POST /api/v1/employees` (`backend/app/employees/catalog.py`) to validate `provider_id` and accept per-employee `model_name`.
+
 ## [2.5.1-phase1b] - 2026-11-16 — Phase 1B: Security Review Follow-Up Fixes
 
 ### Added

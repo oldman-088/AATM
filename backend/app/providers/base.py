@@ -56,6 +56,7 @@ class ProviderResponse:
     input_tokens_estimated: bool = False
     output_tokens_estimated: bool = False
     confirmed_cost_usd: float | None = None
+    pricing_known: bool = False
 
 
 @dataclass
@@ -77,6 +78,7 @@ class ProviderStreamChunk:
     input_tokens_estimated: bool = False
     output_tokens_estimated: bool = False
     confirmed_cost_usd: float | None = None
+    pricing_known: bool = False
 
 
 @dataclass

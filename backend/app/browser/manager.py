@@ -266,6 +266,40 @@ class BrowserManager:
     def __init__(self) -> None:
         self._active_contexts: dict[str, tuple[Any, Any]] = {}
         self._profile_locks: dict[str, asyncio.Lock] = {}
+        self._last_png_snapshots: dict[str, bytes] = {}
+
+    def get_last_png_snapshot(self, profile_id: str) -> bytes | None:
+        return self._last_png_snapshots.get(profile_id)
+
+    def has_png_snapshot(self, profile_id: str) -> bool:
+        return profile_id in self._last_png_snapshots
+
+    @staticmethod
+    def _measure_profile_memory_mb(profile: BrowserProfile) -> float:
+        """Measure actual RSS memory (MB) across Chromium child processes bound to `profile.profile_dir`."""
+        pdir = str(Path(profile.profile_dir).resolve())
+        total_bytes = 0
+        try:
+            for proc in psutil.process_iter(["cmdline", "memory_info"]):
+                cmdline = proc.info.get("cmdline") or []
+                if any(pdir in str(arg) for arg in cmdline):
+                    mem = proc.info.get("memory_info")
+                    if mem is not None:
+                        total_bytes += int(getattr(mem, "rss", 0) or 0)
+        except Exception:
+            return 0.0
+        return round(total_bytes / (1024 * 1024), 2)
+
+    async def _refresh_png_snapshot(self, profile_id: str, page: Any) -> bytes | None:
+        """Best-effort capture of a live Playwright PNG frame after a browser action."""
+        try:
+            png_bytes = await page.screenshot(full_page=False, type="png")
+        except Exception:
+            return None
+        if isinstance(png_bytes, bytes) and png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            self._last_png_snapshots[profile_id] = png_bytes
+            return png_bytes
+        return None
 
     def _get_profile_lock(self, profile_id: str) -> asyncio.Lock:
         lock = self._profile_locks.get(profile_id)
@@ -409,6 +443,7 @@ class BrowserManager:
             pass
 
     async def _close_active_context(self, profile_id: str) -> None:
+        self._last_png_snapshots.pop(profile_id, None)
         pair = self._active_contexts.pop(profile_id, None)
         if not pair:
             return
@@ -539,7 +574,7 @@ class BrowserManager:
             profile.lock_owner = owner
             profile.engine_mode = "playwright"
             profile.status = "running"
-            profile.memory_mb = 0.0  # No real process measurement is currently collected.
+            profile.memory_mb = self._measure_profile_memory_mb(profile)
             profile.last_heartbeat = utcnow()
             launch_note = "Live Playwright Chromium context"
             if stale_lock_recovered:
@@ -596,7 +631,9 @@ class BrowserManager:
 
             profile.current_url = safe_url
             profile.page_title = page_title or title or f"Page: {safe_url}"
+            profile.memory_mb = self._measure_profile_memory_mb(profile)
             profile.last_heartbeat = utcnow()
+            await self._refresh_png_snapshot(profile.id, page)
             profile.last_snapshot_svg = render_browser_wall_svg(profile, note="Live Playwright navigation completed.")
             db.add(
                 AuditLog(
@@ -913,7 +950,9 @@ class BrowserManager:
                 raise HTTPException(status_code=502, detail="Playwright did not return a valid PNG snapshot.")
 
             screenshot_b64 = base64.b64encode(png_bytes).decode("ascii")
+            self._last_png_snapshots[profile.id] = png_bytes
             profile.page_title = page_title or profile.page_title
+            profile.memory_mb = self._measure_profile_memory_mb(profile)
             profile.last_heartbeat = utcnow()
             note = f"Live Playwright PNG snapshot captured ({len(png_bytes)} bytes)."
             profile.last_snapshot_svg = render_browser_wall_svg(profile, note=note)

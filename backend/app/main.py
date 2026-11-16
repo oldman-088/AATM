@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import jwt
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.models  # noqa: F401
 from app.api.routes import auth, devices, governance, infra, orchestration, platform, projects
@@ -17,10 +18,10 @@ from app.browser.manager import browser_manager
 from app.core.config import get_settings, validate_runtime_security
 from app.core.events import event_bus
 from app.core.security import decode_access_token
-from app.db.base import Base
 from app.db.seed import seed_initial_data
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import AsyncSessionLocal, get_db
 from app.models import User
+from app.providers.router import get_model_configuration_status
 from app.runtime.sandbox import get_sandbox_status
 
 WS_AUTH_TIMEOUT_SECONDS = 5.0
@@ -29,8 +30,6 @@ WS_AUTH_TIMEOUT_SECONDS = 5.0
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_security(get_settings())
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
 
@@ -80,6 +79,24 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self' ws: wss:",
+    )
+    if request.url.path.startswith("/api/v1/auth"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException):
     payload: dict = {
@@ -104,13 +121,24 @@ async def http_exception_handler(_: Request, exc: HTTPException):
 
 
 @app.get("/api/health")
-async def health():
+async def health(db: AsyncSession = Depends(get_db)):
+    try:
+        model_status = await get_model_configuration_status(db)
+    except Exception:
+        model_status = {
+            "status": "NO_MODEL_CONFIGURED",
+            "configured": False,
+            "configured_providers": [],
+            "diagnostic_only_providers": [],
+            "reason": "Provider table unavailable.",
+        }
     return {
         "status": "ok",
         "service": "aatm-backend",
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
         "sandbox": get_sandbox_status(),
+        "model_status": model_status,
     }
 
 

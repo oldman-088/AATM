@@ -344,6 +344,14 @@ def build_isolated_command(
 
     ws = Path(workspace).resolve()
     if mode == "process":
+        allow_env = os.environ.get("AATM_ALLOW_PROCESS_SANDBOX", "").strip().lower()
+        settings = get_settings()
+        allow_process = allow_env in {"1", "true", "yes"} or bool(settings.AATM_ALLOW_PROCESS_SANDBOX)
+        env_name = (os.environ.get("ENVIRONMENT") or settings.ENVIRONMENT or "").strip().lower()
+        if env_name == "production" and not allow_process:
+            raise WorkspaceSandboxError(
+                "Process sandbox mode is forbidden in production unless AATM_ALLOW_PROCESS_SANDBOX=true."
+            )
         return list(command)
 
     resolved_docker = docker_bin if docker_bin is not None else shutil.which("docker")
@@ -370,6 +378,12 @@ def build_isolated_command(
         "/tmp:rw,noexec,nosuid,size=64m",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        "--user",
+        "10001:10001",
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        "PYTHONDONTWRITEBYTECODE=1",
         f"--pids-limit={pid_cap}",
         f"--memory={mem_cap}m",
         f"--cpus={cpu_cap:g}",

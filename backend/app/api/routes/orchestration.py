@@ -6,11 +6,29 @@ from app.api.deps import get_current_user, require_role
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.db.session import get_db
-from app.models import Agent, AuditLog, ChatMessage, Task, User
+from app.git_workflows.manager import git_workflow_manager
+from app.models import Agent, AuditLog, ChatMessage, GitWorkflowRecord, Project, Task, User
 from app.orchestration.scheduler import task_scheduler
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
 
 router = APIRouter(tags=["agents-tasks-orchestration"], dependencies=[Depends(get_current_user)])
+
+VALID_TASK_STATUSES = {
+    "pending",
+    "queued",
+    "assigned",
+    "in_progress",
+    "pr_open",
+    "in_review",
+    "changes_requested",
+    "approved",
+    "merged",
+    "done",
+    "completed",
+    "failed",
+    "blocked",
+    "cancelled",
+}
 
 
 def _serialize_agent(a: Agent) -> dict:
@@ -71,6 +89,12 @@ def _serialize_task(t: Task) -> dict:
         "checkpoints": t.checkpoints,
         "result_summary": t.result_summary,
         "error_message": t.error_message,
+        "branch_name": t.branch_name,
+        "worktree_path": t.worktree_path,
+        "commit_sha": t.commit_sha,
+        "pr_number": t.pr_number,
+        "pr_url": t.pr_url,
+        "pr_status": t.pr_status,
         "estimated_minutes": t.estimated_minutes,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
@@ -93,7 +117,16 @@ async def update_agent(
     agent = await db.get(Agent, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    for field in ("status", "provider_id", "model_name", "is_enabled", "permissions"):
+    if body.provider_id is not None:
+        from app.models import AIProvider
+
+        provider = await db.get(AIProvider, body.provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail=f"Provider '{body.provider_id}' not found")
+        agent.provider_id = provider.id
+        if body.model_name is None and not agent.model_name:
+            agent.model_name = provider.default_model
+    for field in ("status", "model_name", "is_enabled", "permissions"):
         val = getattr(body, field)
         if val is not None:
             setattr(agent, field, val)
@@ -197,24 +230,133 @@ async def update_task(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    if body.status is not None and body.status not in VALID_TASK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Unsupported task status '{body.status}'")
 
-    if body.status == "completed":
-        updated = await task_scheduler.complete_task(db, task, body.result_summary or "Completed")
+    if body.status in {"completed", "done"}:
+        if task.worktree_path:
+            project = await db.get(Project, task.project_id)
+            if project:
+                await git_workflow_manager.cleanup_task_worktree(
+                    repo_path=project.repo_path,
+                    worktree_path=task.worktree_path,
+                    branch_name=task.branch_name,
+                    db=db,
+                    task_id=task.id,
+                    actor=user.email,
+                )
+            task.worktree_path = None
+        updated = await task_scheduler.complete_task(
+            db,
+            task,
+            body.result_summary or "Completed",
+            target_status=body.status,
+        )
         return _serialize_task(updated)
     if body.status == "failed":
         updated = await task_scheduler.fail_and_retry_or_escalate(db, task, body.error_message or "Execution failed")
         return _serialize_task(updated)
 
-    for field in ("status", "priority", "assigned_agent_id", "progress_percent", "result_summary", "error_message"):
+    for field in ("status", "priority", "assigned_agent_id", "progress_percent", "result_summary", "error_message", "review_status"):
         val = getattr(body, field)
         if val is not None:
             setattr(task, field, val)
-    if body.status == "cancelled":
+    if body.status in {"cancelled", "merged"}:
         task.lock_owner = None
+        task.locked_at = None
+        if body.status == "merged":
+            task.pr_status = "merged"
+            task.progress_percent = 100
+            task.completed_at = utcnow()
+        if task.worktree_path:
+            project = await db.get(Project, task.project_id)
+            if project:
+                await git_workflow_manager.cleanup_task_worktree(
+                    repo_path=project.repo_path,
+                    worktree_path=task.worktree_path,
+                    branch_name=task.branch_name,
+                    delete_remote_branch=(body.status == "merged"),
+                    db=db,
+                    task_id=task.id,
+                    actor=user.email,
+                )
+            task.worktree_path = None
+        if body.status == "merged":
+            task.status = "done"
     await db.commit()
     await db.refresh(task)
     await event_bus.emit("task.updated", {"task_id": task.id, "status": task.status})
     return _serialize_task(task)
+
+
+@router.post("/tasks/{task_id}/worktree", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
+async def provision_task_worktree(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    project = await db.get(Project, task.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    res = await git_workflow_manager.create_task_worktree(
+        task.id,
+        task.title,
+        repo_path=project.repo_path,
+        base_branch=project.default_branch or "main",
+        db=db,
+        actor=user.email,
+    )
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Failed to create task worktree")
+    task.branch_name = str(res["branch_name"])
+    task.worktree_path = str(res["worktree_path"])
+    wf = (await db.execute(select(GitWorkflowRecord).where(GitWorkflowRecord.task_id == task.id))).scalar_one_or_none()
+    if wf is None:
+        db.add(
+            GitWorkflowRecord(
+                project_id=project.id,
+                task_id=task.id,
+                branch_name=task.branch_name,
+                worktree_path=task.worktree_path,
+                owner_agent_id=task.assigned_agent_id,
+                base_branch=str(res.get("base_branch") or project.default_branch or "main"),
+                pr_status="pending",
+            )
+        )
+    await db.commit()
+    await db.refresh(task)
+    return {"task": _serialize_task(task), "worktree": res}
+
+
+@router.post("/tasks/{task_id}/cleanup", dependencies=[Depends(require_role("admin", "operator"))])
+async def cleanup_task_worktree_endpoint(
+    task_id: str,
+    delete_remote_branch: bool = False,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    project = await db.get(Project, task.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    res = await git_workflow_manager.cleanup_task_worktree(
+        repo_path=project.repo_path,
+        worktree_path=task.worktree_path,
+        branch_name=task.branch_name,
+        delete_remote_branch=delete_remote_branch,
+        db=db,
+        task_id=task.id,
+        actor=user.email,
+    )
+    task.worktree_path = None
+    await db.commit()
+    await db.refresh(task)
+    return {"task": _serialize_task(task), "cleanup": res}
 
 
 @router.post("/orchestration/cycle", dependencies=[Depends(require_role("admin", "operator"))])
@@ -262,15 +404,17 @@ async def send_chat(
     db.add(user_msg)
     await db.commit()
     await db.refresh(user_msg)
+    user_payload = {
+        "id": user_msg.id,
+        "sender_type": user_msg.sender_type,
+        "sender_id": user_msg.sender_id,
+        "content": user_msg.content,
+        "created_at": user_msg.created_at,
+    }
     reply = await task_scheduler.handle_manager_directive(db, body.project_id, body.content)
+    await db.refresh(reply)
     return {
-        "user_message": {
-            "id": user_msg.id,
-            "sender_type": user_msg.sender_type,
-            "sender_id": user_msg.sender_id,
-            "content": user_msg.content,
-            "created_at": user_msg.created_at,
-        },
+        "user_message": user_payload,
         "manager_reply": {
             "id": reply.id,
             "sender_type": reply.sender_type,

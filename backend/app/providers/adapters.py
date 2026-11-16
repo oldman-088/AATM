@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -26,24 +27,51 @@ DEFAULT_ANTHROPIC_URL = "https://api.anthropic.com/v1"
 DEFAULT_BRIDGE_TIMEOUT_SECONDS = 600.0
 DEFAULT_BRIDGE_MAX_CONCURRENCY = 1
 SAFE_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$")
+_MODEL_PRICING_PATH = Path(__file__).resolve().with_name("model_pricing.json")
 
-MODEL_PRICING_PER_1M = {
-    "claude-sonnet-4-5": (3.0, 15.0),
-    "claude-opus-4-1": (15.0, 75.0),
-    "claude-haiku-4-5": (0.8, 4.0),
-    "arena-bridge-default": (0.0, 0.0),
-    "agent": (0.0, 0.0),
-    "ping": (0.0, 0.0),
-    "arena-reasoning-pro": (1.5, 6.0),
-    "arena-fast": (0.2, 0.8),
-    "arena-agent-orchestrator": (0.0, 0.0),
-    "arena-agent-coder": (0.0, 0.0),
-}
+
+def _load_model_pricing() -> dict[str, tuple[float, float, bool]]:
+    try:
+        raw = json.loads(_MODEL_PRICING_PATH.read_text(encoding="utf-8"))
+        models = raw.get("models") if isinstance(raw, dict) else {}
+        table: dict[str, tuple[float, float, bool]] = {}
+        if isinstance(models, dict):
+            for name, entry in models.items():
+                if not isinstance(entry, dict):
+                    continue
+                in_per_1k = float(entry.get("input_per_1k_usd", 0.0) or 0.0)
+                out_per_1k = float(entry.get("output_per_1k_usd", 0.0) or 0.0)
+                known = bool(entry.get("pricing_known", False))
+                table[str(name)] = (in_per_1k, out_per_1k, known)
+        if table:
+            return table
+    except Exception:
+        pass
+    return {
+        "claude-sonnet-4-5": (0.003, 0.015, True),
+        "claude-opus-4-1": (0.015, 0.075, True),
+        "claude-haiku-4-5": (0.0008, 0.004, True),
+    }
+
+
+MODEL_PRICING_CATALOG: dict[str, tuple[float, float, bool]] = _load_model_pricing()
+
+
+def compute_cost_details(model: str, in_tok: int, out_tok: int) -> tuple[float, bool]:
+    """Compute estimated USD cost and whether rates are known for the given model."""
+    entry = MODEL_PRICING_CATALOG.get(model)
+    if entry is None:
+        return 0.0, False
+    in_per_1k, out_per_1k, known = entry
+    if not known:
+        return 0.0, False
+    cost = round((in_tok / 1_000.0) * in_per_1k + (out_tok / 1_000.0) * out_per_1k, 6)
+    return cost, True
 
 
 def compute_cost(model: str, in_tok: int, out_tok: int) -> float:
-    in_rate, out_rate = MODEL_PRICING_PER_1M.get(model, (1.0, 3.0))
-    return round((in_tok / 1_000_000) * in_rate + (out_tok / 1_000_000) * out_rate, 6)
+    cost, _known = compute_cost_details(model, in_tok, out_tok)
+    return cost
 
 
 def _configured_value(env_name: str, setting_name: str, default: Any) -> Any:
@@ -317,6 +345,28 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
             }
             if isinstance(data.get("session"), dict):
                 resp_meta["bridge_session"] = data["session"]
+            is_diagnostic_only = bool(data.get("diagnostic_only")) or data.get("mode") == "diagnostic_only"
+            if is_diagnostic_only:
+                resp_meta["diagnostic_only"] = True
+                if not req.allow_diagnostic_fallback:
+                    return ProviderResponse(
+                        provider_id=self.provider_id,
+                        model=str(data.get("model") or model),
+                        content="",
+                        input_tokens=real_in,
+                        output_tokens=real_out,
+                        estimated_cost_usd=0.0,
+                        latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                        success=False,
+                        error_message=(
+                            "Arena Local Bridge is running in diagnostic_only mode without an upstream model; "
+                            "configure a real provider or ARENA_BRIDGE_UPSTREAM_URL."
+                        ),
+                        metadata=resp_meta,
+                        input_tokens_estimated=input_estimated,
+                        output_tokens_estimated=output_estimated,
+                        pricing_known=False,
+                    )
             if not text.strip():
                 return ProviderResponse(
                     provider_id=self.provider_id,
@@ -332,18 +382,26 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                     input_tokens_estimated=input_estimated,
                     output_tokens_estimated=output_estimated,
                 )
+            resolved_model = str(data.get("model") or model)
+            calc_cost, pricing_known = compute_cost_details(resolved_model, real_in, real_out)
+            if confirmed_cost is not None:
+                final_cost = confirmed_cost
+                pricing_known = True
+            else:
+                final_cost = calc_cost
             return ProviderResponse(
                 provider_id=self.provider_id,
-                model=str(data.get("model") or model),
+                model=resolved_model,
                 content=text,
                 input_tokens=real_in,
                 output_tokens=real_out,
-                estimated_cost_usd=confirmed_cost if confirmed_cost is not None else compute_cost(model, real_in, real_out),
+                estimated_cost_usd=final_cost,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 metadata=resp_meta,
                 input_tokens_estimated=input_estimated,
                 output_tokens_estimated=output_estimated,
                 confirmed_cost_usd=confirmed_cost,
+                pricing_known=pricing_known,
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0
@@ -629,6 +687,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                     output_tokens_estimated=output_estimated,
                 )
                 return
+            stream_cost, stream_pricing_known = compute_cost_details(model, real_in, real_out)
             yield ProviderStreamChunk(
                 provider_id=self.provider_id,
                 model=model,
@@ -637,13 +696,14 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
                 finish_reason=finish_reason,
                 input_tokens=real_in,
                 output_tokens=real_out,
-                estimated_cost_usd=confirmed_cost if confirmed_cost is not None else compute_cost(model, real_in, real_out),
+                estimated_cost_usd=confirmed_cost if confirmed_cost is not None else stream_cost,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 success=True,
                 metadata=final_meta,
                 input_tokens_estimated=input_estimated,
                 output_tokens_estimated=output_estimated,
                 confirmed_cost_usd=confirmed_cost,
+                pricing_known=True if confirmed_cost is not None else stream_pricing_known,
             )
         except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
             yield ProviderStreamChunk(
@@ -973,18 +1033,21 @@ class AnthropicClaudeAdapter(BaseProviderAdapter):
                     input_tokens_estimated=input_estimated,
                     output_tokens_estimated=output_estimated,
                 )
+            resolved_model = str(data.get("model") or model)
+            calc_cost, pricing_known = compute_cost_details(resolved_model, real_in, real_out)
             return ProviderResponse(
                 provider_id=self.provider_id,
-                model=str(data.get("model") or model),
+                model=resolved_model,
                 content=text,
                 input_tokens=real_in,
                 output_tokens=real_out,
-                estimated_cost_usd=confirmed_cost if confirmed_cost is not None else compute_cost(model, real_in, real_out),
+                estimated_cost_usd=confirmed_cost if confirmed_cost is not None else calc_cost,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 metadata=response_metadata,
                 input_tokens_estimated=input_estimated,
                 output_tokens_estimated=output_estimated,
                 confirmed_cost_usd=confirmed_cost,
+                pricing_known=True if confirmed_cost is not None else pricing_known,
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0
@@ -1142,7 +1205,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             "stream": False,
         }
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(normalized_or_err + "/chat/completions", headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -1172,18 +1235,21 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                     input_tokens_estimated=input_estimated,
                     output_tokens_estimated=output_estimated,
                 )
+            resolved_model = str(data.get("model") or model)
+            calc_cost, pricing_known = compute_cost_details(resolved_model, input_tokens, output_tokens)
             return ProviderResponse(
                 self.provider_id,
-                str(data.get("model") or model),
+                resolved_model,
                 text,
                 input_tokens,
                 output_tokens,
-                confirmed_cost if confirmed_cost is not None else compute_cost(model, input_tokens, output_tokens),
+                confirmed_cost if confirmed_cost is not None else calc_cost,
                 round((time.perf_counter() - t0) * 1000, 2),
                 metadata=metadata,
                 input_tokens_estimated=input_estimated,
                 output_tokens_estimated=output_estimated,
                 confirmed_cost_usd=confirmed_cost,
+                pricing_known=True if confirmed_cost is not None else pricing_known,
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0

@@ -1,3 +1,4 @@
+import asyncio
 import re
 import shutil
 import subprocess
@@ -668,6 +669,315 @@ class GitWorkflowManager:
         record.review_status = "approved"
         await db.commit()
         return {"allowed": True, "reason": "Authorized for merge."}
+
+    @staticmethod
+    async def _exec(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
+        """Run an argv-only command asynchronously without shell expansion, scrubbing credentials from output."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return 124, "", f"Command timed out after {timeout}s."
+            stdout = sanitize_cli_output(stdout_b.decode("utf-8", errors="replace").strip())
+            stderr = sanitize_cli_output(stderr_b.decode("utf-8", errors="replace").strip())
+            return int(proc.returncode or 0), stdout, stderr
+        except Exception as exc:
+            return 1, "", sanitize_cli_output(str(exc))
+
+    @staticmethod
+    def task_branch_name(task_id: str, title: str) -> str:
+        """Build a safe `aatm/<task-id-short>-<slug>` branch name for a task worktree."""
+        short_id = re.sub(r"[^a-zA-Z0-9]", "", (task_id or "").strip())[:8].lower() or "task"
+        slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:36] or "work"
+        candidate = f"aatm/{short_id}-{slug}"
+        ok, cleaned = validate_branch_name(candidate)
+        return cleaned if ok else f"aatm/{short_id}-work"
+
+    async def create_task_worktree(
+        self,
+        task_id: str,
+        title: str,
+        *,
+        repo_path: str | Path,
+        base_branch: str = "main",
+        worktrees_root: str | Path | None = None,
+        db: AsyncSession | None = None,
+        actor: str = "orchestrator",
+    ) -> dict[str, Any]:
+        """Create (or reuse) an isolated per-task git worktree at `data/worktrees/task-<short>/` on `aatm/<short>-<slug>`."""
+        root = Path(repo_path).resolve()
+        if not (root / ".git").exists():
+            return {
+                "ok": False,
+                "error": f"Git repository not found at '{sanitize_cli_output(str(root))}'.",
+            }
+
+        clean_task_id = re.sub(r"[^a-zA-Z0-9_-]", "", (task_id or "").strip())
+        short_id = re.sub(r"[^a-zA-Z0-9]", "", clean_task_id)[:8].lower()
+        if not short_id:
+            return {"ok": False, "error": "Invalid task_id for worktree containment."}
+
+        branch_name = self.task_branch_name(clean_task_id, title)
+        clean_base = normalize_branch_name(base_branch) or "HEAD"
+        if not _COMMIT_REF_RE.fullmatch(clean_base) or clean_base.startswith("-") or ".." in clean_base:
+            clean_base = "HEAD"
+
+        wt_base = Path(worktrees_root).resolve() if worktrees_root else (root / "data" / "worktrees").resolve()
+        wt_base.mkdir(parents=True, exist_ok=True)
+        try:
+            target_dir = resolve_contained_path(wt_base, f"task-{short_id}")
+        except WorkspaceSandboxError as exc:
+            return {"ok": False, "error": sanitize_cli_output(str(exc))}
+
+        if (target_dir / ".git").exists():
+            rc_cur, cur_branch, _ = await self._exec(["git", "rev-parse", "--abbrev-ref", "HEAD"], target_dir)
+            if rc_cur == 0 and cur_branch:
+                return {
+                    "ok": True,
+                    "reused": True,
+                    "task_id": task_id,
+                    "branch_name": cur_branch,
+                    "base_branch": clean_base,
+                    "worktree_path": str(target_dir),
+                }
+
+        rc_base, _, _ = await self._exec(["git", "rev-parse", "--verify", clean_base], root)
+        if rc_base != 0:
+            clean_base = "HEAD"
+
+        rc_ref, _, _ = await self._exec(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"], root)
+        if rc_ref == 0:
+            rc, out, err = await self._exec(["git", "worktree", "add", str(target_dir), branch_name], root)
+        else:
+            rc, out, err = await self._exec(
+                ["git", "worktree", "add", "-b", branch_name, str(target_dir), clean_base],
+                root,
+            )
+
+        if rc != 0:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "branch_name": branch_name,
+                "worktree_path": str(target_dir),
+                "error": err or out or "Failed to create task git worktree.",
+            }
+
+        if db is not None:
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="git.task_worktree_create",
+                    resource_type="git_worktree",
+                    resource_id=str(task_id)[:64],
+                    details={"branch_name": branch_name, "worktree_path": str(target_dir), "base_branch": clean_base},
+                )
+            )
+            await db.flush()
+
+        return {
+            "ok": True,
+            "reused": False,
+            "task_id": task_id,
+            "branch_name": branch_name,
+            "base_branch": clean_base,
+            "worktree_path": str(target_dir),
+        }
+
+    async def commit_task_worktree(
+        self,
+        worktree_path: str | Path,
+        *,
+        agent_name: str,
+        task_id: str,
+        task_title: str,
+    ) -> dict[str, Any]:
+        """Stage and commit task worktree edits with `AATM(<agent>): <title>` and `AATM-Task: <id>` trailer."""
+        wt = Path(worktree_path).resolve()
+        if not wt.is_dir() or not (wt / ".git").exists():
+            return {"ok": False, "committed": False, "error": "Task worktree path is not a git worktree."}
+
+        rc_status, status_out, err_status = await self._exec(["git", "status", "--porcelain"], wt)
+        if rc_status != 0:
+            return {"ok": False, "committed": False, "error": err_status or "git status failed."}
+        if not status_out.strip():
+            rc_head, sha, _ = await self._exec(["git", "rev-parse", "HEAD"], wt)
+            return {
+                "ok": True,
+                "committed": False,
+                "commit_sha": sha if rc_head == 0 else None,
+                "reason": "No uncommitted changes in worktree.",
+            }
+
+        rc_add, _, err_add = await self._exec(["git", "add", "-A"], wt)
+        if rc_add != 0:
+            return {"ok": False, "committed": False, "error": err_add or "git add failed."}
+
+        clean_agent = re.sub(r"[\r\n]+", " ", (agent_name or "worker").strip())[:48]
+        clean_title = re.sub(r"[\r\n]+", " ", (task_title or "Task update").strip())[:100]
+        subject = f"AATM({clean_agent}): {clean_title}"
+        trailer = f"AATM-Task: {task_id}"
+
+        rc_commit, out_commit, err_commit = await self._exec(
+            [
+                "git",
+                "-c",
+                "user.name=AATM Agent",
+                "-c",
+                "user.email=aatm-agent@local",
+                "commit",
+                "-m",
+                subject,
+                "-m",
+                trailer,
+            ],
+            wt,
+        )
+        if rc_commit != 0:
+            return {"ok": False, "committed": False, "error": err_commit or out_commit or "git commit failed."}
+
+        rc_sha, sha, _ = await self._exec(["git", "rev-parse", "HEAD"], wt)
+        return {
+            "ok": True,
+            "committed": True,
+            "commit_sha": sha if rc_sha == 0 else None,
+            "subject": subject,
+            "trailer": trailer,
+        }
+
+    async def push_and_create_draft_pr(
+        self,
+        worktree_path: str | Path,
+        *,
+        branch_name: str,
+        base_branch: str = "main",
+        title: str,
+        body: str,
+        repo_slug: str | None = None,
+    ) -> dict[str, Any]:
+        """Push task branch to `origin` and open a draft pull request via `gh pr create --draft`."""
+        wt = Path(worktree_path).resolve()
+        ok_br, clean_branch = validate_branch_name(branch_name)
+        if not ok_br:
+            return {"ok": False, "skipped": False, "error": clean_branch}
+        if is_protected_branch(clean_branch, PROTECTED_BRANCHES):
+            return {"ok": False, "skipped": False, "error": f"Refusing to push protected branch '{clean_branch}'."}
+
+        rc_remote, remote_url, _ = await self._exec(["git", "remote", "get-url", "origin"], wt)
+        if rc_remote != 0 or not remote_url:
+            return {"ok": False, "skipped": True, "reason": "No origin remote configured; skipping push and draft PR."}
+
+        rc_push, out_push, err_push = await self._exec(["git", "push", "-u", "origin", clean_branch], wt, timeout=60)
+        if rc_push != 0:
+            return {"ok": False, "skipped": False, "error": err_push or out_push or "git push failed."}
+
+        clean_base = normalize_branch_name(base_branch) or "main"
+        cmd = [
+            "gh",
+            "pr",
+            "create",
+            "--draft",
+            "--head",
+            clean_branch,
+            "--base",
+            clean_base,
+            "--title",
+            re.sub(r"[\r\n]+", " ", title.strip())[:180],
+            "--body",
+            body.strip()[:4000],
+        ]
+        if repo_slug and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_slug.strip()):
+            cmd.extend(["--repo", repo_slug.strip()])
+
+        rc_pr, out_pr, err_pr = await self._exec(cmd, wt, timeout=60)
+        if rc_pr != 0:
+            return {"ok": False, "skipped": False, "pushed": True, "error": err_pr or out_pr or "gh pr create failed."}
+
+        pr_match = re.search(r"https://[^\s]+/pull/(\d+)", out_pr)
+        pr_url = pr_match.group(0) if pr_match else out_pr.strip()
+        pr_number = int(pr_match.group(1)) if pr_match else None
+        return {
+            "ok": True,
+            "pushed": True,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "pr_status": "draft",
+        }
+
+    async def cleanup_task_worktree(
+        self,
+        *,
+        repo_path: str | Path,
+        worktree_path: str | Path | None = None,
+        branch_name: str | None = None,
+        delete_remote_branch: bool = False,
+        db: AsyncSession | None = None,
+        task_id: str | None = None,
+        actor: str = "orchestrator",
+    ) -> dict[str, Any]:
+        """Remove a task git worktree and delete its non-protected task branch after merge or cancellation."""
+        root = Path(repo_path).resolve()
+        wt_removed = False
+        branch_deleted = False
+        remote_deleted = False
+
+        if worktree_path:
+            wt = Path(worktree_path).resolve()
+            wt_root = (root / "data" / "worktrees").resolve()
+            if wt.exists():
+                if (root / ".git").exists():
+                    await self._exec(["git", "worktree", "remove", "--force", str(wt)], root)
+                    await self._exec(["git", "worktree", "prune"], root)
+                if wt.exists() and wt_root in wt.parents:
+                    shutil.rmtree(wt, ignore_errors=True)
+                    if (root / ".git").exists():
+                        await self._exec(["git", "worktree", "prune"], root)
+            wt_removed = not wt.exists()
+
+        if branch_name and (root / ".git").exists():
+            ok_br, clean_branch = validate_branch_name(branch_name)
+            if ok_br and not is_protected_branch(clean_branch, PROTECTED_BRANCHES):
+                rc_ref, _, _ = await self._exec(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{clean_branch}"], root)
+                if rc_ref == 0:
+                    rc_del, _, _ = await self._exec(["git", "branch", "-D", clean_branch], root)
+                    branch_deleted = rc_del == 0
+                if delete_remote_branch:
+                    rc_rem, _, _ = await self._exec(["git", "remote", "get-url", "origin"], root)
+                    if rc_rem == 0:
+                        rc_rdel, _, _ = await self._exec(["git", "push", "origin", "--delete", clean_branch], root, timeout=30)
+                        remote_deleted = rc_rdel == 0
+
+        if db is not None:
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="git.task_worktree_cleanup",
+                    resource_type="git_worktree",
+                    resource_id=str(task_id or branch_name or "")[:64],
+                    details={
+                        "worktree_removed": wt_removed,
+                        "branch_deleted": branch_deleted,
+                        "remote_deleted": remote_deleted,
+                        "branch_name": branch_name,
+                    },
+                )
+            )
+            await db.flush()
+
+        return {
+            "ok": True,
+            "worktree_removed": wt_removed,
+            "branch_deleted": branch_deleted,
+            "remote_deleted": remote_deleted,
+        }
 
 
 git_workflow_manager = GitWorkflowManager()

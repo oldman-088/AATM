@@ -51,6 +51,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const logout = () => {
+    const token = getToken()
+    if (token) {
+      void apiFetch('/auth/logout', { method: 'POST' }).catch(() => {
+        // best-effort server revocation
+      })
+    }
     setToken(null)
     setUser(null)
   }

@@ -76,6 +76,9 @@ export interface Translations {
     shared: string
     tasksLabel: string
     previewHint: string
+    liveConnected: string
+    liveConnecting: string
+    liveOffline: string
   }
   dashboard: {
     title: string
@@ -93,6 +96,9 @@ export interface Translations {
     sandboxReady: string
     sandboxModeLabel: string
     sandboxBuildHint: string
+    noModelBannerTitle: string
+    noModelBannerText: string
+    openSetupWizard: string
   }
   chat: {
     title: string
@@ -109,6 +115,10 @@ export interface Translations {
     resume: string
     divisions: string
     completedCount: string
+    providerLabel: string
+    modelLabel: string
+    saveModelAssignment: string
+    modelSaved: string
   }
   tasks: {
     title: string
@@ -152,6 +162,22 @@ export interface Translations {
     approvalThreshold: string
     budgetUnavailable: string
     budgetSource: string
+    wizardTitle: string
+    wizardSubtitle: string
+    testConnection: string
+    testingConnection: string
+    saveAndActivate: string
+    savingProvider: string
+    applyToManager: string
+    applyToWorkers: string
+    credentialRefLabel: string
+    endpointUrlLabel: string
+    modelNameLabel: string
+    presetAnthropic: string
+    presetOpenAICompatible: string
+    presetBridge: string
+    unknownCost: string
+    pricingUnknownBadge: string
   }
   projects: {
     title: string
@@ -202,6 +228,10 @@ export interface Translations {
     filesScanned: string
     findings: string
     triggerSelfHeal: string
+    securityPosture: string
+    headersEnforced: string
+    warningsCount: string
+    pendingPasswordChanges: string
   }
   approvals: {
     title: string

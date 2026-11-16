@@ -17,7 +17,6 @@ from app.employees.catalog import ensure_employee_workspace
 from app.models import (
     Agent,
     AgentMessage,
-    AIProvider,
     ApprovalRequest,
     AuditLog,
     ChatMessage,
@@ -25,8 +24,8 @@ from app.models import (
     Project,
     Task,
 )
-from app.providers.base import ProviderRequest, ProviderResponse, validate_credential_ref
-from app.providers.router import ProviderRouter
+from app.providers.base import ProviderRequest, ProviderResponse
+from app.providers.router import ProviderRouter, get_model_configuration_status
 from app.providers.router import provider_router as shared_provider_router
 from app.runtime.temporal import to_naive_utc
 from app.schemas.manager import ManagerPlan
@@ -197,7 +196,7 @@ class TaskScheduler:
         deps = list(res.scalars().all())
         if len(deps) != len(task.dependencies):
             return False
-        return all(d.status == "completed" for d in deps)
+        return all(d.status in {"completed", "done", "merged"} for d in deps)
 
     async def acquire_lock(self, db: AsyncSession, task: Task, worker_id: str) -> bool:
         """Acquire a task lock atomically; an in-progress owner may re-enter its own lock."""
@@ -383,11 +382,19 @@ class TaskScheduler:
         """Alias for `run_orchestration_cycle` that also runs the periodic degraded-session recovery hook."""
         return await self.run_orchestration_cycle(db, force_session_recovery=force_session_recovery)
 
-    async def complete_task(self, db: AsyncSession, task: Task, summary: str = "Completed and verified") -> Task:
-        task.status = "completed"
+    async def complete_task(
+        self,
+        db: AsyncSession,
+        task: Task,
+        summary: str = "Completed and verified",
+        *,
+        target_status: str = "completed",
+    ) -> Task:
+        task.status = target_status
         task.progress_percent = 100
         task.result_summary = summary
-        task.completed_at = utcnow()
+        if target_status in {"completed", "done", "merged"}:
+            task.completed_at = utcnow()
         task.lock_owner = None
         task.locked_at = None
 
@@ -402,15 +409,15 @@ class TaskScheduler:
         db.add(
             AuditLog(
                 actor=task.assigned_agent_id or "orchestrator",
-                action="task.completed",
+                action=f"task.{target_status}",
                 resource_type="task",
                 resource_id=task.id,
-                details={"summary": summary},
+                details={"summary": summary, "status": target_status},
             )
         )
         await db.commit()
         await db.refresh(task)
-        await event_bus.emit("task.updated", {"task_id": task.id, "status": "completed"})
+        await event_bus.emit("task.updated", {"task_id": task.id, "status": target_status})
         return task
 
     async def fail_and_retry_or_escalate(self, db: AsyncSession, task: Task, error_msg: str) -> Task:
@@ -467,7 +474,7 @@ class TaskScheduler:
     async def _manager_context(db: AsyncSession, project_id: str | None) -> tuple[list[Agent], dict[str, Any]]:
         employee_result = await db.execute(select(Agent).where(Agent.role == "worker").order_by(Agent.id.asc()))
         employees = list(employee_result.scalars().all())
-        task_stmt = select(Task).where(~Task.status.in_(["completed", "failed", "cancelled"]))
+        task_stmt = select(Task).where(~Task.status.in_(["completed", "done", "merged", "failed", "cancelled"]))
         if project_id:
             task_stmt = task_stmt.where(Task.project_id == project_id)
         task_result = await db.execute(task_stmt.order_by(Task.created_at.asc(), Task.id.asc()))
@@ -557,15 +564,8 @@ class TaskScheduler:
                 )
 
     async def _has_configured_model_provider(self, db: AsyncSession) -> bool:
-        result = await db.execute(select(AIProvider).where(AIProvider.is_enabled.is_(True)))
-        for provider in result.scalars().all():
-            # The legacy Arena Agent adapter is intentionally a non-functional stub.
-            if provider.provider_type == "arena_agent":
-                continue
-            credential_configured, _ = validate_credential_ref(provider.credential_ref)
-            if credential_configured:
-                return True
-        return False
+        status = await get_model_configuration_status(db)
+        return bool(status["configured"])
 
     async def _request_manager_plan(
         self,
@@ -733,6 +733,22 @@ class TaskScheduler:
                 "The manager profile is unavailable, so I could not process this directive. No tasks were created.",
                 actions_taken,
             )
+
+        if isinstance(self.provider_router, ProviderRouter):
+            model_status = await get_model_configuration_status(db)
+            if not model_status["configured"]:
+                actions_taken.append("NO_MODEL_CONFIGURED: No real AI model provider is configured; directive not dispatched.")
+                return await self._save_manager_reply(
+                    db,
+                    project_id,
+                    (
+                        "No model provider configured (NO_MODEL_CONFIGURED). "
+                        "Open the Provider Setup Wizard to connect Claude API, an OpenAI-compatible/Ollama endpoint, "
+                        "or Arena Local Bridge with an upstream before issuing directives, so no tasks were created."
+                    ),
+                    actions_taken,
+                    metadata={"model_status": model_status},
+                )
 
         employees, context = await self._manager_context(db, project_id)
         prompt = self._manager_user_prompt(content, context)

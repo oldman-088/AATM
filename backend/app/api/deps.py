@@ -13,6 +13,7 @@ PASSWORD_CHANGE_ALLOWED_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/v1/auth/me"),
         ("POST", "/api/v1/auth/change-password"),
+        ("POST", "/api/v1/auth/logout"),
     }
 )
 

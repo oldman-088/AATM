@@ -86,6 +86,8 @@ function AATMWorkspace() {
   const [devices, setDevices] = useState<any[]>([])
   const [gitData, setGitData] = useState<any>(null)
   const [qaData, setQaData] = useState<any>(null)
+  const [securityPosture, setSecurityPosture] = useState<any>(null)
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'live' | 'offline'>('offline')
   const [approvals, setApprovals] = useState<any[]>([])
   const [auditLogs, setAuditLogs] = useState<any[]>([])
   const [notifications, setNotifications] = useState<any[]>([])
@@ -98,7 +100,7 @@ function AATMWorkspace() {
 
   const loadAll = useCallback(async (memQuery = '') => {
     try {
-      const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, ap, au, nf, mm] = await Promise.all([
+      const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, sp, ap, au, nf, mm] = await Promise.all([
         apiFetch<any>('/dashboard/overview'),
         apiFetch<any[]>('/agents'),
         apiFetch<any[]>('/employees/templates'),
@@ -108,7 +110,7 @@ function AATMWorkspace() {
         apiFetch<any[]>('/chat'),
         apiFetch<any[]>('/browsers'),
         apiFetch<any>('/browsers/capabilities'),
-        apiFetch<any>('/browsers/engines'),
+        apiFetch<any[]>('/browsers/engines'),
         apiFetch<any[]>('/userscripts'),
         apiFetch<any[]>('/providers'),
         apiFetch<any>('/providers/usage'),
@@ -117,6 +119,7 @@ function AATMWorkspace() {
         apiFetch<any[]>('/devices'),
         apiFetch<any>('/git/status'),
         apiFetch<any>('/qa/summary'),
+        apiFetch<any>('/governance/security-posture').catch(() => null),
         apiFetch<any[]>('/approvals'),
         apiFetch<any[]>('/audit'),
         apiFetch<any[]>('/notifications'),
@@ -141,6 +144,7 @@ function AATMWorkspace() {
       setDevices(dv)
       setGitData(gt)
       setQaData(qa)
+      setSecurityPosture(sp)
       setApprovals(ap)
       setAuditLogs(au)
       setNotifications(nf)
@@ -160,18 +164,56 @@ function AATMWorkspace() {
   }, [loadAll, user])
 
   useEffect(() => {
-    if (!user || user.must_change_password) return
+    if (!user || user.must_change_password) {
+      setWsStatus('offline')
+      return
+    }
     const token = getToken()
-    if (!token) return
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws/events`)
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ token }))
+    if (!token) {
+      setWsStatus('offline')
+      return
     }
-    ws.onmessage = () => {
-      loadAllRef.current()
+    let cancelled = false
+    let ws: WebSocket | null = null
+    let reconnectTimer: number | null = null
+
+    const connect = () => {
+      if (cancelled) return
+      setWsStatus('connecting')
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      ws = new WebSocket(`${proto}//${window.location.host}/ws/events`)
+      ws.onopen = () => {
+        ws?.send(JSON.stringify({ token }))
+      }
+      ws.onmessage = (evt) => {
+        try {
+          const parsed = JSON.parse(String(evt.data || '{}'))
+          if (parsed?.type === 'auth.ok') {
+            setWsStatus('live')
+            return
+          }
+        } catch {
+          // non-JSON event triggers reload
+        }
+        setWsStatus('live')
+        loadAllRef.current()
+      }
+      ws.onerror = () => {
+        setWsStatus('offline')
+      }
+      ws.onclose = () => {
+        if (cancelled) return
+        setWsStatus('offline')
+        reconnectTimer = window.setTimeout(connect, 3000)
+      }
     }
-    return () => ws.close()
+
+    connect()
+    return () => {
+      cancelled = true
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+      ws?.close()
+    }
   }, [user])
 
   const handleLanguageChange = (next: Language) => {
@@ -429,11 +471,12 @@ function AATMWorkspace() {
 
       <div className="flex flex-1 flex-col">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/50 px-5 py-3">
-          <div className="flex flex-wrap items-center gap-2 md:hidden">
-            {navItems.slice(0, 6).map((item) => (
+          <div className="flex w-full items-center gap-1.5 overflow-x-auto pb-1 md:hidden" aria-label="Mobile navigation">
+            {navItems.map((item) => (
               <Button
                 key={item.id}
                 size="sm"
+                className="shrink-0"
                 variant={tab === item.id ? 'primary' : 'secondary'}
                 onClick={() => setTab(item.id)}
               >
@@ -443,6 +486,9 @@ function AATMWorkspace() {
           </div>
 
           <div className="hidden items-center gap-2 text-xs text-slate-400 md:flex">
+            <Badge variant={wsStatus === 'live' ? 'success' : wsStatus === 'connecting' ? 'warning' : 'neutral'}>
+              {wsStatus === 'live' ? t.common.liveConnected : wsStatus === 'connecting' ? t.common.liveConnecting : t.common.liveOffline}
+            </Badge>
             <Badge variant="success">
               {formatNumber(agents.length)} {t.common.employees}
             </Badge>
@@ -496,6 +542,7 @@ function AATMWorkspace() {
               onRefresh={() => loadAll()}
               onRunCycle={() => apiFetch('/orchestration/cycle', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
               onSelfHeal={() => apiFetch('/qa/self-heal', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
+              onOpenProvidersWizard={() => setTab('providers')}
             />
           )}
           {tab === 'chat' && (
@@ -504,7 +551,7 @@ function AATMWorkspace() {
           {tab === 'agents' && (
             <div className="space-y-6">
               <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={() => loadAll()} />
-              <AgentsView agents={agents} onReload={() => loadAll()} />
+              <AgentsView agents={agents} providers={providers} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'tasks' && (
@@ -522,8 +569,8 @@ function AATMWorkspace() {
           )}
           {tab === 'providers' && (
             <div className="space-y-6">
-              <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
               <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} onReload={() => loadAll()} />
+              <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'projects' && (
@@ -541,7 +588,7 @@ function AATMWorkspace() {
           {tab === 'git' && <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} onReload={() => loadAll()} />}
           {tab === 'qa' && (
             <div className="space-y-6">
-              <QAView qaData={qaData} onReload={() => loadAll()} />
+              <QAView qaData={qaData} securityPosture={securityPosture} onReload={() => loadAll()} />
               <MultiDeviceNodesPanel devices={devices} onReload={() => loadAll()} />
               <PromptInjectionGuardPanel />
             </div>

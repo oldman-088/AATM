@@ -61,8 +61,8 @@ fi
 PY="$ROOT_DIR/.venv/bin/python"
 
 step "2/6 Database migrations"
-if (cd backend && "$ROOT_DIR/.venv/bin/alembic" upgrade head); then
-  ok "alembic upgrade head"
+if (cd backend && "$ROOT_DIR/.venv/bin/alembic" upgrade head && test "$("$ROOT_DIR/.venv/bin/alembic" heads | wc -l)" -eq 1); then
+  ok "alembic upgrade head (single head)"
 else
   fail "alembic upgrade head"
 fi

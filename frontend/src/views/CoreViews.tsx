@@ -20,15 +20,17 @@ export function DashboardView({
   onRefresh,
   onRunCycle,
   onSelfHeal,
+  onOpenProvidersWizard,
 }: {
   overview: any
   onRefresh: () => void
   onRunCycle: () => void
   onSelfHeal: () => void
+  onOpenProvidersWizard?: () => void
 }) {
   const { t, formatNumber, formatDate } = useI18n()
   if (!overview) return <div className="text-slate-400">{t.common.loading}</div>
-  const { kpis, divisions, resources, recommendations, recent_events, sandbox } = overview
+  const { kpis, divisions, resources, recommendations, recent_events, sandbox, model_status } = overview
 
   return (
     <div className="space-y-6">
@@ -49,6 +51,27 @@ export function DashboardView({
           </Button>
         </div>
       </div>
+
+      {model_status && model_status.configured === false && (
+        <Card className="border-rose-500/60 bg-rose-950/40">
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-sm font-semibold text-rose-200">
+                <ShieldAlert className="h-4 w-4 text-rose-400" />
+                <Badge variant="danger">{t.dashboard.noModelBannerTitle}</Badge>
+                {model_status.reason && <span className="text-xs font-normal text-rose-200/90">{model_status.reason}</span>}
+              </div>
+              <p className="text-xs text-rose-100/90">{t.dashboard.noModelBannerText}</p>
+            </div>
+            {onOpenProvidersWizard && (
+              <Button size="sm" onClick={onOpenProvidersWizard}>
+                <Cpu className="h-4 w-4" />
+                {t.dashboard.openSetupWizard}
+              </Button>
+            )}
+          </div>
+        </Card>
+      )}
 
       {sandbox && (
         <Card
@@ -310,8 +333,18 @@ export function ManagerChatView({
   )
 }
 
-export function AgentsView({ agents, onReload }: { agents: any[]; onReload: () => void }) {
+export function AgentsView({
+  agents,
+  providers = [],
+  onReload,
+}: {
+  agents: any[]
+  providers?: any[]
+  onReload: () => void
+}) {
   const { t, formatNumber } = useI18n()
+  const [modelEdits, setModelEdits] = useState<Record<string, { provider_id: string; model_name: string }>>({})
+  const [savedAgentId, setSavedAgentId] = useState<string | null>(null)
 
   const toggleStatus = async (ag: any) => {
     const nextStatus = ag.status === 'paused' ? 'idle' : 'paused'
@@ -327,11 +360,27 @@ export function AgentsView({ agents, onReload }: { agents: any[]; onReload: () =
     onReload()
   }
 
+  const saveModel = async (ag: any) => {
+    const draft = modelEdits[ag.id] || { provider_id: ag.provider_id, model_name: ag.model_name }
+    await apiFetch(`/agents/${ag.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ provider_id: draft.provider_id, model_name: draft.model_name }),
+    })
+    setSavedAgentId(ag.id)
+    onReload()
+  }
+
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-white">{t.agents.title}</h2>
       <div className="grid gap-4 md:grid-cols-2">
-        {agents.map((ag) => (
+        {agents.map((ag) => {
+          const draft = modelEdits[ag.id] || {
+            provider_id: ag.provider_id || '',
+            model_name: ag.model_name || '',
+          }
+          const selectedProvider = providers.find((p) => p.id === draft.provider_id)
+          return (
           <Card key={ag.id} className="space-y-3">
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-center gap-2.5">
@@ -358,7 +407,7 @@ export function AgentsView({ agents, onReload }: { agents: any[]; onReload: () =
 
             <div className="grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
               <div>
-                <div className="text-slate-500">Model</div>
+                <div className="text-slate-500">{t.agents.modelLabel}</div>
                 <div className="truncate font-mono text-slate-200">{ag.model_name}</div>
               </div>
               <div>
@@ -371,6 +420,55 @@ export function AgentsView({ agents, onReload }: { agents: any[]; onReload: () =
               </div>
             </div>
 
+            {providers.length > 0 && (
+              <div className="grid gap-2 rounded-lg border border-slate-800/80 bg-slate-950/40 p-2 sm:grid-cols-3">
+                <Select
+                  aria-label={`${ag.name} ${t.agents.providerLabel}`}
+                  value={draft.provider_id}
+                  onChange={(e) => {
+                    const nextProv = providers.find((p) => p.id === e.target.value)
+                    setModelEdits({
+                      ...modelEdits,
+                      [ag.id]: {
+                        provider_id: e.target.value,
+                        model_name: nextProv?.default_model || draft.model_name,
+                      },
+                    })
+                  }}
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+                <Input
+                  aria-label={`${ag.name} ${t.agents.modelLabel}`}
+                  list={`models-${ag.id}`}
+                  value={draft.model_name}
+                  onChange={(e) =>
+                    setModelEdits({
+                      ...modelEdits,
+                      [ag.id]: { ...draft, model_name: e.target.value },
+                    })
+                  }
+                />
+                {selectedProvider?.available_models && (
+                  <datalist id={`models-${ag.id}`}>
+                    {(selectedProvider.available_models as string[]).map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                )}
+                <Button size="sm" variant="secondary" onClick={() => saveModel(ag)}>
+                  {t.agents.saveModelAssignment}
+                </Button>
+                {savedAgentId === ag.id && (
+                  <span className="text-[11px] text-emerald-400 sm:col-span-3">{t.agents.modelSaved}</span>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="secondary" onClick={() => toggleStatus(ag)}>
                 {ag.status === 'paused' ? t.agents.resume : t.agents.pause}
@@ -381,7 +479,8 @@ export function AgentsView({ agents, onReload }: { agents: any[]; onReload: () =
               </Button>
             </div>
           </Card>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -477,17 +576,38 @@ export function TasksView({
                 <Badge variant="info">{task.division_code}</Badge>
                 <Badge
                   variant={
-                    task.status === 'completed'
+                    task.status === 'completed' || task.status === 'done' || task.status === 'merged' || task.status === 'approved'
                       ? 'success'
-                      : task.status === 'failed'
+                      : task.status === 'failed' || task.status === 'changes_requested'
                         ? 'danger'
-                        : task.status === 'in_progress'
+                        : task.status === 'in_progress' || task.status === 'in_review'
                           ? 'warning'
-                          : 'neutral'
+                          : task.status === 'pr_open'
+                            ? 'info'
+                            : 'neutral'
                   }
                 >
                   {task.status}
                 </Badge>
+                {task.branch_name && (
+                  <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[11px] text-sky-300">
+                    {task.branch_name}
+                  </span>
+                )}
+                {task.pr_number && (
+                  task.pr_url && String(task.pr_url).startsWith('https://') ? (
+                    <a
+                      href={task.pr_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded bg-emerald-950/60 px-1.5 py-0.5 font-mono text-[11px] text-emerald-300 underline"
+                    >
+                      PR #{task.pr_number}
+                    </a>
+                  ) : (
+                    <Badge variant="info">PR #{task.pr_number}</Badge>
+                  )
+                )}
                 <span className="font-medium text-white">{task.title}</span>
               </div>
               <div className="text-xs text-slate-400">
@@ -496,7 +616,7 @@ export function TasksView({
               </div>
             </div>
             <div className="flex gap-2">
-              {task.status !== 'completed' && (
+              {!['completed', 'done', 'merged'].includes(task.status) && (
                 <Button size="sm" variant="secondary" onClick={() => updateTaskStatus(task.id, 'completed')}>
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
                   {t.tasks.complete}

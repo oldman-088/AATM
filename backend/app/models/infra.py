@@ -41,6 +41,7 @@ class ProviderUsageLog(Base):
     output_tokens_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     confirmed_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pricing_known: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     success: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
