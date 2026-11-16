@@ -2,7 +2,7 @@ import React from 'react'
 import { useI18n } from '../i18n/I18nContext'
 import Robot from './Robot'
 import StationScreen from './StationScreen'
-import { robotStateFor, screenStatus, type StationState } from './station'
+import { robotStateFor, roleLabel, screenStatus, type StationState } from './station'
 import type { StationCode } from './useBridgeLive'
 
 type FocusViewProps = {
@@ -54,7 +54,17 @@ export function FocusView({
   const { t } = useI18n()
   const task = employee?.current_task || null
   const isWorker = agent?.role !== 'manager'
-  const connector = employee?.connector_status || null
+  const connectorRaw = employee?.connector_status || null
+  const connector =
+    connectorRaw === 'needs_human'
+      ? t.bridge.needsHuman
+      : connectorRaw === 'busy'
+        ? t.bridge.connectorBusy
+        : connectorRaw === 'idle'
+          ? t.bridge.connectorIdle
+          : connectorRaw === 'offline'
+            ? t.bridge.connectorOffline
+            : connectorRaw
   const progress = typeof task?.progress === 'number' ? Math.max(0, Math.min(100, task.progress)) : null
   const lastTest = station && (station.action === 'test' || station.action === 'lint') ? station : null
   const arenaLabel =
@@ -80,8 +90,14 @@ export function FocusView({
       <div className="bridge-side__title" style={{ fontSize: 18 }}>
         <span className="bridge-side__dot" style={{ background: color, color }} />
         {seatLabel}
+        <span className="bridge-side__role" style={{ marginTop: 0, fontSize: 12 }}>
+          {roleLabel(agent, t)}
+        </span>
       </div>
-      <div className="bridge-side__role">{agent?.specialty || agent?.role_template || agent?.role}</div>
+      {/* the seeded agent names are long English strings — full name lives here and in the tooltip */}
+      <div className="bridge-side__fullname" title={agent?.name || ''} data-testid="bridge-focus-full-name">
+        {agent?.name || agent?.id}
+      </div>
       <dl style={{ margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
         {row(
           t.bridge.engine,
@@ -176,7 +192,7 @@ export function FocusView({
           testId="bridge-focus-screen"
         />
         <div className="bridge-focus__robot">
-          <Robot color={color} size={110} state={robotStateFor(state)} title={seatLabel} />
+          <Robot color={color} size={96} state={robotStateFor(state)} title={seatLabel} />
         </div>
         {mobile && (
           <div className="bridge-panel" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>

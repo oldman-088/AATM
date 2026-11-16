@@ -19,6 +19,7 @@ parallel**, each in its own git worktree and browser profile, and open draft PRs
 ./scripts/ubuntu/restart.sh      # after changing .env / pulling (health-checked restart)
 ./scripts/ubuntu/reset-admin-password.sh   # lost the admin password? rotate it, printed once
 ./scripts/ubuntu/verify.sh       # all release gates (lint, migrations, backend/bridge/frontend tests, secret scan, build)
+cd frontend && npm run test:e2e  # Playwright: 1440×900 + 390×844 bridge layout + docs/design screenshots
 ./scripts/demo_e2e.sh --check    # end-to-end demo prerequisites (see docs/OPERATIONS.md)
 ```
 Windows 11: `.\scripts\windows\install.ps1`, then `.\scripts\windows\start.ps1`.

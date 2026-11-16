@@ -5,6 +5,7 @@ import { I18nProvider } from '../../i18n/I18nContext'
 import { installFetchMock, settle } from '../../test/mockApi'
 import CommandBridge from '../../bridge/Bridge'
 import { LIVE_EVENT } from '../DashboardViews'
+import { roleLabel } from '../../bridge/station'
 
 const STAGE_IDS = ['request', 'analyze_split', 'distribute', 'execute', 'collect', 'pull_request', 'review_merge', 'completed']
 
@@ -104,7 +105,14 @@ const approvals = [
 
 const chats = [
   { id: 'm1', sender_type: 'user', content: 'أضف شاشة جسر القيادة', created_at: '2026-11-16T10:00:00Z' },
-  { id: 'm2', sender_type: 'manager', content: 'تم توزيع المهمة على worker-1', created_at: '2026-11-16T10:00:05Z' },
+  {
+    id: 'm2',
+    sender_type: 'manager',
+    content: 'Chief AI Engineering Manager online. All 4 Worker Agents initialized across 12 Divisions.',
+    metadata_json: { i18n_key: 'managerWelcome' },
+    created_at: '2026-11-16T10:00:05Z',
+  },
+  { id: 'm3', sender_type: 'manager', content: 'تم توزيع المهمة على worker-1', created_at: '2026-11-16T10:00:09Z' },
 ]
 
 function bridgeFixtures(overrides: Record<string, any> = {}) {
@@ -332,13 +340,79 @@ describe('Command Bridge (جسر القيادة)', () => {
     await renderBridge('en')
     expect(screen.getByTestId('bridge-mobile')).toBeTruthy()
     expect(screen.getByTestId('bridge-mobile-manager')).toBeTruthy()
-    expect(screen.getByTestId('bridge-mobile-station-worker-1').textContent).toContain('Frontend Engineer')
+    const card = screen.getByTestId('bridge-mobile-station-worker-1')
+    expect(card.textContent).toContain('Robot-1 · Frontend')
+    expect(card.getAttribute('title')).toBe('Frontend Engineer')
     expect(screen.queryByTestId('bridge-station-worker-1')).toBeNull()
 
     fireEvent.click(screen.getByTestId('bridge-mobile-station-worker-1'))
     expect(screen.getByTestId('bridge-focus')).toBeTruthy()
     fireEvent.click(screen.getByTestId('bridge-control-back'))
     await waitFor(() => expect(screen.queryByTestId('bridge-focus')).toBeNull())
+  })
+
+  it('shows short seat names on the bridge and keeps the long seeded name in the tooltip', async () => {
+    await renderBridge('ar')
+    const station = screen.getByTestId('bridge-station-worker-1')
+    expect(station.textContent).toContain('روبوت-1')
+    expect(station.textContent).toContain('الواجهة')
+    expect(station.textContent).not.toContain('Frontend Engineer')
+    expect(screen.getByTestId('bridge-station-open-worker-1').getAttribute('title')).toBe('Frontend Engineer')
+
+    // the manager seat is titled "المدير" only
+    expect(screen.getByTestId('bridge-manager').textContent).toContain('المدير')
+    expect(screen.getByTestId('bridge-manager').textContent).toContain('قائد الطاقم')
+
+  })
+
+  it('maps the seeded role templates to short localised seat roles', async () => {
+    const { ar } = await import('../../i18n/ar')
+    const seeded = [
+      ['backend_developer', 'Worker 1 — Backend Engineer', 'الخادم'],
+      ['frontend_developer', 'Worker 2 — Frontend Engineer', 'الواجهة'],
+      ['ai_engineer', 'Worker 3 — AI Provider & Browser Engineer', 'المتصفح'],
+      ['qa_engineer', 'Worker 4 — Orchestration & QA Engineer', 'الاختبارات والتنسيق'],
+    ] as const
+    for (const [role_template, name, expected] of seeded) {
+      expect(roleLabel({ role: 'worker', role_template, name, specialty: '' }, ar as any)).toBe(expected)
+    }
+    expect(roleLabel({ role: 'manager', role_template: 'ceo_manager' }, ar as any)).toBe(ar.bridge.managerTag)
+    expect(roleLabel({ role: 'worker', role_template: 'mystery', name: 'x' }, ar as any)).toBe(ar.bridge.roleOther)
+  })
+
+  it('renders 8 compact numbered stage cells with the stage name as tooltip', async () => {
+    await renderBridge('en')
+    const cells = screen.getByTestId('console-stages').querySelectorAll('[data-testid^="bridge-stage-cell-"]')
+    expect(cells).toHaveLength(8)
+    expect(Array.from(cells).map((cell) => cell.textContent)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8'])
+    expect(cells[3].getAttribute('title')).toBe('4. Execution in isolated sessions')
+    expect(cells[3].getAttribute('data-state')).toBe('active')
+    // no long labels are printed in the console, so nothing can be clipped
+    expect(screen.getByTestId('console-stages').textContent).toBe('12345678')
+  })
+
+  it('keeps the onboarding strip inside the console and hides it in the focus view', async () => {
+    await renderBridge('ar', {
+      '/api/health': { status: 'ok', model_status: { status: 'NO_MODEL_CONFIGURED', configured: false, configured_providers: [] } },
+      '/api/v1/projects': [],
+      '/api/v1/chat': [],
+    })
+    const banner = await screen.findByTestId('bridge-onboarding')
+    const consoleEl = screen.getByTestId('bridge-console')
+    expect(consoleEl.contains(banner)).toBe(true)
+    // it is a slim strip, not a card over the scene
+    expect(banner.className).toContain('bridge-onboard')
+    expect(banner.textContent).toContain('لنبدأ')
+
+    fireEvent.click(screen.getByTestId('bridge-station-open-worker-1'))
+    expect(screen.getByTestId('bridge-focus')).toBeTruthy()
+    expect(screen.queryByTestId('bridge-onboarding')).toBeNull()
+  })
+
+  it('shows the manager welcome in the operator language', async () => {
+    await renderBridge('ar')
+    expect(screen.getByTestId('bridge-chat').textContent).toContain('مدير فريق وكلاء الذكاء الاصطناعي جاهز')
+    expect(screen.getByTestId('bridge-chat').textContent).not.toContain('Chief AI Engineering Manager online')
   })
 
   it('localises the bridge (Arabic RTL and English LTR)', async () => {

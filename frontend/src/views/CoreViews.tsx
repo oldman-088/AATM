@@ -14,6 +14,7 @@ import {
 import { Badge, Button, Card, Input, Progress, Select } from '../components/ui'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
+import { messageText } from '../lib/chat'
 
 export function DashboardView({
   overview,
@@ -306,7 +307,7 @@ export function ManagerChatView({
                 <span className="font-semibold text-sky-400">{m.sender_id}</span>
                 <span>{formatDate(m.created_at)}</span>
               </div>
-              <div className="whitespace-pre-wrap">{m.content}</div>
+              <div className="whitespace-pre-wrap">{messageText(m, t)}</div>
             </div>
           ))}
         </div>

@@ -562,5 +562,16 @@ export interface Translations {
     orderFailed: string
     testRun: string
     lintRun: string
+    roleBackend: string
+    roleFrontend: string
+    roleBrowser: string
+    roleQa: string
+    roleOther: string
+    managerWelcome: string
+    stationFullName: string
+    onboardingBanner: string
+    connectorBusy: string
+    connectorIdle: string
+    connectorOffline: string
   }
 }

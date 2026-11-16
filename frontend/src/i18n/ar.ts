@@ -562,5 +562,17 @@ export const ar: Translations = {
     orderFailed: 'تعذر إرسال الأمر',
     testRun: 'تشغيل الاختبارات',
     lintRun: 'فحص الكود',
+    roleBackend: 'الخادم',
+    roleFrontend: 'الواجهة',
+    roleBrowser: 'المتصفح',
+    roleQa: 'الاختبارات والتنسيق',
+    roleOther: 'عام',
+    managerWelcome:
+      'مدير فريق وكلاء الذكاء الاصطناعي جاهز. تم تهيئة الوكلاء الأربعة في 12 قسماً. جاهز لتنسيق التنفيذ المتوازي، ومراقبة جدار المتصفح، وتطبيق سياسات مركز الموافقات.',
+    stationFullName: 'الاسم الكامل',
+    onboardingBanner: 'مطلوب قبل أول أمر',
+    connectorBusy: 'مشغول',
+    connectorIdle: 'جاهز',
+    connectorOffline: 'غير متصل',
   },
 }

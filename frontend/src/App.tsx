@@ -19,6 +19,7 @@ import {
   SunMoon,
 } from 'lucide-react'
 import { Badge, Button, Input } from './components/ui'
+import { createPortal } from 'react-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { I18nProvider, useI18n } from './i18n/I18nContext'
 import type { Language } from './i18n/types'
@@ -560,11 +561,13 @@ function AATMWorkspace() {
           </div>
         </header>
 
-        {tab === 'bridge' && (
-          <div className="fixed inset-0 z-40 overflow-hidden" data-testid="bridge-overlay">
-            <CommandBridge wsStatus={wsStatus} onOpenAdvanced={(next) => setTab((next as NavTab) || 'dashboard')} />
-          </div>
-        )}
+        {tab === 'bridge' &&
+          createPortal(
+            <div className="bridge-shell" data-testid="bridge-overlay">
+              <CommandBridge wsStatus={wsStatus} onOpenAdvanced={(next) => setTab((next as NavTab) || 'dashboard')} />
+            </div>,
+            document.body,
+          )}
 
         <main className="flex-1 space-y-6 p-5">
           {errorBanner && (

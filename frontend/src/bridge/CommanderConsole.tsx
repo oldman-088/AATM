@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useI18n } from '../i18n/I18nContext'
-import { stageName } from './station'
+import { messageText } from '../lib/chat'
+import { STAGE_IDS, stageName } from './station'
 
 type CommanderConsoleProps = {
   chats: any[]
@@ -13,13 +14,16 @@ type CommanderConsoleProps = {
   onDecideApproval: (approvalId: string, decision: 'approved' | 'rejected') => Promise<void> | void
   onEmergencyStop: () => Promise<void> | void
   anyEmergencyStopped: boolean
+  banner?: React.ReactNode
   mobile?: boolean
 }
 
+const STAGE_INDEX = STAGE_IDS.length
+
 /**
  * The commander console fixed at the bottom of the bridge (spec §2.6): a real chat with the
- * manager, the 8 mission stages from `/projects/{id}/timeline`, and the real approval / emergency
- * controls. Nothing here is simulated — the send button posts a real directive.
+ * manager, 8 compact numbered mission-stage cells (state colour + tooltip), and the real approval /
+ * emergency controls. Nothing here is simulated — the send button posts a real directive.
  */
 export function CommanderConsole({
   chats,
@@ -32,6 +36,7 @@ export function CommanderConsole({
   onDecideApproval,
   onEmergencyStop,
   anyEmergencyStopped,
+  banner,
   mobile = false,
 }: CommanderConsoleProps) {
   const { t } = useI18n()
@@ -46,17 +51,26 @@ export function CommanderConsole({
     await onSubmitDirective(content)
   }
 
+  const cells = Array.from({ length: STAGE_INDEX }, (_, index) => ({
+    id: steps?.[index]?.id || STAGE_IDS[index],
+    state: steps?.[index]?.state || 'pending',
+  }))
+
   return (
     <div className={`bridge-console${mobile ? ' bridge-console--mobile' : ''}`} data-testid="bridge-console">
       <div className="bridge-console__chat">
+        {banner}
         <div className="bridge-console__messages" role="log" aria-live="polite" data-testid="bridge-chat">
           {chats.length === 0 && <div style={{ color: 'var(--dim)' }}>{t.bridge.chatEmpty}</div>}
           {chats.slice(-40).map((message) => {
             const isUser = message?.sender_type === 'user'
             return (
-              <div key={message?.id || `${message?.created_at}-${message?.content?.slice(0, 8)}`} className={`bridge-msg bridge-msg--${isUser ? 'user' : 'manager'}`}>
+              <div
+                key={message?.id || `${message?.created_at}-${String(message?.content || '').slice(0, 8)}`}
+                className={`bridge-msg bridge-msg--${isUser ? 'user' : 'manager'}`}
+              >
                 <span className="bridge-msg__who">{isUser ? `${t.bridge.you}:` : `${t.bridge.manager}:`}</span>{' '}
-                <span>{String(message?.content || '').slice(0, 600)}</span>
+                <span>{messageText(message, t).slice(0, 600)}</span>
               </div>
             )
           })}
@@ -78,19 +92,25 @@ export function CommanderConsole({
       </div>
 
       <div className="bridge-console__side">
-        <div className="bridge-console__label">{t.bridge.stages}</div>
+        <div className="bridge-console__label">
+          <span>{t.bridge.stages}</span>
+          <span className="bridge-mono" style={{ color: 'var(--dim)' }}>
+            {`${steps.filter((step: any) => step?.state === 'done').length}/${STAGE_INDEX}`}
+          </span>
+        </div>
         <div className="bridge-stages" data-testid="console-stages">
-          {steps.map((step, index) => (
+          {cells.map((cell, index) => (
             <div
-              key={step?.id || index}
-              className={`bridge-stage-cell bridge-stage-cell--${step?.state || 'pending'}`}
-              data-state={step?.state || 'pending'}
-              title={stageName(step?.id, t)}
+              key={cell.id}
+              className={`bridge-stage-cell bridge-stage-cell--${cell.state}`}
+              data-state={cell.state}
+              title={stageName(cell.id, t)}
+              aria-label={`${index + 1}. ${stageName(cell.id, t)} — ${cell.state}`}
+              data-testid={`bridge-stage-cell-${cell.id}`}
             >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{stageName(step?.id, t)}</span>
+              <span className="bridge-mono">{index + 1}</span>
             </div>
           ))}
-          {steps.length === 0 && <div style={{ fontSize: 11, color: 'var(--dim)' }}>{t.bridge.notAvailable}</div>}
         </div>
         <div className="bridge-console__status" data-testid="bridge-status-line">
           {statusLine}
@@ -119,10 +139,20 @@ export function CommanderConsole({
                   <span className="bridge-mono" style={{ color: 'var(--muted)' }}>{approval.action_type}</span> · {approval.title}
                 </span>
                 <span style={{ display: 'flex', gap: 6, flex: '0 0 auto' }}>
-                  <button type="button" className="bridge-btn bridge-btn--green" style={{ height: 26, flex: '0 0 auto', padding: '0 10px' }} onClick={() => void onDecideApproval(approval.id, 'approved')}>
+                  <button
+                    type="button"
+                    className="bridge-btn bridge-btn--green"
+                    style={{ height: 26, flex: '0 0 auto', padding: '0 10px' }}
+                    onClick={() => void onDecideApproval(approval.id, 'approved')}
+                  >
                     {t.bridge.approve}
                   </button>
-                  <button type="button" className="bridge-btn bridge-btn--red" style={{ height: 26, flex: '0 0 auto', padding: '0 10px' }} onClick={() => void onDecideApproval(approval.id, 'rejected')}>
+                  <button
+                    type="button"
+                    className="bridge-btn bridge-btn--red"
+                    style={{ height: 26, flex: '0 0 auto', padding: '0 10px' }}
+                    onClick={() => void onDecideApproval(approval.id, 'rejected')}
+                  >
                     {t.bridge.reject}
                   </button>
                 </span>

@@ -23,6 +23,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test/setup.ts',
+    // Playwright specs live in e2e/ and must not be collected by vitest.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    exclude: ['node_modules', 'dist', 'e2e'],
     // The app defaults to Arabic (RTL first); component tests pin English unless they pick a language.
     env: { VITE_DEFAULT_LANGUAGE: 'en' },
   },

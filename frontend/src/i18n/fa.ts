@@ -562,5 +562,17 @@ export const fa: Translations = {
     orderFailed: 'ارسال دستور ممکن نشد',
     testRun: 'اجرای آزمون‌ها',
     lintRun: 'بررسی کد',
+    roleBackend: 'بک‌اند',
+    roleFrontend: 'فرانت‌اند',
+    roleBrowser: 'مرورگر',
+    roleQa: 'آزمون و ابزار',
+    roleOther: 'عمومی',
+    managerWelcome:
+      'مدیر تیم عامل‌های هوش مصنوعی آنلاین است. هر چهار عامل در ۱۲ بخش راه‌اندازی شدند. آماده هماهنگی اجرای موازی، پایش دیوار مرورگر و اجرای سیاست‌های مرکز تأیید است.',
+    stationFullName: 'نام کامل',
+    onboardingBanner: 'پیش از نخستین فرمان لازم است',
+    connectorBusy: 'مشغول',
+    connectorIdle: 'آماده',
+    connectorOffline: 'آفلاین',
   },
 }

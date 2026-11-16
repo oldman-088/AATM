@@ -11,6 +11,7 @@ import {
   formatClock,
   prForAgent,
   robotStateFor,
+  roleLabel,
   screenStatus,
   seatColor,
   seatPosition,
@@ -33,6 +34,8 @@ type WsStatus = 'connecting' | 'live' | 'offline'
 
 type WorkstationProps = {
   agent: any
+  fullName: string
+  roleText: string
   employee: any
   color: string
   seatLabel: string
@@ -51,6 +54,8 @@ type WorkstationProps = {
 
 const Workstation = React.memo(function Workstation({
   agent,
+  fullName,
+  roleText,
   employee,
   color,
   seatLabel,
@@ -78,6 +83,7 @@ const Workstation = React.memo(function Workstation({
         className="bridge-station__hit"
         onClick={onOpen}
         aria-label={`${seatLabel} — ${stateText}`}
+        title={fullName}
         data-testid={`bridge-station-open-${agent.id}`}
       >
         <StationScreen
@@ -88,10 +94,11 @@ const Workstation = React.memo(function Workstation({
           statusLabel={statusText}
           testId={`bridge-screen-${agent.id}`}
         />
-        <Robot color={color} size={120} state={robotState} title={`${seatLabel} ${agent?.name || ''}`} />
+        <Robot color={color} size={120} state={robotState} title={seatLabel} />
         <span className={`bridge-tag${dangerous ? ' bridge-tag--danger' : ''}`} style={{ ['--seat' as any]: color }}>
-          <span className="bridge-tag__name">
-            {seatLabel} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>· {agent?.specialty || agent?.role || ''}</span>
+          <span className="bridge-tag__name">{seatLabel}</span>
+          <span className="bridge-tag__role" title={fullName}>
+            {roleText}
           </span>
           <span className="bridge-tag__state">{stateText}</span>
         </span>
@@ -127,6 +134,14 @@ export function CommandBridge({
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
+  }, [])
+
+  // The bridge owns the whole viewport: locking document scrolling removes any chance of a
+  // horizontal page overflow (which, in RTL, scrolls the viewport off the visible content).
+  useEffect(() => {
+    const root = document.documentElement
+    root.classList.add('bridge-mounted')
+    return () => root.classList.remove('bridge-mounted')
   }, [])
 
   useEffect(() => {
@@ -253,6 +268,8 @@ export function CommandBridge({
       <Workstation
         key={agent.id}
         agent={agent}
+        fullName={agent?.name || agent?.id}
+        roleText={roleLabel(agent, t)}
         employee={employee}
         color={seatColor(index)}
         seatLabel={label}
@@ -310,6 +327,33 @@ export function CommandBridge({
     />
   ) : null
 
+  // Slim onboarding strip that lives inside the commander console: it must never cover the
+  // workstations or the manager, and it disappears while a station is focused.
+  const onboardingBanner = emptyState ? (
+    <div className="bridge-onboard" data-testid="bridge-onboarding">
+      <span className="bridge-onboard__title">{t.bridge.onboardTitle}</span>
+      <ol className="bridge-onboard__steps">
+        {[
+          { done: data.hasEngine, label: t.bridge.onboardEngine, tab: 'providers' },
+          { done: data.hasProject, label: t.bridge.onboardRepo, tab: 'projects' },
+          { done: data.hasDirective, label: t.bridge.onboardOrder, tab: 'chat' },
+        ].map((step, index) => (
+          <li key={step.label} className={`bridge-onboard__step${step.done ? ' bridge-onboard__step--done' : ''}`}>
+            <span className="bridge-onboard__check" aria-hidden="true">
+              {step.done ? '✓' : index + 1}
+            </span>
+            <span className="bridge-onboard__label">{step.label}</span>
+            {!step.done && onOpenAdvanced && (
+              <button type="button" className="bridge-adv-link bridge-onboard__link" onClick={() => onOpenAdvanced(step.tab)}>
+                {t.bridge.openWizard}
+              </button>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  ) : null
+
   const consoleNode = (
     <CommanderConsole
       chats={data.chats}
@@ -322,31 +366,10 @@ export function CommandBridge({
       onDecideApproval={decideApproval}
       onEmergencyStop={toggleEmergencyStop}
       anyEmergencyStopped={anyStopped}
+      banner={focusId ? null : onboardingBanner}
       mobile={isMobile}
     />
   )
-
-  const onboarding = emptyState ? (
-    <div className="bridge-onboard" data-testid="bridge-onboarding">
-      <div style={{ fontWeight: 700, color: '#fde68a' }}>{t.bridge.onboardTitle}</div>
-      {[
-        { done: data.hasEngine, label: t.bridge.onboardEngine, tab: 'providers' },
-        { done: data.hasProject, label: t.bridge.onboardRepo, tab: 'projects' },
-        { done: data.hasDirective, label: t.bridge.onboardOrder, tab: 'chat' },
-      ].map((step, index) => (
-        <div key={step.label} className="bridge-onboard__step">
-          <span>
-            {index + 1}. {step.label} {step.done && <span className="bridge-onboard__check">✓</span>}
-          </span>
-          {!step.done && onOpenAdvanced && (
-            <button type="button" className="bridge-adv-link" onClick={() => onOpenAdvanced(step.tab)}>
-              {t.bridge.openWizard}
-            </button>
-          )}
-        </div>
-      ))}
-    </div>
-  ) : null
 
   return (
     <div
@@ -412,7 +435,9 @@ export function CommandBridge({
         <div className="bridge-mobile" data-testid="bridge-mobile">
           <div className="bridge-mobile__head">
             <span>{missionLabel}</span>
-            <span className="bridge-mono">{`${t.bridge.missionTimer}${formatClock(elapsed)}`}</span>
+            <span className="bridge-mono" dir="ltr">
+              {`${t.bridge.mobileStations} · ${crewOnline}/${crewTotal}`}
+            </span>
           </div>
           {manager && (
             <button
@@ -420,6 +445,7 @@ export function CommandBridge({
               className="bridge-mobile__card"
               style={{ ['--seat' as any]: '#A78BFA' }}
               onClick={() => setFocusId(manager.id)}
+              title={manager?.name || t.bridge.managerTitle}
               data-testid="bridge-mobile-manager"
             >
               <span className="bridge-mobile__row">
@@ -448,13 +474,14 @@ export function CommandBridge({
                 className="bridge-mobile__card"
                 style={{ ['--seat' as any]: color }}
                 onClick={() => setFocusId(agent.id)}
+                title={agent?.name || agent?.id}
                 data-testid={`bridge-mobile-station-${agent.id}`}
               >
                 <span className="bridge-mobile__row">
-                  <Robot color={color} size={46} state={robotStateFor(state)} title={agent?.name || ''} />
-                  <span>
+                  <Robot color={color} size={46} state={robotStateFor(state)} title={seatLabel(index)} />
+                  <span className="bridge-mobile__text">
                     <span className="bridge-mobile__name">
-                      {seatLabel(index)} · {agent?.name || agent?.role}
+                      {seatLabel(index)} · {roleLabel(agent, t)}
                     </span>
                     <br />
                     <span className="bridge-mobile__state">{stateLabel(state, t)}</span>
@@ -503,12 +530,12 @@ export function CommandBridge({
                 className="bridge-station__hit"
                 onClick={() => setFocusId(manager.id)}
                 aria-label={`${t.bridge.managerTitle} — ${stateLabel(managerState, t)}`}
+                title={manager?.name || t.bridge.managerTitle}
               >
                 <Robot color="#A78BFA" size={150} state={robotStateFor(managerState)} manager title={t.bridge.managerTitle} />
                 <span className="bridge-tag bridge-manager__tag">
-                  <span className="bridge-tag__name">
-                    {t.bridge.managerTitle} · {t.bridge.managerTag}
-                  </span>
+                  <span className="bridge-tag__name">{t.bridge.managerTitle}</span>
+                  <span className="bridge-tag__role">{t.bridge.managerTag}</span>
                   <span className="bridge-tag__state">{stateLabel(managerState, t)}</span>
                 </span>
               </button>
@@ -516,13 +543,11 @@ export function CommandBridge({
           )}
 
           {focusView}
-          {onboarding}
         </>
       )}
 
       {consoleNode}
 
-      {emptyState && isMobile && onboarding}
       {data.error && (
         <div className="bridge-chip bridge-chip--danger" style={{ position: 'absolute', top: 70, insetInlineStart: 24, zIndex: 40 }}>
           {data.error}

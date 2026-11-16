@@ -562,5 +562,17 @@ export const en: Translations = {
     orderFailed: 'Could not send the order',
     testRun: 'Running tests',
     lintRun: 'Running lint',
+    roleBackend: 'Backend',
+    roleFrontend: 'Frontend',
+    roleBrowser: 'Browser',
+    roleQa: 'QA & tooling',
+    roleOther: 'General',
+    managerWelcome:
+      'Chief AI Engineering Manager online. All 4 Worker Agents initialized across 12 Divisions. Ready to coordinate parallel execution, monitor the Browser Wall, and enforce Approval Center policies.',
+    stationFullName: 'Full name',
+    onboardingBanner: 'Needed before the first order',
+    connectorBusy: 'Busy',
+    connectorIdle: 'Ready',
+    connectorOffline: 'Offline',
   },
 }

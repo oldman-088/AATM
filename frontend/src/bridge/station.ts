@@ -8,18 +8,18 @@ export type SeatPosition = { left: string; top: string; tilt: string }
 
 /** The 4 default workstations form an arc: outer seats higher, inner seats lower (spec §2.4). */
 export const SEAT_POSITIONS: SeatPosition[] = [
-  { left: '2.5%', top: '13%', tilt: '18deg' },
-  { left: '22%', top: '30%', tilt: '10deg' },
-  { left: '55%', top: '30%', tilt: '-10deg' },
-  { left: '76.5%', top: '13%', tilt: '-18deg' },
+  { left: '2.5%', top: '12%', tilt: '18deg' },
+  { left: '21%', top: '32%', tilt: '10deg' },
+  { left: '55%', top: '32%', tilt: '-10deg' },
+  { left: '73.5%', top: '12%', tilt: '-18deg' },
 ]
 
 /** Extra employees sit in a second, smaller arc behind the first (scale 0.8). */
 export const EXTRA_POSITIONS: SeatPosition[] = [
-  { left: '12%', top: '22%', tilt: '14deg' },
-  { left: '32%', top: '38%', tilt: '6deg' },
-  { left: '56%', top: '38%', tilt: '-6deg' },
-  { left: '74%', top: '22%', tilt: '-14deg' },
+  { left: '12%', top: '20%', tilt: '14deg' },
+  { left: '31%', top: '40%', tilt: '6deg' },
+  { left: '55%', top: '40%', tilt: '-6deg' },
+  { left: '72%', top: '20%', tilt: '-14deg' },
 ]
 
 export function seatColor(index: number): string {
@@ -166,4 +166,22 @@ export function stageLights(steps: any[] | undefined): Array<{ left: number; bot
     state: steps?.[index]?.state || 'pending',
     name: steps?.[index]?.id || STAGE_IDS[index],
   }))
+}
+
+/**
+ * Short seat role shown on the bridge (spec §2.4): the seeded agent names are long English strings
+ * ("Worker 1 — Backend Engineer …"), so the bridge shows the seat number plus a short, localized role
+ * and keeps the full name for the side panel / tooltip.
+ */
+export function roleLabel(agent: any, t: Translations): string {
+  const haystack = [agent?.role_template, agent?.specialty, agent?.name, agent?.role]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  if (agent?.role === 'manager' || /ceo_manager|manager/.test(haystack)) return t.bridge.managerTag
+  if (/frontend|react|ui\b|rtl|tailwind/.test(haystack)) return t.bridge.roleFrontend
+  if (/backend|fastapi|api|database|postgres|auth/.test(haystack)) return t.bridge.roleBackend
+  if (/browser|arena|playwright|provider|ai_engineer/.test(haystack)) return t.bridge.roleBrowser
+  if (/qa|test|quality|orchestration|git|lint|format/.test(haystack)) return t.bridge.roleQa
+  return t.bridge.roleOther
 }
