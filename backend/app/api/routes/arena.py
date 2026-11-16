@@ -279,6 +279,39 @@ async def list_sessions(open_only: bool = False, limit: int = 100, db: AsyncSess
     return {"sessions": [session_dict(s) for s in (await db.execute(query)).scalars()]}
 
 
+@router.get("/arena/sessions/{session_id}/live-diff")
+async def session_live_diff(session_id: str, refresh: bool = False, db: AsyncSession = Depends(get_db)):
+    """R4 live diff of the session's GitHub branch against the base (redacted file list, commits, links)."""
+    from app.orchestration.arena_runner import arena_runner
+
+    session = await db.get(ArenaSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Arena session not found")
+    return await arena_runner.live_diff(db, session, refresh=refresh)
+
+
+class AssignTaskBody(BaseModel):
+    task_id: str = Field(min_length=1, max_length=36)
+
+
+@router.post("/arena/agents/{agent_id}/assign-task", dependencies=[Depends(require_role("admin", "operator"))])
+async def assign_task(agent_id: str, body: AssignTaskBody, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Submit Task: hand a queued task to this employee; the scheduler starts its Arena session."""
+    agent = await db.get(Agent, agent_id)
+    task = await db.get(Task, body.task_id)
+    if agent is None or task is None:
+        raise HTTPException(status_code=404, detail="Employee or task not found")
+    if task.status != "queued" or task.task_type != "implementation":
+        raise HTTPException(status_code=409, detail={"code": "task_not_queued", "message": "Only queued implementation tasks can be assigned."})
+    task.assigned_agent_id = agent.id
+    task.execution_mode = "manual"
+    db.add(AuditLog(actor=user.email, action="arena.task_assigned", resource_type="task", resource_id=task.id,
+                    details={"agent_id": agent.id}))
+    await db.commit()
+    await event_bus.emit("task.updated", {"task_id": task.id, "status": task.status, "assigned_agent_id": agent.id})
+    return {"task_id": task.id, "agent_id": agent.id, "status": task.status}
+
+
 @router.put("/arena/agents/{agent_id}/mode", dependencies=[Depends(require_role("admin", "operator"))])
 async def set_agent_mode(agent_id: str, body: ArenaModeBody, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     agent = await db.get(Agent, agent_id)

@@ -68,6 +68,8 @@ NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is esca
 NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
+LIVE_CODE_MIN_SECONDS = 10.0   # at most one GitHub live-diff publish per session per interval
+LIVE_CODE_MAX_FILES = 20       # files streamed per new head (the summary lists all of them)
 
 
 def _now() -> datetime:
@@ -94,6 +96,31 @@ async def arena_reservations(db: AsyncSession) -> dict[str, str]:
     return {s.agent_id: s.task_id for s in rows if s.task_id}
 
 
+def live_diff_summary(session: ArenaSession, parent: Task, changes: dict[str, Any]) -> dict[str, Any]:
+    from app.runtime.code_stream import is_streamable_path
+
+    files = [
+        {"filename": f["filename"], "status": f["status"], "additions": f["additions"], "deletions": f["deletions"]}
+        for f in changes.get("files", []) if is_streamable_path(f["filename"])
+    ]
+    return {
+        "session_id": session.id,
+        "agent_id": session.agent_id,
+        "task_id": parent.id,
+        "branch": session.branch_name,
+        "pr_url": session.pr_url,
+        "head_sha": changes.get("head_sha") or session.head_sha,
+        "compare_url": changes.get("html_url"),
+        "ahead_by": changes.get("ahead_by", 0),
+        "additions": sum(f["additions"] for f in files),
+        "deletions": sum(f["deletions"] for f in files),
+        "commits": [{"sha": c["sha"][:12], "message": redact_secrets(c["message"])[:200]} for c in changes.get("commits", [])][-20:],
+        "files": files,
+        "hidden_files": len(changes.get("files", [])) - len(files),
+        "at": _now().isoformat(),
+    }
+
+
 class ArenaAgentRunner:
     def __init__(self, adapter: ArenaAgentAdapter | None = None) -> None:
         self.adapter = adapter or ArenaAgentAdapter()
@@ -101,6 +128,12 @@ class ArenaAgentRunner:
         self.stall_minutes = float(STALL_MINUTES)
         self._github_checked: dict[str, float] = {}
         self._quiet_misses: dict[str, int] = {}
+        # R4 live code: per session, the last published head, publish time, file patch hashes and summary.
+        self.live_code_seconds = LIVE_CODE_MIN_SECONDS
+        self._live_head: dict[str, str] = {}
+        self._live_at: dict[str, float] = {}
+        self._live_files: dict[str, dict[str, int]] = {}
+        self._live_summary: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -319,7 +352,56 @@ class ArenaAgentRunner:
             append_event(session, "new_commits", head[:12], previous=previous[:12] if previous else None)
             await event_bus.emit("arena.commits", {"session_id": session.id, "task_id": parent.id, "agent_id": session.agent_id,
                                                    "branch": session.branch_name, "head_sha": head})
+        if head and self._live_head.get(session.id) != head:
+            await self.publish_live_code(session, parent, project)
         return {"ok": True, "pr": pr}
+
+    # ------------------------------------------------------------------ R4 live code
+    async def publish_live_code(self, session: ArenaSession, parent: Task, project: Project | None, *, force: bool = False) -> dict[str, Any]:
+        """Stream the branch's changes against the base as redacted ``agent.code`` frames (throttled)."""
+        from app.runtime.code_stream import build_github_frame, code_stream
+
+        now = time.monotonic()
+        if not force and now - self._live_at.get(session.id, -1e9) < self.live_code_seconds:
+            return {"throttled": True}
+        changes = await self._compare(project, session)
+        if not changes.get("ok"):
+            return {"ok": False}
+        self._live_at[session.id] = now
+        self._live_head[session.id] = changes.get("head_sha") or session.head_sha or ""
+        seen = self._live_files.setdefault(session.id, {})
+        published = 0
+        for f in changes.get("files", []):
+            digest = hash((f["status"], f.get("patch", ""), f["additions"], f["deletions"]))
+            if seen.get(f["filename"]) == digest or published >= LIVE_CODE_MAX_FILES:
+                continue  # unchanged since the last publish: no repeated update
+            seen[f["filename"]] = digest
+            frame = build_github_frame(
+                agent_id=session.agent_id, task_id=parent.id, branch=session.branch_name or "", filename=f["filename"],
+                patch=f.get("patch", ""), file_status=f["status"], additions=f["additions"], deletions=f["deletions"],
+                head_sha=session.head_sha, compare_url=changes.get("html_url"),
+            )
+            if frame is not None:
+                await code_stream.publish(frame)
+                published += 1
+        summary = live_diff_summary(session, parent, changes)
+        self._live_summary[session.id] = summary
+        await event_bus.emit("arena.live_diff", {k: v for k, v in summary.items() if k != "files"} | {"files": summary["files"][:50]})
+        return {"ok": True, "published": published, "files": len(changes.get("files", []))}
+
+    async def live_diff(self, db: AsyncSession, session: ArenaSession, *, refresh: bool = False) -> dict[str, Any]:
+        """Latest live-diff summary for the dashboard (refreshed from GitHub on request)."""
+        parent = await db.get(Task, session.task_id) if session.task_id else None
+        if parent is None:
+            return {"ok": False, "error": "Task not found."}
+        if refresh or session.id not in self._live_summary:
+            if not session.branch_name:
+                return {"ok": False, "error": "No GitHub branch is associated with this session yet.", "session_id": session.id}
+            changes = await self._compare(await self._project(db, parent), session)
+            if not changes.get("ok"):
+                return {"ok": False, "error": "GitHub compare failed.", "session_id": session.id}
+            self._live_summary[session.id] = live_diff_summary(session, parent, changes)
+        return {"ok": True, **self._live_summary[session.id]}
 
     async def _associate_pr(self, db: AsyncSession, session: ArenaSession, parent: Task, project: Project | None, pr: dict[str, Any]) -> None:
         session.pr_number = int(pr.get("number") or 0) or None
@@ -558,7 +640,8 @@ class ArenaAgentRunner:
         session = await session_for_task(db, task.id)
         if session is not None and session.is_open:
             await close_session(db, session, phase="merged", reason="PR merged after owner approval; next task starts a new session")
-        self._github_checked.pop(session.id if session else "", None)
+        for cache in (self._github_checked, self._live_head, self._live_at, self._live_files):
+            cache.pop(session.id if session else "", None)
 
 
 arena_runner = ArenaAgentRunner()

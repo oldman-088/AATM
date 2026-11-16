@@ -238,13 +238,19 @@ async def arena_agent_overview(db: AsyncSession) -> dict[str, Any]:
             "last_error": live.get("last_error"),
             "session": session_dict(session),
             "task": {"id": task.id, "title": task.title, "status": task.status} if task else None,
+            "human_events": [e for e in (session.events or []) if str(e.get("kind", "")).startswith(("needs_human", "escalated", "merged_outside"))][-10:]
+            if session else [],
         })
     sessions = list((await db.execute(select(ArenaSession))).scalars())
     tasks = [s.task_id for s in sessions if s.task_id]
     task_rows = list((await db.execute(select(Task).where(Task.id.in_(tasks))))) if tasks else []
     statuses = [row[0].status for row in task_rows]
+    distribution: dict[str, int] = {}
+    for status in statuses:
+        distribution[status] = distribution.get(status, 0) + 1
     return {
         "gate": gate,
+        "task_distribution": distribution,
         "counts": {
             "profiles": len(rows),
             "agent_mode_profiles": sum(1 for r in rows if r["arena_mode"] == "agent"),

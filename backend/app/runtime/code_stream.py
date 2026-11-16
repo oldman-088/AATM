@@ -299,6 +299,77 @@ def build_review_frame(*, agent_id: str, task_id: str | None, body: str, event: 
     return frame
 
 
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(.*)$")
+
+
+def parse_unified_patch(patch: str, *, max_lines: int = 240) -> list[dict[str, str]]:
+    """GitHub compare ``patch`` (unified diff hunks) -> the same add/del/ctx/gap lines as ``diff_lines``."""
+    out: list[dict[str, str]] = []
+    for line in (patch or "").splitlines():
+        if line.startswith("\\"):
+            continue  # "\ No newline at end of file"
+        hunk = _HUNK_RE.match(line)
+        if hunk:
+            out.append({"type": "gap", "text": f"@@{hunk.group(1)}".rstrip() if hunk.group(1).strip() else "@@"})
+        elif line.startswith("+"):
+            out.append({"type": "add", "text": line[1:]})
+        elif line.startswith("-"):
+            out.append({"type": "del", "text": line[1:]})
+        else:
+            out.append({"type": "ctx", "text": line[1:] if line.startswith(" ") else line})
+        if len(out) >= max_lines:
+            out.append({"type": "gap", "text": "… diff truncated …"})
+            break
+    return out
+
+
+def build_github_frame(
+    *,
+    agent_id: str,
+    task_id: str | None,
+    branch: str,
+    filename: str,
+    patch: str,
+    file_status: str = "modified",
+    additions: int = 0,
+    deletions: int = 0,
+    head_sha: str | None = None,
+    compare_url: str | None = None,
+) -> dict[str, Any] | None:
+    """Frame for a file an Arena Agent changed on its GitHub branch (from the compare API).
+
+    Same safety contract as workspace writes: sensitive paths are never streamed, the patch is
+    redacted and clipped, and a patch that still looks like it carries a credential is dropped.
+    """
+    if not is_streamable_path(filename):
+        return None
+    text, truncated, dropped = _safe_text(patch or "", max_lines=MAX_FRAME_LINES, max_bytes=MAX_FRAME_BYTES)
+    if dropped:
+        return None
+    frame = _base_frame({"agent_id": agent_id, "task_id": task_id, "action": "edit"})
+    if frame is None:
+        return None
+    diff = parse_unified_patch(text)
+    frame.update(
+        {
+            "source": "arena_github",
+            "path": filename,
+            "language": language_for(filename),
+            "content": "",
+            "diff": diff,
+            "lines": len(diff),
+            "truncated": truncated,
+            "branch": branch,
+            "file_status": file_status,
+            "additions": int(additions),
+            "deletions": int(deletions),
+            "commit": (head_sha or "")[:40] or None,
+            "compare_url": compare_url,
+        }
+    )
+    return frame
+
+
 class CodeStream:
     """Per-agent bounded buffer plus a throttled/batched publisher."""
 
@@ -461,6 +532,7 @@ __all__ = [
     "CodeStream",
     "MAX_FRAME_BYTES",
     "MAX_FRAME_LINES",
+    "build_github_frame",
     "build_review_frame",
     "build_test_frame",
     "build_write_frame",
@@ -468,6 +540,7 @@ __all__ = [
     "diff_lines",
     "is_streamable_path",
     "language_for",
+    "parse_unified_patch",
     "redact_frame_text",
     "still_looks_secret",
 ]
