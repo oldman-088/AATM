@@ -76,6 +76,9 @@ export interface Translations {
     shared: string
     tasksLabel: string
     previewHint: string
+    liveConnected: string
+    liveConnecting: string
+    liveOffline: string
   }
   dashboard: {
     title: string
@@ -225,6 +228,10 @@ export interface Translations {
     filesScanned: string
     findings: string
     triggerSelfHeal: string
+    securityPosture: string
+    headersEnforced: string
+    warningsCount: string
+    pendingPasswordChanges: string
   }
   approvals: {
     title: string

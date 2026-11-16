@@ -214,6 +214,23 @@ export const fixtures: Record<string, RouteValue> = {
     security_scan: { status: 'passed', files_scanned: 42, findings: [] },
     intelligence: { recommendations: ['No blocking findings'] },
   },
+  '/api/v1/governance/security-posture': {
+    environment: 'development',
+    sandbox: { mode: 'process', status: 'READY' },
+    users_requiring_password_change: 0,
+    pending_approvals: 0,
+    security_warnings_count: 1,
+    active_devices: 1,
+    offline_or_degraded_devices: 0,
+    headers_enforced: [
+      'X-Content-Type-Options',
+      'X-Frame-Options',
+      'Referrer-Policy',
+      'Permissions-Policy',
+      'Content-Security-Policy',
+    ],
+  },
+  '/api/v1/auth/logout': { ok: true },
   '/api/v1/approvals': (path: string, init: RequestInit) => {
     if ((init.method || 'GET').toUpperCase() === 'POST') {
       const body = JSON.parse(String(init.body || '{}'))

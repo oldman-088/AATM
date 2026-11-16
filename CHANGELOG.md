@@ -2,6 +2,14 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.6.0-phase7] - 2026-11-16 — Phase 7: Frontend UX, RTL/LTR & Real Live Status
+
+### Added
+- **Full 12-Tab Mobile Navigation**: Replaced truncated 6-tab mobile header nav with a full 12-tab horizontally scrollable navigation bar in `App.tsx`.
+- **Real WebSocket Live Status & Auto-Reconnect**: Added `wsStatus` (`live` / `connecting` / `offline`) indicator badge in the workspace header driven by real `/ws/events` `auth.ok` frames with reconnect backoff.
+- **Crisp Light-Mode Surface Palette**: Added `html.light` contrast rules in `frontend/src/index.css` so toggling Light ↔ Dark updates surfaces, borders, and typography across views.
+- **Runtime Security Posture Card in QAView**: Wired `GET /api/v1/governance/security-posture` into `QAView` with localized EN/AR/FA labels.
+
 ## [2.6.0-phase6] - 2026-11-16 — Phase 6: Security & Governance Hardening
 
 ### Added

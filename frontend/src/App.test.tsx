@@ -809,4 +809,26 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
     })
     expect(await screen.findByText(/Connected to claude-sonnet-4-5 in 42\.5 ms/)).toBeInTheDocument()
   })
+
+  it('Phase 7: renders all 12 mobile navigation tabs, toggles light mode, and displays QA security posture', async () => {
+    installFetchMock()
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+    await renderWorkspace()
+
+    // Mobile navigation container exposes all 12 tabs
+    const mobileNav = await screen.findByLabelText('Mobile navigation')
+    expect(mobileNav.querySelectorAll('button')).toHaveLength(12)
+
+    // Light/dark theme toggle updates root element class cleanly
+    const themeBtn = screen.getByRole('button', { name: /Theme Mode/i })
+    fireEvent.click(themeBtn)
+    expect(document.documentElement.classList.contains('light')).toBe(true)
+    fireEvent.click(themeBtn)
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+
+    // QA view displays Runtime Security Posture from /governance/security-posture
+    fireEvent.click(navButton('Monitoring, QA & Devices'))
+    expect(await screen.findByText('Runtime Security Posture')).toBeInTheDocument()
+    expect(screen.getByText(/HTTP Headers Enforced/)).toBeInTheDocument()
+  })
 })

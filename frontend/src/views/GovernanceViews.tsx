@@ -5,7 +5,15 @@ import { useI18n } from '../i18n/I18nContext'
 import type { Language } from '../i18n/types'
 import { apiFetch } from '../lib/api'
 
-export function QAView({ qaData, onReload }: { qaData: any; onReload: () => void }) {
+export function QAView({
+  qaData,
+  securityPosture,
+  onReload,
+}: {
+  qaData: any
+  securityPosture?: any
+  onReload: () => void
+}) {
   const { t, formatNumber } = useI18n()
   if (!qaData) return null
 
@@ -54,6 +62,30 @@ export function QAView({ qaData, onReload }: { qaData: any; onReload: () => void
           </ul>
         </Card>
       </div>
+
+      {securityPosture && (
+        <Card className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold text-white">{t.qa.securityPosture}</span>
+            <Badge variant="info">{securityPosture.environment}</Badge>
+          </div>
+          <div className="grid gap-2 text-xs text-slate-300 sm:grid-cols-3">
+            <div>
+              {t.qa.warningsCount}: <span className="font-semibold text-amber-300">{formatNumber(securityPosture.security_warnings_count || 0)}</span>
+            </div>
+            <div>
+              {t.qa.pendingPasswordChanges}:{' '}
+              <span className="font-semibold text-sky-300">{formatNumber(securityPosture.users_requiring_password_change || 0)}</span>
+            </div>
+            <div>
+              {t.qa.headersEnforced}:{' '}
+              <span className="font-mono text-emerald-400">
+                {Array.isArray(securityPosture.headers_enforced) ? formatNumber(securityPosture.headers_enforced.length) : 0}
+              </span>
+            </div>
+          </div>
+        </Card>
+      )}
     </div>
   )
 }
