@@ -1,13 +1,8 @@
 import asyncio
 import base64
-import html
-import ipaddress
 import json
 import os
-import re
-import shutil
-import socket
-from datetime import datetime, timezone
+import socket  # noqa: F401 - patched as app.browser.manager.socket in tests
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -17,6 +12,24 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Re-exported: tests and callers patch/import these through ``app.browser.manager``, and the
+# BrowserManager methods below resolve them via this module's globals.
+from app.browser.capabilities import _candidate_playwright_cache_dirs, detect_playwright_capabilities  # noqa: E402,F401
+from app.browser.safety import (  # noqa: E402,F401
+    BLOCKED_LOCAL_HOST_SUFFIXES,
+    MAX_EXTRACT_CHARS,
+    MAX_FILL_VALUE_LENGTH,
+    MAX_SELECTOR_LENGTH,
+    PROHIBITED_SELECTOR_RE,
+    SENSITIVE_TEXT_PATTERNS,
+    SSRF_DNS_TIMEOUT_SECONDS,
+    _require_public_ip,
+    redact_extracted_text,
+    validate_navigation_url,
+    validate_public_navigation_url,
+    validate_selector,
+)
+from app.browser.wall import render_browser_wall_svg  # noqa: E402,F401
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
@@ -28,236 +41,23 @@ SAFE_CHROMIUM_ARGS = [
     "--no-default-browser-check",
 ]
 
-MAX_SELECTOR_LENGTH = 512
-MAX_FILL_VALUE_LENGTH = 50_000
-MAX_EXTRACT_CHARS = 20_000
-PROHIBITED_SELECTOR_RE = re.compile(
-    r"(captcha|recaptcha|hcaptcha|turnstile|arkose|funcaptcha|geetest|cf-turnstile|g-recaptcha|h-captcha|px-captcha|datadome|challenge-form|javascript:|<script)",
-    re.IGNORECASE,
-)
-
-SENSITIVE_TEXT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE), "Bearer <redacted>"),
-    (re.compile(r"\bAuthorization\s*:\s*[^\s,;\"']+(?:\s+[^\s,;\"']+)?", re.IGNORECASE), "Authorization: <redacted>"),
-    (
-        re.compile(
-            r"\b((?:cookie|set-cookie|sessionid|session_id|csrftoken|cf_clearance|access_token|refresh_token|id_token|api_key|apikey|jwt|auth_token|password|passwd|secret)\s*[=:]\s*)([^\s;,&\"']+)",
-            re.IGNORECASE,
-        ),
-        r"\1<redacted>",
-    ),
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "<redacted>"),
-    (re.compile(r"\b(?:sk-(?:ant-|proj-)?|ghp_|gho_|github_pat_|xox[baprs]-|AIza|AKIA)[A-Za-z0-9_-]{12,}\b"), "<redacted>"),
-]
 
 
-def redact_extracted_text(text: str) -> tuple[str, int]:
-    """Mask sensitive token, cookie, JWT, and credential patterns in extracted DOM text."""
-    if not text:
-        return "", 0
-    redacted = text
-    total_hits = 0
-    for pattern, replacement in SENSITIVE_TEXT_PATTERNS:
-        redacted, count = pattern.subn(replacement, redacted)
-        total_hits += count
-    return redacted, total_hits
 
 
-def validate_selector(selector: str) -> str:
-    """Validate DOM selectors for safe page interaction; block CAPTCHA/anti-bot challenge targets."""
-    if not isinstance(selector, str):
-        raise ValueError("Selector must be a non-empty string.")
-    cleaned = selector.strip()
-    if not cleaned:
-        raise ValueError("Selector cannot be empty.")
-    if len(cleaned) > MAX_SELECTOR_LENGTH:
-        raise ValueError(f"Selector exceeds maximum allowed length ({MAX_SELECTOR_LENGTH} chars).")
-    if PROHIBITED_SELECTOR_RE.search(cleaned):
-        raise ValueError(
-            "Policy violation: selector targets a prohibited CAPTCHA/anti-bot challenge or script pattern."
-        )
-    return cleaned
 
 
-def validate_navigation_url(url: str) -> str:
-    """Allow only safe web navigation schemes (http, https, about:blank)."""
-    cleaned = (url or "").strip()
-    if not cleaned or cleaned == "about:blank":
-        return "about:blank"
-    parsed = urlparse(cleaned)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(
-            f"Blocked unsafe navigation URL scheme '{parsed.scheme or 'none'}': only http://, https://, and about:blank are allowed."
-        )
-    return cleaned
 
 
-SSRF_DNS_TIMEOUT_SECONDS = 3.0
-BLOCKED_LOCAL_HOST_SUFFIXES = (".localhost", ".local", ".internal")
 
 
-def _require_public_ip(raw_address: str) -> None:
-    try:
-        address = ipaddress.ip_address(raw_address.split("%", 1)[0])
-    except ValueError as exc:
-        raise ValueError("Navigation target resolved to an invalid IP address.") from exc
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    if not address.is_global:
-        raise ValueError("Navigation to loopback, private, link-local, or reserved IP addresses is blocked.")
-
-async def validate_public_navigation_url(url: str) -> str:
-    """Reject credentials and non-public destinations, including DNS names resolving to private IPs."""
-    safe_url = validate_navigation_url(url)
-    if safe_url == "about:blank":
-        return safe_url
-    parsed = urlparse(safe_url)
-    host = (parsed.hostname or "").rstrip(".").lower()
-    if not host or parsed.username is not None or parsed.password is not None:
-        raise ValueError("Navigation URLs must have a hostname and must not contain embedded credentials.")
-    if host == "localhost" or host.endswith(BLOCKED_LOCAL_HOST_SUFFIXES):
-        raise ValueError("Navigation to local or internal hostnames is blocked.")
-    try:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    except ValueError as exc:
-        raise ValueError("Navigation URL contains an invalid port.") from exc
-
-    try:
-        literal_address = ipaddress.ip_address(host)
-    except ValueError:
-        literal_address = None
-    if literal_address is not None:
-        _require_public_ip(str(literal_address))
-        return safe_url
-
-    loop = asyncio.get_running_loop()
-    try:
-        records = await asyncio.wait_for(
-            loop.run_in_executor(None, socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM),
-            timeout=SSRF_DNS_TIMEOUT_SECONDS,
-        )
-    except (OSError, TimeoutError) as exc:
-        raise ValueError("Navigation hostname could not be resolved safely.") from exc
-    addresses = {str(record[4][0]) for record in records if record and len(record) > 4 and record[4]}
-    if not addresses:
-        raise ValueError("Navigation hostname did not resolve to an address.")
-    for address in addresses:
-        _require_public_ip(address)
-    return safe_url
-
-def _candidate_playwright_cache_dirs() -> list[Path]:
-    dirs: list[Path] = []
-    env_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-    if env_path and env_path != "0":
-        dirs.append(Path(env_path))
-    dirs.append(Path.home() / ".cache" / "ms-playwright")
-    dirs.append(Path("/root/.cache/ms-playwright"))
-    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        dirs.append(Path(local_app_data) / "ms-playwright")
-    dirs.append(Path.home() / "Library" / "Caches" / "ms-playwright")
-
-    seen: set[str] = set()
-    unique: list[Path] = []
-    for d in dirs:
-        key = str(d)
-        if key not in seen:
-            seen.add(key)
-            unique.append(d)
-    return unique
 
 
-def detect_playwright_capabilities() -> dict[str, Any]:
-    playwright_pkg = False
-    chromium_installed = False
-    executable_path: str | None = None
-    browser_source: str | None = None
-    try:
-        import playwright  # noqa: F401
-        from playwright.sync_api import sync_playwright
-
-        playwright_pkg = True
-
-        # Search Playwright browser caches across Linux, Windows 11, and macOS without launching a browser
-        preferred_names = ("chrome", "chrome.exe", "headless_shell", "headless_shell.exe")
-        for cdir in _candidate_playwright_cache_dirs():
-            if not cdir.exists():
-                continue
-            for exe_name in preferred_names:
-                for candidate in cdir.rglob(exe_name):
-                    if candidate.is_file() and (exe_name.endswith(".exe") or os.access(candidate, os.X_OK)):
-                        chromium_installed = True
-                        executable_path = str(candidate)
-                        browser_source = "playwright_cache"
-                        break
-                if chromium_installed:
-                    break
-            if chromium_installed:
-                break
-
-        if not chromium_installed:
-            for bin_name in ("chromium", "chromium-browser", "google-chrome", "chrome", "msedge"):
-                found = shutil.which(bin_name)
-                if found:
-                    chromium_installed = True
-                    executable_path = found
-                    browser_source = "system_binary"
-                    break
-        _ = sync_playwright
-    except Exception:
-        pass
-
-    return {
-        "playwright_installed": playwright_pkg,
-        "chromium_installed": chromium_installed,
-        "executable_path": executable_path,
-        "engine_mode": "playwright" if chromium_installed else "not_implemented",
-        "browser_source": browser_source,
-        "playwright_browsers_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or None,
-    }
 
 
-def render_browser_wall_svg(profile: BrowserProfile, note: str = "") -> str:
-    url = html.escape(profile.current_url or "about:blank")
-    title = html.escape(profile.page_title or profile.name)
-    name = html.escape(profile.name)
-    status = html.escape(profile.status)
-    mode = html.escape(profile.mode or "unavailable")
-    agent = html.escape(profile.agent_id or "unassigned")
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    status_color = {
-        "running": "#22c55e",
-        "ready": "#38bdf8",
-        "locked": "#f59e0b",
-        "crashed": "#ef4444",
-        "stopped": "#64748b",
-    }.get(profile.status, "#38bdf8")
 
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 380" width="640" height="380">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#1e293b"/>
-    </linearGradient>
-  </defs>
-  <rect width="640" height="380" rx="12" fill="url(#bg)"/>
-  <rect x="0" y="0" width="640" height="44" rx="12" fill="#0b1220"/>
-  <circle cx="22" cy="22" r="6" fill="#ef4444"/>
-  <circle cx="42" cy="22" r="6" fill="#f59e0b"/>
-  <circle cx="62" cy="22" r="6" fill="#22c55e"/>
-  <rect x="86" y="10" width="410" height="24" rx="6" fill="#1e293b" stroke="#334155"/>
-  <text x="98" y="26" fill="#cbd5e1" font-family="monospace" font-size="11">{url[:56]}</text>
-  <rect x="510" y="11" width="114" height="22" rx="11" fill="{status_color}" fill-opacity="0.2" stroke="{status_color}"/>
-  <text x="567" y="26" text-anchor="middle" fill="{status_color}" font-family="sans-serif" font-size="11" font-weight="bold">{status.upper()}</text>
-  <text x="28" y="84" fill="#f8fafc" font-family="sans-serif" font-size="20" font-weight="bold">{title[:42]}</text>
-  <text x="28" y="110" fill="#94a3b8" font-family="sans-serif" font-size="13">Profile: {name} • Mode: {mode} • Agent: {agent}</text>
-  <rect x="28" y="136" width="584" height="176" rx="8" fill="#0b1220" stroke="#334155"/>
-  <text x="46" y="168" fill="#38bdf8" font-family="monospace" font-size="13">Persistent Dir: {html.escape(profile.profile_dir[-54:])}</text>
-  <text x="46" y="196" fill="#e2e8f0" font-family="monospace" font-size="12">Engine: {html.escape(profile.engine_mode or "unavailable")} | Viewport: {profile.viewport_width}x{profile.viewport_height}</text>
-  <text x="46" y="224" fill="#e2e8f0" font-family="monospace" font-size="12">Memory: not measured | Crashes: {profile.crash_count} | Heartbeat: {ts}</text>
-  <text x="46" y="262" fill="#94a3b8" font-family="sans-serif" font-size="12">{html.escape(note or 'Isolated Chromium persistent profile active and monitored by Browser Wall.')}</text>
-  <text x="28" y="352" fill="#64748b" font-family="monospace" font-size="11">AATM Browser Wall • Profile ID: {html.escape(profile.id)}</text>
-</svg>"""
+
+
 
 
 class BrowserManager:

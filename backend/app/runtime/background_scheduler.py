@@ -83,10 +83,16 @@ class BackgroundScheduler:
             raise
 
     async def _run_orchestration_cycle(self) -> None:
+        from app.coordination import LockNotAcquired, get_coordinator
+
         try:
-            async with self.session_factory() as db:
-                result = await self.scheduler.run_orchestration_cycle(db)
+            # With REDIS_URL set, only one backend process runs a dispatch cycle at a time.
+            async with get_coordinator().lock("orchestration-cycle", ttl_seconds=max(30.0, self.interval_seconds * 6)):
+                async with self.session_factory() as db:
+                    result = await self.scheduler.run_orchestration_cycle(db)
             logger.debug("Background orchestration cycle complete: %s", result)
+        except LockNotAcquired:
+            logger.debug("Another backend process holds the orchestration lock; skipping this interval")
         except asyncio.CancelledError:
             raise
         except Exception:

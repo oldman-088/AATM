@@ -1,3 +1,4 @@
+import asyncio
 import re
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.manager import browser_manager
+from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.models import Agent, AuditLog, BrowserProfile, Notification, Task
@@ -138,7 +140,7 @@ class QAAndIntelligenceEngine:
 
     @staticmethod
     def _tracked_files(root: Path) -> list[str] | None:
-        """List files tracked by git, or None when git/index is unavailable."""
+        """List files tracked by git, or None when git/index is unavailable (sync CLI path only)."""
         try:
             proc = subprocess.run(
                 ["git", "ls-files", "-z"],
@@ -171,8 +173,30 @@ class QAAndIntelligenceEngine:
         }
 
     # ---------------------------------------------------------------- secret scanning
-    def run_security_scan(self, repo_root: Path | str | None = None) -> dict[str, Any]:
-        """Scan the working tree and the git index for committed secrets and forbidden artifacts.
+    @staticmethod
+    async def _tracked_files_async(root: Path) -> list[str] | None:
+        """Async `git ls-files -z` for event-loop callers."""
+        result = await run_exec(["git", "ls-files", "-z"], cwd=root, timeout=15)
+        if result.returncode != 0:
+            return None
+        return [p for p in result.stdout.split("\0") if p]
+
+    async def run_security_scan_async(self, repo_root: Path | str | None = None) -> dict[str, Any]:
+        """Event-loop safe scan: git index via async subprocess, file scanning in a worker thread."""
+        root = Path(repo_root).resolve() if repo_root else get_settings().REPO_ROOT
+        tracked = await self._tracked_files_async(root)
+        return await asyncio.to_thread(self.run_security_scan, root, tracked_files=tracked, _use_given_index=True)
+
+    def run_security_scan(
+        self,
+        repo_root: Path | str | None = None,
+        *,
+        tracked_files: list[str] | None = None,
+        _use_given_index: bool = False,
+    ) -> dict[str, Any]:
+        """Synchronous scan for the CLI (`python -m app.qa.engine`) and worker threads only.
+
+        Scan the working tree and the git index for committed secrets and forbidden artifacts.
 
         Findings never contain the matched secret value - only the file, line and rule id -
         so that the scan output is safe to store in the audit trail.
@@ -258,7 +282,7 @@ class QAAndIntelligenceEngine:
                         _record(rule_id, severity, rel, self._line_of(text, match.start()), None)
 
         # --- forbidden artifacts, evaluated against the git index (what would be committed)
-        tracked = self._tracked_files(root)
+        tracked = tracked_files if _use_given_index else self._tracked_files(root)
         git_index_available = tracked is not None
         artifact_candidates = tracked if tracked is not None else sorted(scanned_paths)
         forbidden_artifacts: list[dict[str, Any]] = []
@@ -316,7 +340,7 @@ class QAAndIntelligenceEngine:
             "worker_count": len(workers),
             "idle_workers": idle_workers,
             "recommendations": recommendations,
-            "resources": self.get_system_resources(),
+            "resources": await asyncio.to_thread(self.get_system_resources),
         }
 
     # ---------------------------------------------------------------- self healing

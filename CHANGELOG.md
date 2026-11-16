@@ -2,6 +2,65 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.1.0] — 2026-11-16 (branch `aatm-complete`)
+
+### Security (A)
+- **Provider credential exfiltration fix**: `credential_ref` accepts only provider API-key env names (`*_API_KEY` or `PROVIDER_CREDENTIAL_ENV_ALLOWLIST`); server secrets (reusing `SENSITIVE_ENV_EXACT`) are always denied; `ARENA_BRIDGE_TOKEN` is bound to the local bridge; `endpoint_url` validated (http/https, no embedded credentials); operators limited to official presets, custom endpoints need admin; every test-connection is audited without the key. Applied to the wizard, provider upsert/test and account creation, plus a runtime deny-list in the adapters.
+- Arena provider accounts no longer default to `env:ARENA_SESSION_TOKEN` (Arena uses the human's own browser sign-in).
+
+### Added — Phase 4: Review, Merge and Completion (B)
+- **Reviewer employee** (reuses the `code_reviewer` template, role `reviewer`, created on first need, read-only). The manager's orchestration cycle turns every `pr_open` implementation task into a `review` task; the reviewer gets the branch diff (quarantined as untrusted data) and must finish with the new `review` action (`COMMENT` or `REQUEST_CHANGES` — AI reviewers can never approve).
+- `REQUEST_CHANGES` → `follow_up` task for the original employee on the same branch/worktree (review text quarantined), commits pushed, PR re-reviewed; capped by `MAX_REVIEW_ROUNDS` (default 2), then escalated to a human. GitHub refuses REQUEST_CHANGES on the account's own PR, so AATM falls back to a COMMENT review carrying the verdict.
+- **Approval-gated merge**: `ApprovalRequest(action_type="merge")` bound to repo + base branch + PR number + task; a human approval in the Approval Center runs `gh pr ready` + `gh pr merge --squash`; single use (replay refused), mismatched PR refused; task `approved → merged → done`, worktree cleaned.
+- **Project completion**: when all implementation tasks are done, the manager posts a factual summary (what was built, merged PRs, cost from `provider_usage_logs`, elapsed time) to the project chat and marks the project `completed`.
+- API: `GET /reviews/pull-requests`, `GET /reviews/tasks/{id}/diff`, `POST /reviews/tasks/{id}/request-merge`, `POST /reviews/tasks/{id}/merge`, `GET /projects/{id}/completion`. Migration `f5a6b7c8d9e0` (task_type, parent_task_id, review_round, project completed_at/completion_summary).
+
+### Changed — Phase 8: Memory, Docs and Code Health (F)
+- **Memory search on Postgres uses full-text search**: a GIN expression index (migration `b7c8d9e0f1a2`, `to_tsvector('simple', …)`, which keeps Arabic words intact), prefix matching, `ts_rank` ordering and unchanged scope/visibility rules. SQLite keeps the bounded keyword fallback. Embeddings (pgvector) are **not implemented**: `memory_engine.search_backend()` reports `embeddings: not_implemented`.
+- **Large files split without changing behavior or the API (122 operations identical)**:
+  - `providers/adapters.py` → `providers/adapters/` (one module per adapter plus `common.py`, with every old name re-exported);
+  - `runtime/agent_loop.py` → `AgentLoop` + mixins in `runtime/loop/` (`claim`, `context`, `actions`, `approvals`, `common`);
+  - `browser/manager.py` helpers → `browser/safety.py`, `capabilities.py` and `wall.py`;
+  - `api/routes/platform.py` → `platform_{employees,accounts,browsers,workspaces,ops,github}.py`, aggregated by `platform.py`.
+- **Docs consolidated** into `README.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY.md` (was `SECURITY_POLICY.md`, now with the security assessment and risk register) and `docs/OPERATIONS.md` (was `DEPLOYMENT.md`, now with the user guide, provider setup and known limitations).
+  - Removed after moving still-true content: `STATUS.txt`, `PROGRESS_LOG.txt`, `NEXT_ACTIONS.txt`, `BLOCKERS.txt`, `IMPLEMENTATION_STATUS.md`, and the audit/plan/roadmap/matrix/report docs in `docs/`.
+- **`scripts/demo_e2e.sh`**: runs the Phase 4 acceptance scenario on a throwaway GitHub repository with a local Ollama model, in an isolated backend. It has a `--check` mode and waits for a human to approve merges unless `--auto-approve` is given.
+
+### Added — Phase 7: Dashboard Matching the Infographic (E)
+- **Mission control** home: architecture strip (Dashboard → Orchestrator → Profiles → Results) and live counters (active employees, tasks per status, open PRs, today's cost vs `DAILY_BUDGET_USD`, profiles needing a human) from `GET /dashboard/home`.
+- **8-step workflow timeline** per project (`GET /projects/{id}/timeline`): request → analyze & split → distribute by specialty → isolated execution → results collected → PR created → review & merge → completed. Each step is `done`/`active`/`pending` from real task, PR, review and project-completion rows; with no evidence everything stays pending.
+- **Colored employee cards** (`GET /dashboard/employees`): role, model/provider, profile and connector status, current task, last action, cost from `provider_usage_logs`; buttons **Pause** (no new tasks), **Emergency stop** (employee scope) and **Replace**.
+- **Live agent log**: every persisted iteration is also emitted as an `agent.iteration` event on the authenticated `/ws/events` socket (the same redacted, bounded excerpt); `GET /dashboard/agent-log` gives the backlog.
+- **PR view** (Git tab): PRs with a colored diff viewer, reviewer results, **Request merge approval**, and **Merge** only after a human approved it in Approvals.
+- **Errors & recovery panel** (`GET /dashboard/recovery`): failed, blocked and retried tasks, employee replacements and `needs_human` sessions with **Resume**.
+- **Arabic RTL first**: first-time visitors get Arabic unless `VITE_DEFAULT_LANGUAGE` says otherwise; a saved choice still wins. EN/AR/FA strings for every new view.
+- Not implemented from plan Phase 7 item 7 (outside this item's scope): React Router, TanStack Query and moving the JWT from `localStorage` to memory plus an httpOnly refresh cookie.
+
+### Added — Phase 6: Profiles Manager + Arena Browser Connector (D)
+- **Real Arena is OFF by default.** Every real-Arena path (provider calls, userscript generation, bridge registration, "open for sign-in") returns `not_enabled` unless `ARENA_CONNECTOR_ENABLED=true`, `ARENA_AUTOMATION_APPROVED=true` and a non-empty `ARENA_APPROVAL_REFERENCE` are set; the bridge checks the same three flags in its own environment before it accepts a non-loopback origin. The UI shows "Waiting for Arena approval". `ARENA_MOCK_URL` (loopback only) enables the connector against the local mock page served at `/mock-arena/` for testing.
+- **Profiles Manager**: one persistent profile per employee under `BROWSER_PROFILES_DIR/<agent_id>` (visible mode, for manual sign-in), created with the employee and closed on scale-down. `GET /arena/profiles` feeds the Browser Wall (color, status, URL, snapshot, lock, connector health). The `browser_use`/`openbrowser` engines are relabelled as Playwright name aliases.
+- **Arena browser connector**: a Tampermonkey userscript (generated per profile, `@grant none`, `@noframes`, `@match` only the mock URL plus approved Arena domains; reviewed and installed manually by a human) connects to the bridge WebSocket `/v1/connector` with a per-profile rotatable token (only its SHA-256 is stored; the stored copy of the script is redacted). New provider mode `arena_browser` (provider `arena-browser`, created on first use) returns an OpenAI-compatible completion with session-isolation headers. It is the default for workers with a profile once the connector is enabled. Connector health is shown in bridge `/v1/sessions`.
+- **Human-in-the-loop safety**: one in-flight request per profile, a minimum delay (`ARENA_MIN_REQUEST_INTERVAL_SECONDS`), a daily cap (`ARENA_DAILY_CAP_PER_PROFILE`, which survives token rotation), and no account pooling or rotation. Any human-verification element, verification page, rate-limit or terms prompt stops that profile with `needs_human`: the task is blocked, a critical notification is raised, and there is no failover to paid providers. After the human resolves it in the browser, `POST /arena/profiles/{id}/resume` re-queues the task. The connector never solves or bypasses checks, never reads cookies or storage, and AATM never injects scripts (`run_userscript` stays 501).
+- Owner-configurable real-Arena DOM selectors (`ARENA_DOM_SELECTORS`, JSON), sent to the userscript as data. `scripts/ubuntu/start.sh` now also starts the loopback bridge (`ARENA_BRIDGE_AUTOSTART=false` to skip). Migration `a6b7c8d9e0f1` adds the connector fields to `browser_profiles`.
+- The pre-existing `arena_agent` stub is unchanged (still reports not implemented); the working connector is the new `arena_browser` provider type.
+
+### Added — Phase 5: True Parallelism (C)
+- **Default team = 1 manager + 4 parallel workers** (`DEFAULT_ACTIVE_WORKERS=4`, `AGENT_MAX_PARALLEL=4`), each with its own browser profile. `ARENA_BRIDGE_MAX_CONCURRENCY` (default 1) is now a **per-profile/account** in-flight limit, so four profiles run in parallel while each profile keeps one request in flight.
+- **Autoscaling** (`app/orchestration/autoscale.py`): when >= `SCALE_UP_BACKLOG_THRESHOLD` (3) ready tasks waited >= `SCALE_UP_WAIT_SECONDS` (120) and no worker is idle, `AUTO_SCALE_MODE=approval` (default) opens one `scale_up` spend ApprovalRequest; workers are created only after a human approves it (single use). `automatic` creates them directly (audited); `off` disables scaling. Never exceeds `MAX_CONCURRENT_WORKERS` (25). Extra workers idle for `SCALE_DOWN_IDLE_MINUTES` (30) are disabled and reused later; default workers are never removed.
+- **Message broker wake bus** (`app/queue/`): RabbitMQ via aio-pika (durable `aatm.tasks.<device_id>`, `aatm.manager`, `aatm.events`, dead-letter exchange `aatm.dlx` → `aatm.dead_letter`, ack after the claim committed) → Postgres `LISTEN/NOTIFY` fallback → in-process. The atomic `UPDATE … RETURNING` claim stays the source of truth, so duplicate or redelivered wakes never cause double execution; the agent loop still polls when the broker is down.
+- **Redis coordination** (`app/coordination/`, optional): distributed locks (one orchestration cycle at a time across backend processes), shared login rate limiting and WebSocket event fan-out; in-process fallback when `REDIS_URL` is unset.
+- **Per-provider concurrency limits** (`PROVIDER_CONCURRENCY_LIMITS="id=N,…"`) around both normal and streaming provider calls.
+- **No blocking subprocess in async code**: GitHub client, git workflow manager, sandbox status, worker-daemon tool runner and the QA secret scan now use `asyncio.create_subprocess_exec` (`app/core/async_subprocess.run_exec`, with timeout kill). An AST guard test fails if `subprocess.run`/`time.sleep` appears inside an `async def`.
+- **Postgres by default**: `docker-compose.yml` now runs postgres, rabbitmq (AMQP + management UI on localhost only), redis (password required), backend, bridge and a scalable `worker` (`docker compose up --scale worker=N`). `scripts/ubuntu/install.sh` starts them and writes Postgres/RabbitMQ/Redis URLs into `.env` (pass `--sqlite` to stay on SQLite). The dashboard warns when more than 3 employees run on SQLite.
+- API: `GET /scaling/status`, `POST /scaling/workers` ("Add employee" → approval), `POST /scaling/scale-down`. UI: Team-size panel ("4 default + N extra", backlog, queue/coordination backend, SQLite warning, Add employee) in EN/AR/FA.
+- `scripts/load_test.py`: in-process load test (scripted model, no spend; checks exactly-once execution, no "database is locked", API p95) on SQLite or a throwaway Postgres, plus a read-only `--mode http` latency probe.
+
+### Performance
+- SQLite engine uses WAL + `synchronous=NORMAL` + `busy_timeout=30000`; adapters reuse one verified TLS context. Backend suite runtime 9 min → ~3 min and the flaky retry-latency budget test passes.
+
+### Docs
+- Added `docs/AATM_BUILD_PLAN.md` (source of truth); marked `AATM_MASTER_SPECIFICATION.md`, `docs/IMPLEMENTATION_ROADMAP.md`, `docs/DEVELOPMENT_PLAN.md` as SUPERSEDED.
+
 ## [3.0.0] - 2026-11-16 — Phase 8: Packaging, Installers, Docs & Release Verification
 
 ### Changed

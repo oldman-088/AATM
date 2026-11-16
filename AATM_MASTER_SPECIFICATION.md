@@ -1,3 +1,5 @@
+> **SUPERSEDED — see [docs/AATM_BUILD_PLAN.md](docs/AATM_BUILD_PLAN.md)** (phase numbering below is obsolete).
+
 # AATM – AI Agent Team Manager
 ## Master Project Prompt & Development Specification
 
@@ -130,10 +132,12 @@ Maintain these documents when relevant. Do not create empty documents merely to 
 - `docs/EXISTING_PROJECT_AUDIT.md` – baseline audit of the current repository.
 - `docs/ARCHITECTURE.md` – current and target architecture, including key decisions.
 - `docs/DEVELOPMENT_PLAN.md` – phases, milestones, owners, dependencies, and acceptance criteria.
-- `docs/TEAM_STRUCTURE.md` – human ownership and agent responsibilities.
-- `docs/SECURITY_POLICY.md` – permissions, secrets, threat model, and approval gates.
+- `docs/ARCHITECTURE.md` §5 – human ownership and agent responsibilities (was `docs/TEAM_STRUCTURE.md`).
+- `docs/SECURITY.md` – permissions, secrets, threat model, and approval gates (was `docs/SECURITY_POLICY.md`).
 - `docs/OPEN_SOURCE_INTEGRATION_REPORT.md` – evaluated third-party and open-source components.
-- `docs/KNOWN_LIMITATIONS.md` – verified limitations and deferred capabilities.
+- `docs/OPERATIONS.md` §11 – verified limitations and deferred capabilities (was `docs/KNOWN_LIMITATIONS.md`).
+
+> Phase 8 (docs/AATM_BUILD_PLAN.md) consolidated the documentation into `README.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY.md` and `docs/OPERATIONS.md`. The audit, development-plan and open-source-integration reports listed above were retired; their history remains in git.
 
 Keep documentation consistent with the implementation. Update it when architecture, commands, environment variables, workflows, or operational behavior changes.
 

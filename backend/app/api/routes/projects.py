@@ -166,7 +166,7 @@ async def create_memory(
 @router.get("/git/status")
 async def get_git_status(repo_path: str | None = None, db: AsyncSession = Depends(get_db)):
     validated_path = await _validate_registered_repo_path(repo_path, db)
-    info = git_workflow_manager.inspect_repo(validated_path)
+    info = await git_workflow_manager.inspect_repo(validated_path)
     recs = list((await db.execute(select(GitWorkflowRecord).order_by(GitWorkflowRecord.created_at.desc()))).scalars().all())
     return {
         "repository": info,

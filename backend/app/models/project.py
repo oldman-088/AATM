@@ -20,7 +20,9 @@ class Project(Base):
     protected_branches: Mapped[list] = mapped_column(JSON, default=lambda: ["main", "master", "production"], nullable=False)
     tech_stack: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)  # active | completed | archived
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completion_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

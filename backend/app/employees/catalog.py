@@ -89,7 +89,7 @@ async def allocate_account_and_session(
                 account_identifier=f"{agent_id}@{provider_id}.local",
                 allocation_mode=allocation_mode,
                 max_employees=1 if allocation_mode == "one_per_employee" else 8,
-                credential_ref="env:ARENA_SESSION_TOKEN" if "arena" in provider_id else "env:ANTHROPIC_API_KEY",
+                credential_ref=None if "arena" in provider_id else "env:ANTHROPIC_API_KEY",
                 status="active",
             )
             db.add(account)
@@ -138,8 +138,10 @@ async def create_dynamic_employee(
                 id=bp_id,
                 name=f"{name} Browser",
                 agent_id=emp_id,
-                profile_dir=str(settings.BROWSER_PROFILES_DIR / bp_id),
-                mode="background",
+                # Phase 6: one persistent profile per employee under BROWSER_PROFILES_DIR/<agent_id>,
+                # visible so the human signs in to Arena manually (AATM never handles credentials).
+                profile_dir=str(settings.BROWSER_PROFILES_DIR / emp_id),
+                mode="visible",
                 status="ready",
             )
         )

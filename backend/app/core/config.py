@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "AATM — AI Agent Team Manager"
-    APP_VERSION: str = "3.0.0"
+    APP_VERSION: str = "3.1.0"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
@@ -94,13 +94,16 @@ class Settings(BaseSettings):
     AGENT_LOOP_ENABLED: bool = True
     AGENT_LOOP_POLL_SECONDS: float = Field(default=3.0, gt=0)
     AGENT_MAX_ITERATIONS: int = Field(default=8, ge=1)
-    AGENT_MAX_PARALLEL: int = Field(default=1, ge=1)
+    AGENT_MAX_PARALLEL: int = Field(default=4, ge=1)
     AGENT_TASK_BUDGET_USD: float = Field(default=5.0, ge=0)
     SCHEDULER_INTERVAL_SECONDS: float = Field(default=5.0, gt=0)
     SELF_HEALING_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
     PROVIDER_MAX_RETRIES: int = Field(default=2, ge=0)
     PROVIDER_RETRY_AFTER_MAX_SECONDS: float = Field(default=30.0, ge=0)
     ANTHROPIC_API_KEY_REF: str = "env:ANTHROPIC_API_KEY"
+    # Extra env names (comma separated) accepted as provider credential_ref besides *_API_KEY.
+    # Server secrets are always rejected even when listed here.
+    PROVIDER_CREDENTIAL_ENV_ALLOWLIST: str = ""
     MONTHLY_BUDGET_USD: float = 100.0
     DAILY_BUDGET_USD: float = 20.0
 
@@ -120,13 +123,44 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def default_agent_parallel_from_bridge(self) -> "Settings":
+        # Phase 5: the default team runs DEFAULT_ACTIVE_WORKERS (4) employees in parallel.
+        # ARENA_BRIDGE_MAX_CONCURRENCY is a per-profile limit, so it never caps the team below that.
         if "AGENT_MAX_PARALLEL" not in self.model_fields_set:
-            self.AGENT_MAX_PARALLEL = max(1, self.ARENA_BRIDGE_MAX_CONCURRENCY)
+            self.AGENT_MAX_PARALLEL = max(self.DEFAULT_ACTIVE_WORKERS, self.ARENA_BRIDGE_MAX_CONCURRENCY)
         return self
 
     # Supports 20+ concurrent AI employees subject to host capacity
     MAX_CONCURRENT_WORKERS: int = 25
+    # Phase 6 - Arena browser connector (Tampermonkey userscript <-> local bridge).
+    # Real Arena is contacted ONLY when both flags are true AND an approval reference is recorded.
+    ARENA_CONNECTOR_ENABLED: bool = False
+    ARENA_AUTOMATION_APPROVED: bool = False
+    ARENA_APPROVAL_REFERENCE: str = ""
+    ARENA_DOMAINS: str = "arena.ai"
+    # Local mock Arena page for end-to-end testing at any time (e.g. http://127.0.0.1:4100/mock-arena/).
+    ARENA_MOCK_URL: str = ""
+    ARENA_MIN_REQUEST_INTERVAL_SECONDS: float = Field(default=20.0, ge=0)
+    ARENA_DAILY_CAP_PER_PROFILE: int = Field(default=100, ge=1)
+    ARENA_REPLY_TIMEOUT_SECONDS: float = Field(default=600.0, gt=0)
+    # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
+    ARENA_DOM_SELECTORS: str = ""
+    # Phase 5 - True parallelism / autoscaling
+    DEFAULT_ACTIVE_WORKERS: int = Field(default=4, ge=1)
+    AUTO_SCALE_MODE: str = Field(default="approval", pattern="^(approval|automatic|off)$")
+    SCALE_UP_BACKLOG_THRESHOLD: int = Field(default=3, ge=1)
+    SCALE_UP_WAIT_SECONDS: float = Field(default=120.0, ge=0)
+    SCALE_DOWN_IDLE_MINUTES: float = Field(default=30.0, ge=0)
+    SCALE_UP_STEP: int = Field(default=2, ge=1)
+    # Per-provider in-flight limits, e.g. "anthropic-claude=4,openai=8" (unset = unlimited).
+    PROVIDER_CONCURRENCY_LIMITS: str = ""
+    SQLITE_EMPLOYEE_WARNING_THRESHOLD: int = 3
+    # Message broker / coordination. auto: RabbitMQ if RABBITMQ_URL, else Postgres NOTIFY on Postgres, else memory.
+    QUEUE_BACKEND: str = Field(default="auto", pattern="^(auto|rabbitmq|postgres|memory)$")
+    RABBITMQ_URL: str = ""
+    REDIS_URL: str = ""
     MAX_CONCURRENT_BROWSERS: int = 10
+    # Phase 4: reviewer change-request rounds before the PR is escalated to a human.
+    MAX_REVIEW_ROUNDS: int = Field(default=2, ge=0)
     STALLED_TASK_MINUTES: int = 15
 
     def get_cors_origins(self) -> list[str]:

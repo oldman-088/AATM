@@ -15,6 +15,19 @@ export type RouteValue = any | ((path: string, init: RequestInit) => any)
  * Any endpoint not listed still resolves to `{}` so the shell never crashes on unmounted panels.
  */
 export const fixtures: Record<string, RouteValue> = {
+  '/api/v1/scaling/status': {
+    mode: 'approval',
+    default_workers: 4,
+    extra_workers: 2,
+    total_workers: 6,
+    max_workers: 25,
+    ready_backlog: 5,
+    pending_approval_id: null,
+    database_backend: 'sqlite',
+    sqlite_warning: true,
+    queue: { configured_backend: 'memory' },
+    coordination: { backend: 'memory' },
+  },
   '/api/v1/dashboard/overview': {
     kpis: {
       active_workers: 2,

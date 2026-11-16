@@ -18,16 +18,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_phase8_release_version_parity():
     settings = get_settings()
-    assert settings.APP_VERSION == "3.0.0"
+    assert settings.APP_VERSION == "3.1.0"
     pkg = json.loads((REPO_ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
-    assert pkg["version"] == "3.0.0"
+    assert pkg["version"] == "3.1.0"
 
 
 async def test_phase8_health_reports_v3():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/health")
     assert resp.status_code == 200
-    assert resp.json()["version"] == "3.0.0"
+    assert resp.json()["version"] == "3.1.0"
 
 
 def test_phase8_alembic_has_single_head():
@@ -73,12 +73,12 @@ def test_phase8_ubuntu_and_windows_scripts_and_dockerfiles_present():
         "docker-compose.yml",
         ".github/workflows/ci.yml",
         "README.md",
-        "docs/DEPLOYMENT.md",
+        "docs/OPERATIONS.md",
         "CHANGELOG.md",
     ]:
         assert (REPO_ROOT / rel).is_file(), f"Missing {rel}"
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "3.0.0" in readme
+    assert "3.1.0" in readme
     assert "DEFAULT_ADMIN_PASSWORD" in readme
     assert "aatm-admin-2026" not in readme

@@ -1,11 +1,11 @@
 import json
 import os
 import re
-import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
 
 PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "production", "prod"})
@@ -241,21 +241,17 @@ class GitHubClient:
         return True, cleaned
 
     @staticmethod
-    def _run_gh(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
+    async def _run_gh(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
         root = cwd or get_settings().REPO_ROOT
-        try:
-            proc = subprocess.run(["gh", *args], cwd=str(root), capture_output=True, text=True, timeout=15)
-            raw_out = (proc.stdout or proc.stderr or "").strip()
-            return proc.returncode, sanitize_cli_output(raw_out)
-        except Exception as exc:
-            return 1, sanitize_cli_output(str(exc))
+        result = await run_exec(["gh", *args], cwd=root, timeout=15)
+        return result.returncode, sanitize_cli_output(result.output)
 
-    def get_auth_status(self) -> dict[str, Any]:
-        rc, out = self._run_gh(["auth", "status"])
+    async def get_auth_status(self) -> dict[str, Any]:
+        rc, out = await self._run_gh(["auth", "status"])
         return {"authenticated": rc == 0, "details": out}
 
-    def list_repositories(self, limit: int = 10) -> dict[str, Any]:
-        rc, out = self._run_gh(["repo", "list", "--limit", str(limit), "--json", "nameWithOwner,isPrivate,url,updatedAt"])
+    async def list_repositories(self, limit: int = 10) -> dict[str, Any]:
+        rc, out = await self._run_gh(["repo", "list", "--limit", str(limit), "--json", "nameWithOwner,isPrivate,url,updatedAt"])
         if rc != 0:
             return {"available": False, "repositories": [], "error": out}
         try:
@@ -263,7 +259,7 @@ class GitHubClient:
         except Exception:
             return {"available": False, "repositories": [], "error": out}
 
-    def list_pull_requests(self, repo: str | None = None, limit: int = 10) -> dict[str, Any]:
+    async def list_pull_requests(self, repo: str | None = None, limit: int = 10) -> dict[str, Any]:
         if repo is not None:
             ok_repo, repo_or_err = self.validate_repo(repo)
             if not ok_repo:
@@ -272,7 +268,7 @@ class GitHubClient:
         args = ["pr", "list", "--limit", str(limit), "--json", "number,title,state,headRefName,baseRefName,url"]
         if repo:
             args.extend(["--repo", repo])
-        rc, out = self._run_gh(args)
+        rc, out = await self._run_gh(args)
         if rc != 0:
             return {"available": False, "pull_requests": [], "error": out}
         try:
@@ -280,7 +276,7 @@ class GitHubClient:
         except Exception:
             return {"available": False, "pull_requests": [], "error": out}
 
-    def list_issues(self, repo: str | None = None, limit: int = 10) -> dict[str, Any]:
+    async def list_issues(self, repo: str | None = None, limit: int = 10) -> dict[str, Any]:
         if repo is not None:
             ok_repo, repo_or_err = self.validate_repo(repo)
             if not ok_repo:
@@ -289,7 +285,7 @@ class GitHubClient:
         args = ["issue", "list", "--limit", str(limit), "--json", "number,title,state,url,labels"]
         if repo:
             args.extend(["--repo", repo])
-        rc, out = self._run_gh(args)
+        rc, out = await self._run_gh(args)
         if rc != 0:
             return {"available": False, "issues": [], "error": out}
         try:
@@ -297,7 +293,7 @@ class GitHubClient:
         except Exception:
             return {"available": False, "issues": [], "error": out}
 
-    def create_branch(
+    async def create_branch(
         self,
         branch_name: str,
         base_branch: str = "main",
@@ -394,7 +390,7 @@ class GitHubClient:
                     "reason": msg,
                 }
         else:
-            rc_ref, ref_out = self._run_gh(
+            rc_ref, ref_out = await self._run_gh(
                 ["api", f"repos/{repo}/git/ref/heads/{clean_base}", "--jq", ".object.sha"],
                 cwd=cwd,
             )
@@ -424,7 +420,7 @@ class GitHubClient:
             elif not _SHA_RE.fullmatch(sha):
                 sha = "0000000000000000000000000000000000000000"
 
-        rc, out = self._run_gh(
+        rc, out = await self._run_gh(
             [
                 "api",
                 f"repos/{repo}/git/refs",
@@ -463,7 +459,7 @@ class GitHubClient:
             "output": out,
         }
 
-    def create_pull_request(
+    async def create_pull_request(
         self,
         repo: str,
         title: str,
@@ -577,7 +573,7 @@ class GitHubClient:
         if draft:
             args.append("--draft")
 
-        rc, out = self._run_gh(args, cwd=cwd)
+        rc, out = await self._run_gh(args, cwd=cwd)
         if rc != 0:
             return {
                 "ok": False,
@@ -617,7 +613,7 @@ class GitHubClient:
             "output": out,
         }
 
-    def comment_on_pull_request(
+    async def comment_on_pull_request(
         self,
         repo: str,
         pr_number: int,
@@ -672,7 +668,7 @@ class GitHubClient:
             review_flag = "--approve" if clean_event == "APPROVE" else "--request-changes"
             args = ["pr", "review", str(pr_number), "--repo", repo, review_flag, "--body", clean_body]
 
-        rc, output = self._run_gh(args)
+        rc, output = await self._run_gh(args)
         if rc != 0:
             return {
                 "ok": False,
@@ -695,7 +691,7 @@ class GitHubClient:
             "output": sanitize_cli_output(output),
         }
 
-    def create_issue(
+    async def create_issue(
         self,
         repo: str,
         title: str,
@@ -764,7 +760,7 @@ class GitHubClient:
         for usr in clean_assignees:
             args.extend(["--assignee", usr])
 
-        rc, out = self._run_gh(args, cwd=cwd)
+        rc, out = await self._run_gh(args, cwd=cwd)
         if rc != 0:
             return {
                 "ok": False,
@@ -800,11 +796,11 @@ class GitHubClient:
             "output": out,
         }
 
-    def generate_change_summary(self, repo_path: str | None = None) -> dict[str, Any]:
+    async def generate_change_summary(self, repo_path: str | None = None) -> dict[str, Any]:
         root = Path(repo_path) if repo_path else get_settings().REPO_ROOT
         try:
-            diff_stat = subprocess.run(["git", "diff", "--stat", "HEAD~1..HEAD"], cwd=str(root), capture_output=True, text=True, timeout=10)
-            log_out = subprocess.run(["git", "log", "-n", "5", "--oneline"], cwd=str(root), capture_output=True, text=True, timeout=10)
+            diff_stat = await run_exec(["git", "diff", "--stat", "HEAD~1..HEAD"], cwd=root, timeout=10)
+            log_out = await run_exec(["git", "log", "-n", "5", "--oneline"], cwd=root, timeout=10)
             return {
                 "recent_commits": [sanitize_cli_output(ln) for ln in log_out.stdout.splitlines() if ln.strip()],
                 "diff_summary": sanitize_cli_output(diff_stat.stdout.strip()) or "No diff from parent commit.",

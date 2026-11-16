@@ -424,7 +424,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 account_identifier="aatm-org@arena.ai",
                 allocation_mode="hybrid",
                 max_employees=20,
-                credential_ref="env:ARENA_SESSION_TOKEN",
+                credential_ref=None,  # Arena: the human signs in inside each browser profile
                 status="active",
             )
         )

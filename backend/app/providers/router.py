@@ -30,6 +30,7 @@ from app.providers.base import (
     ProviderStreamChunk,
     validate_credential_ref,
 )
+from app.providers.concurrency import provider_slot
 
 
 class ProviderRouter:
@@ -310,6 +311,8 @@ class ProviderRouter:
                 merged_meta.setdefault("project_id", session.project_id)
         elif agent and agent.provider_account_id:
             merged_meta.setdefault("account_id", agent.provider_account_id)
+        if agent and agent.browser_profile_id:
+            merged_meta.setdefault("browser_profile_id", agent.browser_profile_id)
 
         return merged_meta, session
 
@@ -408,7 +411,8 @@ class ProviderRouter:
 
             for attempt_index in range(max_retries + 1):
                 attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
-                response = await adapter.generate(attempt_req)
+                async with provider_slot(provider.id):
+                    response = await adapter.generate(attempt_req)
                 for key in ("session_id", "account_id", "conversation_id"):
                     if key in session_meta and key not in response.metadata:
                         response.metadata[key] = session_meta[key]
@@ -445,6 +449,10 @@ class ProviderRouter:
                     transport_unavailable=bool(response.metadata.get("transport_unavailable")),
                 )
                 await db.commit()
+                if response.metadata.get("code") == "needs_human":
+                    # Phase 6: a human check on the employee's browser profile stops here. Never
+                    # fail over silently to another (possibly paid) provider.
+                    return response
                 if response.metadata.get("bridge_offline"):
                     if offline_fallback_candidate is None:
                         offline_fallback_candidate = (provider, effective_model, last_err)
@@ -598,16 +606,17 @@ class ProviderRouter:
                 attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
                 emitted_any = False
                 terminal_chunk: ProviderStreamChunk | None = None
-                async for chunk in adapter.generate_stream(attempt_req):
-                    for key in ("session_id", "account_id", "conversation_id"):
-                        if key in session_meta and key not in chunk.metadata:
-                            chunk.metadata[key] = session_meta[key]
-                    if not chunk.done:
-                        if chunk.delta:
-                            emitted_any = True
-                        yield chunk
-                    else:
-                        terminal_chunk = chunk
+                async with provider_slot(provider.id):
+                    async for chunk in adapter.generate_stream(attempt_req):
+                        for key in ("session_id", "account_id", "conversation_id"):
+                            if key in session_meta and key not in chunk.metadata:
+                                chunk.metadata[key] = session_meta[key]
+                        if not chunk.done:
+                            if chunk.delta:
+                                emitted_any = True
+                            yield chunk
+                        else:
+                            terminal_chunk = chunk
 
                 if terminal_chunk is None:
                     terminal_chunk = ProviderStreamChunk(
@@ -848,6 +857,16 @@ async def get_model_configuration_status(db: AsyncSession) -> dict[str, Any]:
                 diagnostic_only_providers.append(p.id)
         elif has_cred:
             configured_providers.append(p.id)
+
+    # Phase 6: the Arena browser connector is a real model path once it is enabled (approved real
+    # Arena, or the local mock page for testing). The provider row itself is created on first use.
+    from app.browser.arena_connector import ARENA_BROWSER_PROVIDER_ID, arena_gate
+
+    if arena_gate()["enabled"]:
+        configured_providers = [pid for pid in configured_providers if pid != ARENA_BROWSER_PROVIDER_ID]
+        configured_providers.append(ARENA_BROWSER_PROVIDER_ID)
+    else:
+        configured_providers = [pid for pid in configured_providers if pid != ARENA_BROWSER_PROVIDER_ID]
 
     configured = len(configured_providers) > 0
     return {

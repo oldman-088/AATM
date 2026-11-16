@@ -137,8 +137,11 @@ class ProviderAccountCreate(BaseModel):
     allocation_mode: str = Field(default="hybrid", pattern="^(one_per_employee|shared|hybrid)$")
     max_employees: int = Field(default=5, ge=1, le=50)
     credential_ref: str | None = Field(
-        default="env:ARENA_SESSION_TOKEN",
-        description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",
+        default=None,
+        description=(
+            "Optional provider API-key reference (env:<NAME>_API_KEY). Arena accounts use the human's own "
+            "browser sign-in and carry no credential."
+        ),
     )
 
 

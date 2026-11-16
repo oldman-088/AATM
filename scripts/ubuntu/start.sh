@@ -33,6 +33,20 @@ if [[ "${AATM_SANDBOX_MODE:-docker}" == "docker" ]]; then
   fi
 fi
 
+# Local Arena bridge (loopback only): connector WebSocket + mock Arena page + local bridge API.
+# It reads ARENA_BRIDGE_TOKEN and the Arena approval flags from .env; real Arena stays off
+# unless ARENA_CONNECTOR_ENABLED, ARENA_AUTOMATION_APPROVED and ARENA_APPROVAL_REFERENCE are set.
+if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
+  if [[ -f logs/bridge.pid ]] && kill -0 "$(cat logs/bridge.pid)" 2>/dev/null; then
+    echo "[AATM] Bridge already running (PID $(cat logs/bridge.pid))."
+  else
+    echo "[AATM] Starting local Arena bridge on 127.0.0.1:${ARENA_BRIDGE_PORT:-4100}..."
+    (set -a; [[ -f .env ]] && . ./.env; set +a; \
+      ARENA_BRIDGE_HOST=127.0.0.1 nohup "$ROOT_DIR/.venv/bin/python" -m bridge.server \
+      > "$ROOT_DIR/logs/bridge.log" 2>&1 & echo $! > "$ROOT_DIR/logs/bridge.pid")
+  fi
+fi
+
 if [[ -f logs/backend.pid ]] && kill -0 "$(cat logs/backend.pid)" 2>/dev/null; then
   echo "[AATM] Backend already running (PID $(cat logs/backend.pid))."
 else

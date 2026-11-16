@@ -55,6 +55,7 @@ from app.schemas.common import (
     ProviderUsageResponse,
     validate_credential_ref,
 )
+from tests.subprocess_compat import patch_run_exec
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = BACKEND_ROOT.parent / "contracts" / "schemas.json"
@@ -453,7 +454,8 @@ def test_github_write_schemas_require_approval_and_validate_payloads():
 
 
 async def test_reports_to_update_serialization_and_employee_default(client: AsyncClient, auth_headers, monkeypatch):
-    from app.api.routes import platform as platform_routes
+    # Employee handlers live in platform_employees since the Phase 8 split.
+    from app.api.routes import platform_employees as platform_routes
 
     agent_id = "round3-reports-to-patch-agent"
     async with AsyncSessionLocal() as db:
@@ -631,7 +633,8 @@ async def test_git_worktree_endpoints_require_operator_and_map_errors(
 async def test_skill_gap_provisioning_and_session_recovery_routes_enforce_roles(
     client: AsyncClient, auth_headers, monkeypatch
 ):
-    from app.api.routes import platform as platform_routes
+    # Employee handlers live in platform_employees since the Phase 8 split.
+    from app.api.routes import platform_employees as platform_routes
 
     calls: dict[str, Any] = {}
 
@@ -824,7 +827,7 @@ async def test_github_pr_comment_requires_matching_approved_request(client: Asyn
 
     calls: list[dict[str, Any]] = []
 
-    def fake_comment_on_pull_request(repo, pr_number, body, event="COMMENT", approval=None, allowed_repos=None):
+    async def fake_comment_on_pull_request(repo, pr_number, body, event="COMMENT", approval=None, allowed_repos=None):
         calls.append(
             {"repo": repo, "pr_number": pr_number, "body": body, "event": event, "approval_id": approval.id}
         )
@@ -877,7 +880,7 @@ async def test_github_client_pr_comment_allowlist_approval_events_and_output(cli
     github = GitHubClient(allowed_repos={"example/project"})
     commands: list[list[str]] = []
 
-    def fake_run_gh(args, cwd=None):
+    async def fake_run_gh(args, cwd=None):
         commands.append(args)
         return 0, "Comment or review posted"
 
@@ -888,7 +891,7 @@ async def test_github_client_pr_comment_allowlist_approval_events_and_output(cli
         ("APPROVE", "--approve"),
         ("REQUEST_CHANGES", "--request-changes"),
     ):
-        result = github.comment_on_pull_request(
+        result = await github.comment_on_pull_request(
             "example/project", 23, "Review body", event=event, approval=approved
         )
         assert result["ok"] is True
@@ -896,8 +899,8 @@ async def test_github_client_pr_comment_allowlist_approval_events_and_output(cli
         assert expected_flag in commands[-1]
 
     calls_before_denials = len(commands)
-    unapproved = github.comment_on_pull_request("example/project", 23, "Body", approval=None)
-    disallowed_repo = github.comment_on_pull_request(
+    unapproved = await github.comment_on_pull_request("example/project", 23, "Body", approval=None)
+    disallowed_repo = await github.comment_on_pull_request(
         "outside/repo", 23, "Body", approval=approved
     )
     assert unapproved["allowed"] is False
@@ -1013,7 +1016,7 @@ async def test_github_write_endpoints_enforce_approval_gate(client: AsyncClient,
     def fake_run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/oldman-088/AATM/pull/99\n", stderr="")
 
-    monkeypatch.setattr("app.github_client.client.subprocess.run", fake_run)
+    patch_run_exec(monkeypatch, "app.github_client.client", fake_run)
 
     # Create pending approval (not yet approved) -> must return 403
     pending_app = await client.post(
@@ -1085,7 +1088,7 @@ async def test_github_branch_creation_requires_matching_approval_and_allowlist(
 
     gh_calls: list[list[str]] = []
 
-    def fake_run_gh(args, cwd=None):
+    async def fake_run_gh(args, cwd=None):
         gh_calls.append(args)
         if any("/git/ref/heads/" in arg for arg in args):
             return 0, "a" * 40

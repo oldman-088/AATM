@@ -788,3 +788,47 @@ export function PromptInjectionGuardPanel() {
     </Card>
   )
 }
+
+export function TeamScalingPanel({ onReload }: { onReload: () => void }) {
+  const { t, formatNumber } = useI18n()
+  const [status, setStatus] = useState<any>(null)
+  const [count, setCount] = useState(1)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = async () => {
+    try { setStatus(await apiFetch<any>('/scaling/status')) } catch (err: any) { setError(err?.message || t.enterprise.operationFailed) }
+  }
+  useEffect(() => { load() }, [])
+  const request = async () => {
+    setBusy(true); setError(''); setMessage('')
+    try {
+      await apiFetch<any>('/scaling/workers', { method: 'POST', body: JSON.stringify({ count }) })
+      setMessage(t.scaling.requested); onReload(); await load()
+    } catch (err: any) { setError(err?.message || t.enterprise.operationFailed) } finally { setBusy(false) }
+  }
+  return <section data-testid="team-scaling-panel"><Card className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h3 className="text-sm font-semibold text-white">{t.scaling.title}</h3>
+      {status && <span data-testid="team-size-indicator"><Badge variant="info">
+        {formatNumber(status.default_workers ?? 0)} + {formatNumber(status.extra_workers ?? 0)} {t.scaling.teamLabel}
+      </Badge></span>}
+    </div>
+    {status?.sqlite_warning && <div role="alert" className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-start text-xs text-amber-200">{t.scaling.sqliteWarning}</div>}
+    {status && <div className="grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-4">
+      <div><span className="text-slate-500">{t.scaling.defaultWorkers}: </span>{formatNumber(status.default_workers ?? 0)}</div>
+      <div><span className="text-slate-500">{t.scaling.extraWorkers}: </span>{formatNumber(status.extra_workers ?? 0)} / {formatNumber(status.max_workers ?? 0)}</div>
+      <div><span className="text-slate-500">{t.scaling.backlog}: </span>{formatNumber(status.ready_backlog ?? 0)}</div>
+      <div><span className="text-slate-500">{t.scaling.mode}: </span><span dir="ltr">{status.mode}</span></div>
+      <div><span className="text-slate-500">{t.scaling.queue}: </span><span dir="ltr">{status.queue?.configured_backend ?? '—'}</span></div>
+      <div><span className="text-slate-500">{t.scaling.coordination}: </span><span dir="ltr">{status.coordination?.backend ?? '—'}</span></div>
+    </div>}
+    {status?.pending_approval_id && <p className="text-xs text-amber-300">{t.scaling.pendingApproval}</p>}
+    <div className="flex flex-wrap items-center gap-2">
+      <Input aria-label={t.scaling.count} type="number" min={1} max={25} className="w-24" value={count} onChange={(e) => setCount(Math.max(1, Math.min(25, Number(e.target.value) || 1)))} />
+      <Button disabled={busy} onClick={request}><UserPlus className="me-1 h-4 w-4" />{t.scaling.addEmployee}</Button>
+    </div>
+    {message && <p className="text-xs text-emerald-300">{message}</p>}
+    {error && <p className="text-xs text-red-300">{error}</p>}
+  </Card></section>
+}
