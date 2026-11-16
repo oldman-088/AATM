@@ -104,7 +104,43 @@ result excerpt, so a station screen could not show the code an employee writes.
 | §2.8 empty state | `/api/health.model_status`, `/projects`, `/arena/connector/status` | none | 3-step onboarding, each step checked from real state |
 | §2.9 mobile | same data, list layout | none | — |
 
-## 4. Safety rules the stream must keep (B1)
+## 4. Safety rules the stream keeps — implemented in B1
+
+**Status:** implemented in `backend/app/runtime/code_stream.py` (producer), `backend/app/runtime/loop/actions.py`
+(write/edit/test/lint/review hooks), `backend/app/runtime/executor.py` (test/lint output) and
+`backend/app/api/routes/code_stream.py` (read-only buffer endpoint).
+
+Event `agent.code` on `/ws/events` (via the existing redacting publisher, so the payload is redacted twice —
+once when the frame is built, once on publish):
+
+```json
+{
+  "agent_id": "worker-1",
+  "task_id": "task-…",
+  "action": "write | edit | test | lint | review | done",
+  "path": "backend/app/runtime/code_stream.py",
+  "language": "python",
+  "count": 2,
+  "frames": [
+    {"path": "...", "language": "python", "action": "write", "content": "…", "diff": [...], "lines": 240,
+     "truncated": false},
+    {"action": "test", "command": "pytest -q tests/test_b1_code_stream.py", "output_lines": ["…"],
+     "exit_code": 0, "ok": true},
+    {"action": "review", "review_event": "COMMENT", "output_lines": ["…"]}
+  ],
+  "at": "2026-11-16T09:12:33.120Z"
+}
+```
+
+* ≤20 frames per event, flushed every 100 ms per agent (batching); the client applies at most 10 updates/s.
+* Per-agent ring buffer of 120 frames, served by `GET /api/v1/agents/{id}/code-stream?limit=` (default 40)
+  and `GET /api/v1/code-stream?limit=` (all agents, used to repaint the bridge after a reload).
+* Write/edit frames carry the file content (≤400 lines / 32 KB) plus diff hunks derived from
+  `previous_content`; `truncated` tells the UI to show the cap notice.
+* Test frames carry the **logical** command (`pytest`, `ruff check`) with its exit code and output lines
+  (80 lines / 4 KB) so the screen never leaks venv paths.
+
+The rules below are enforced by the implementation:
 
 1. **Redaction first.** Every frame body passes `redact_secrets()` and is re-checked with
    `contains_credentials()`; a frame that still looks like it carries a secret is dropped, not shown.

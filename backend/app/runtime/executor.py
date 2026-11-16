@@ -20,6 +20,7 @@ from app.models import (
     Task,
     WorkspaceArtifact,
 )
+from app.runtime.code_stream import build_test_frame, build_write_frame, code_stream
 from app.runtime.sandbox import (
     SandboxExecutionPolicy,
     WorkspaceSandboxError,
@@ -63,8 +64,25 @@ class AgentRuntimeExecutor:
     ) -> WorkspaceArtifact:
         target = self.resolve_safe_path(agent_id, relative_path)
         existed = target.exists()
+        previous_content: str | None = None
+        if existed:
+            try:
+                previous_content = target.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                previous_content = None
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        # B1: the real workspace-write endpoint streams to the Command Bridge too.
+        await code_stream.publish(
+            build_write_frame(
+                agent_id=agent_id,
+                task_id=task_id,
+                path=relative_path,
+                content=content,
+                previous_content=previous_content if existed else None,
+                action="edit" if existed else "write",
+            )
+        )
 
         art = WorkspaceArtifact(
             agent_id=agent_id,
@@ -165,6 +183,17 @@ class AgentRuntimeExecutor:
         )
         db.add(art)
         await db.commit()
+        # B1: real pytest/ruff output goes to the Command Bridge (bounded, redacted, throttled).
+        await code_stream.publish(
+            build_test_frame(
+                agent_id=agent_id,
+                task_id=task_id,
+                command=command,  # logical command (pytest/ruff), not the resolved venv path
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+            )
+        )
         return {
             "exit_code": exit_code,
             "stdout": stdout,

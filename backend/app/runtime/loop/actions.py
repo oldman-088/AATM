@@ -39,6 +39,12 @@ from app.runtime.agent_protocol import (
 from app.runtime.agent_protocol import (
     safe_excerpt as _safe_excerpt,
 )
+from app.runtime.code_stream import (
+    MAX_FRAME_BYTES,
+    build_review_frame,
+    build_write_frame,
+    code_stream,
+)
 from app.runtime.executor import WorkspaceSandboxError
 from app.runtime.loop.common import (
     _IGNORED_TREE_DIRS,
@@ -97,8 +103,27 @@ class ActionsMixin:
             if contains_credentials(action.content):
                 raise ActionRejected("Content that appears to contain credentials or private keys cannot be written.")
             existed = target.exists()
+            previous_content: str | None = None
+            if existed:
+                try:
+                    # Bounded read: only the previous version is needed for a diff hunk.
+                    if target.stat().st_size <= MAX_FRAME_BYTES * 4:
+                        previous_content = target.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    previous_content = None
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(action.content, encoding="utf-8")
+            # B1: stream the real write/edit to the Command Bridge (redacted, capped, sensitive paths dropped).
+            await code_stream.publish(
+                build_write_frame(
+                    agent_id=agent.id,
+                    task_id=task.id,
+                    path=action.path,
+                    content=action.content,
+                    previous_content=previous_content if existed else None,
+                    action="edit" if existed else "write",
+                )
+            )
             db.add(
                 WorkspaceArtifact(
                     agent_id=agent.id,
@@ -194,6 +219,9 @@ class ActionsMixin:
             if task.task_type != "review":
                 raise ActionRejected("The review action is only available on pull-request review tasks.")
             outcome = await review_service.submit_review(db, task, agent, event=action.event, body=action.body)
+            await code_stream.publish(
+                build_review_frame(agent_id=agent.id, task_id=task.id, body=action.body, event=action.event)
+            )
             message.response_payload = {**(message.response_payload or {}), "review_outcome": outcome}
             next_step = (
                 f"follow-up task {outcome['follow_up_task_id']} created for the author"
