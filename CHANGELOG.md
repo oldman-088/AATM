@@ -8,6 +8,13 @@ All notable changes to AATM are documented in this file.
 - **Provider credential exfiltration fix**: `credential_ref` accepts only provider API-key env names (`*_API_KEY` or `PROVIDER_CREDENTIAL_ENV_ALLOWLIST`); server secrets (reusing `SENSITIVE_ENV_EXACT`) are always denied; `ARENA_BRIDGE_TOKEN` is bound to the local bridge; `endpoint_url` validated (http/https, no embedded credentials); operators limited to official presets, custom endpoints need admin; every test-connection is audited without the key. Applied to the wizard, provider upsert/test and account creation, plus a runtime deny-list in the adapters.
 - Arena provider accounts no longer default to `env:ARENA_SESSION_TOKEN` (Arena uses the human's own browser sign-in).
 
+### Added — Phase 4: Review, Merge and Completion (B)
+- **Reviewer employee** (reuses the `code_reviewer` template, role `reviewer`, created on first need, read-only). The manager's orchestration cycle turns every `pr_open` implementation task into a `review` task; the reviewer gets the branch diff (quarantined as untrusted data) and must finish with the new `review` action (`COMMENT` or `REQUEST_CHANGES` — AI reviewers can never approve).
+- `REQUEST_CHANGES` → `follow_up` task for the original employee on the same branch/worktree (review text quarantined), commits pushed, PR re-reviewed; capped by `MAX_REVIEW_ROUNDS` (default 2), then escalated to a human. GitHub refuses REQUEST_CHANGES on the account's own PR, so AATM falls back to a COMMENT review carrying the verdict.
+- **Approval-gated merge**: `ApprovalRequest(action_type="merge")` bound to repo + base branch + PR number + task; a human approval in the Approval Center runs `gh pr ready` + `gh pr merge --squash`; single use (replay refused), mismatched PR refused; task `approved → merged → done`, worktree cleaned.
+- **Project completion**: when all implementation tasks are done, the manager posts a factual summary (what was built, merged PRs, cost from `provider_usage_logs`, elapsed time) to the project chat and marks the project `completed`.
+- API: `GET /reviews/pull-requests`, `GET /reviews/tasks/{id}/diff`, `POST /reviews/tasks/{id}/request-merge`, `POST /reviews/tasks/{id}/merge`, `GET /projects/{id}/completion`. Migration `f5a6b7c8d9e0` (task_type, parent_task_id, review_round, project completed_at/completion_summary).
+
 ### Performance
 - SQLite engine uses WAL + `synchronous=NORMAL` + `busy_timeout=30000`; adapters reuse one verified TLS context. Backend suite runtime 9 min → ~3 min and the flaky retry-latency budget test passes.
 

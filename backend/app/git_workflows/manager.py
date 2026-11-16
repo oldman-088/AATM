@@ -912,6 +912,108 @@ class GitWorkflowManager:
             "pr_status": "draft",
         }
 
+    @staticmethod
+    def repo_slug_from_url(repo_url: str | None) -> str | None:
+        """Extract `owner/name` from a GitHub URL; None for non-GitHub or missing URLs."""
+        if not repo_url or "github.com" not in repo_url:
+            return None
+        match = re.search(r"github\.com[:/]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$", repo_url.strip())
+        return match.group(1) if match else None
+
+    async def branch_diff(self, worktree_path: str | Path, base_branch: str, *, max_chars: int = 20_000) -> dict[str, Any]:
+        """Return `git diff <base>...HEAD` for a task worktree (read-only, sanitized, truncated)."""
+        wt = Path(worktree_path).resolve()
+        if not wt.is_dir():
+            return {"ok": False, "error": "Task worktree is not available.", "diff": "", "files": []}
+        clean_base = normalize_branch_name(base_branch) or "main"
+        if not _COMMIT_REF_RE.fullmatch(clean_base) or clean_base.startswith("-"):
+            return {"ok": False, "error": "Invalid base branch.", "diff": "", "files": []}
+        rc, diff, err = await self._exec(["git", "diff", "--no-color", "--no-ext-diff", f"{clean_base}...HEAD"], wt)
+        if rc != 0:
+            return {"ok": False, "error": err or "git diff failed.", "diff": "", "files": []}
+        rc_names, names, _ = await self._exec(["git", "diff", "--name-only", f"{clean_base}...HEAD"], wt)
+        files = [line for line in names.splitlines() if line.strip()] if rc_names == 0 else []
+        truncated = len(diff) > max_chars
+        return {"ok": True, "diff": diff[:max_chars], "truncated": truncated, "files": files}
+
+    async def push_task_branch(self, worktree_path: str | Path, *, branch_name: str) -> dict[str, Any]:
+        """Push follow-up commits on an existing (non-protected) task branch; no new PR is opened."""
+        wt = Path(worktree_path).resolve()
+        ok_br, clean_branch = validate_branch_name(branch_name)
+        if not ok_br:
+            return {"ok": False, "error": clean_branch}
+        if is_protected_branch(clean_branch, PROTECTED_BRANCHES):
+            return {"ok": False, "error": f"Refusing to push protected branch '{clean_branch}'."}
+        rc_remote, remote_url, _ = await self._exec(["git", "remote", "get-url", "origin"], wt)
+        if rc_remote != 0 or not remote_url:
+            return {"ok": False, "skipped": True, "reason": "No origin remote configured; skipping push."}
+        rc_push, out_push, err_push = await self._exec(["git", "push", "origin", clean_branch], wt, timeout=60)
+        if rc_push != 0:
+            return {"ok": False, "error": err_push or out_push or "git push failed."}
+        return {"ok": True, "pushed": True, "branch_name": clean_branch}
+
+    async def post_pr_review(
+        self,
+        *,
+        repo_slug: str,
+        pr_number: int,
+        event: str,
+        body: str,
+        cwd: str | Path,
+    ) -> dict[str, Any]:
+        """Post the AI reviewer's verdict on an AATM-opened PR (COMMENT or REQUEST_CHANGES; never APPROVE).
+
+        GitHub rejects REQUEST_CHANGES on a PR opened by the same account (AATM uses the host's
+        `gh` auth for both), so that case falls back to a COMMENT review carrying the verdict.
+        """
+        clean_event = str(event or "").strip().upper()
+        if clean_event not in {"COMMENT", "REQUEST_CHANGES"}:
+            return {"ok": False, "error": "AI reviewers may only COMMENT or REQUEST_CHANGES."}
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_slug or ""):
+            return {"ok": False, "error": "Invalid repository slug."}
+        if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
+            return {"ok": False, "error": "Pull request number must be a positive integer."}
+        clean_body = sanitize_cli_output(body.strip())[:8_000]
+        flag = "--comment" if clean_event == "COMMENT" else "--request-changes"
+        base_cmd = ["gh", "pr", "review", str(pr_number), "--repo", repo_slug]
+        rc, out, err = await self._exec([*base_cmd, flag, "--body", clean_body], Path(cwd), timeout=60)
+        if rc == 0:
+            return {"ok": True, "posted_event": clean_event, "fallback": False, "output": out}
+        if clean_event == "REQUEST_CHANGES":
+            verdict_body = f"**AATM Reviewer verdict: CHANGES REQUESTED**\n\n{clean_body}"
+            rc2, out2, err2 = await self._exec([*base_cmd, "--comment", "--body", verdict_body], Path(cwd), timeout=60)
+            if rc2 == 0:
+                return {
+                    "ok": True,
+                    "posted_event": "COMMENT",
+                    "fallback": True,
+                    "fallback_reason": err or out or "request-changes rejected",
+                    "output": out2,
+                }
+            return {"ok": False, "error": err2 or out2 or err or "gh pr review failed."}
+        return {"ok": False, "error": err or out or "gh pr review failed."}
+
+    async def merge_pull_request(self, *, repo_slug: str, pr_number: int, cwd: str | Path) -> dict[str, Any]:
+        """Mark a draft PR ready and squash-merge it with `gh pr merge --squash` (caller enforces approval)."""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_slug or ""):
+            return {"ok": False, "error": "Invalid repository slug."}
+        if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
+            return {"ok": False, "error": "Pull request number must be a positive integer."}
+        work = Path(cwd)
+        rc_ready, out_ready, err_ready = await self._exec(
+            ["gh", "pr", "ready", str(pr_number), "--repo", repo_slug], work, timeout=60
+        )
+        rc, out, err = await self._exec(
+            ["gh", "pr", "merge", str(pr_number), "--repo", repo_slug, "--squash"], work, timeout=120
+        )
+        if rc != 0:
+            return {
+                "ok": False,
+                "error": err or out or "gh pr merge failed.",
+                "ready_output": out_ready or err_ready,
+            }
+        return {"ok": True, "merged": True, "ready_rc": rc_ready, "output": out}
+
     async def cleanup_task_worktree(
         self,
         *,

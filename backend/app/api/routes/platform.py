@@ -991,7 +991,8 @@ async def receive_github_webhook(
             if event_name == "pull_request":
                 merged = bool(pull_request.get("merged"))
                 if action in {"opened", "reopened"}:
-                    linked_task.status = "pr_open"
+                    if linked_task.status not in {"in_review", "changes_requested", "approved", "merged", "done"}:
+                        linked_task.status = "pr_open"
                     linked_task.pr_status = "draft" if pull_request.get("draft") else "open"
                 elif action in {"ready_for_review", "review_requested"}:
                     linked_task.status = "in_review"
@@ -1085,6 +1086,11 @@ async def receive_github_webhook(
     await event_bus.emit("github.webhook", safe_payload)
     if updated_task_id is not None:
         await event_bus.emit("task.updated", {"task_id": updated_task_id, "status": updated_task_status})
+        from app.orchestration.review import review_service
+
+        linked = await db.get(Task, updated_task_id)
+        if linked is not None and linked.status == "done":
+            await review_service.check_project_completion(db, linked.project_id)
     return {
         "accepted": True,
         "delivery_id": safe_payload["delivery_id"],

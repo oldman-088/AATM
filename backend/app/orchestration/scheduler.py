@@ -234,11 +234,14 @@ class TaskScheduler:
     ) -> dict[str, Any]:
         """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
         session_recovery = await self.recover_sessions_if_needed(db, force=force_session_recovery)
+        from app.orchestration.review import review_service
+
+        review_tasks_created = await review_service.create_pending_reviews(db)
 
         settings = get_settings()
         agents_res = await db.execute(
             select(Agent).where(
-                Agent.role == "worker",
+                Agent.role.in_(["worker", "reviewer"]),
                 Agent.is_enabled.is_(True),
                 Agent.is_emergency_stopped.is_(False),
                 or_(Agent.device_id.is_(None), Agent.device_id == LOCAL_DEVICE_ID),
@@ -267,21 +270,23 @@ class TaskScheduler:
                 continue
 
             chosen: Agent | None = None
+            wants_reviewer = task.task_type == "review"
+            eligible = [w for w in idle_workers if (w.role == "reviewer") == wants_reviewer]
             if task.execution_mode == "manual":
                 if not task.assigned_agent_id:
                     continue
-                chosen = next((w for w in idle_workers if w.id == task.assigned_agent_id), None)
+                chosen = next((w for w in eligible if w.id == task.assigned_agent_id), None)
             else:
                 if task.assigned_agent_id:
-                    chosen = next((w for w in idle_workers if w.id == task.assigned_agent_id), None)
-                if not chosen:
+                    chosen = next((w for w in eligible if w.id == task.assigned_agent_id), None)
+                if not chosen and eligible:
                     # Use assignment context and observed failures; performance_score is an
                     # unmeasured default and must not be presented as actual telemetry.
                     def _score(w: Agent) -> tuple[int, int]:
                         div_match = 1 if task.division_code in (w.divisions or []) else 0
                         return (div_match, -w.tasks_failed)
 
-                    chosen = max(idle_workers, key=_score)
+                    chosen = max(eligible, key=_score)
 
             if not chosen or not await self.acquire_lock(db, task, chosen.id):
                 continue
@@ -371,6 +376,7 @@ class TaskScheduler:
             "working_workers": working_count + len(assigned),
             "idle_workers": len(idle_workers),
             "session_recovery": session_recovery,
+            "review_tasks_created": review_tasks_created,
         }
 
     async def dispatch_ready_tasks(
@@ -418,6 +424,11 @@ class TaskScheduler:
         await db.commit()
         await db.refresh(task)
         await event_bus.emit("task.updated", {"task_id": task.id, "status": target_status})
+        if target_status in {"completed", "done"}:
+            from app.orchestration.review import review_service
+
+            await review_service.check_project_completion(db, task.project_id)
+            await db.refresh(task)
         return task
 
     async def fail_and_retry_or_escalate(self, db: AsyncSession, task: Task, error_msg: str) -> Task:

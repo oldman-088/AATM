@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     # Supports 20+ concurrent AI employees subject to host capacity
     MAX_CONCURRENT_WORKERS: int = 25
     MAX_CONCURRENT_BROWSERS: int = 10
+    # Phase 4: reviewer change-request rounds before the PR is escalated to a human.
+    MAX_REVIEW_ROUNDS: int = Field(default=2, ge=0)
     STALLED_TASK_MINUTES: int = 15
 
     def get_cors_origins(self) -> list[str]:

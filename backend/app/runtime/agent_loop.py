@@ -37,6 +37,7 @@ from app.models import (
     WorkspaceArtifact,
 )
 from app.orchestration.replacement import copy_workspace_handoff
+from app.orchestration.review import review_service
 from app.orchestration.scheduler import task_scheduler
 from app.providers.base import ProviderRequest, ProviderResponse
 from app.providers.router import ProviderRouter, get_model_configuration_status
@@ -54,6 +55,7 @@ from app.runtime.agent_protocol import (
     DoneAction,
     MessageAction,
     ReadAction,
+    ReviewAction,
     RunAction,
     WriteAction,
     build_system_prompt,
@@ -491,7 +493,10 @@ class AgentLoop:
                 if completed:
                     target_status = "completed"
                     outcome_extra: dict[str, Any] = {}
-                    if task.worktree_path and Path(task.worktree_path).is_dir():
+                    done_summary = getattr(action, "summary", None) or result
+                    is_review = task.task_type == "review"
+                    is_follow_up = task.task_type == "follow_up"
+                    if not is_review and task.worktree_path and Path(task.worktree_path).is_dir():
                         commit_res = await git_workflow_manager.commit_task_worktree(
                             task.worktree_path,
                             agent_name=agent.name,
@@ -511,14 +516,14 @@ class AgentLoop:
                             if m_slug:
                                 repo_slug = m_slug.group(1)
 
-                        if commit_res.get("committed") and auto_pr and task.branch_name:
+                        if commit_res.get("committed") and auto_pr and task.branch_name and not is_follow_up:
                             pr_res = await git_workflow_manager.push_and_create_draft_pr(
                                 task.worktree_path,
                                 branch_name=task.branch_name,
                                 base_branch=project.default_branch if project else "main",
                                 title=f"AATM({agent.name}): {task.title}",
                                 body=(
-                                    f"{action.summary}\n\n"
+                                    f"{done_summary}\n\n"
                                     f"AATM-Task: {task.id}\n"
                                     f"Agent: {agent.id} ({agent.name})\n"
                                     f"Commit: {task.commit_sha or 'n/a'}"
@@ -551,10 +556,13 @@ class AgentLoop:
                     await task_scheduler.complete_task(
                         db,
                         task,
-                        summary=action.summary,
+                        summary=done_summary,
                         target_status=target_status,
                     )
-                    await self._store_outcome_memory(db, task, agent, target_status, action.summary)
+                    await self._store_outcome_memory(db, task, agent, target_status, done_summary)
+                    # pr_open tasks are picked up by the manager's orchestration cycle, which creates the review task.
+                    if is_follow_up:
+                        await review_service.on_follow_up_completed(db, task)
                     return
 
             raise RuntimeError(f"Agent iteration limit reached ({self.max_iterations}) before verified completion.")
@@ -800,6 +808,8 @@ class AgentLoop:
             "previous_iterations": history[-8:],
             "action_protocol": _ACTION_PROTOCOL,
         }
+        if task.task_type == "review":
+            data["pull_request_review"] = await review_service.review_context(db, task)
         return json.dumps(data, ensure_ascii=False, default=str)
 
     @staticmethod
@@ -842,6 +852,8 @@ class AgentLoop:
             return f"Read workspace file {action.path}:\n{content}", False
 
         if isinstance(action, WriteAction):
+            if task.task_type == "review":
+                raise ActionRejected("Review tasks are read-only; describe required changes in a review action instead.")
             if not self._can_write(agent):
                 raise ActionRejected("This employee's role permissions do not allow workspace file edits.")
             target = _path_for_action(root, action.path, for_write=True)
@@ -941,7 +953,24 @@ class AgentLoop:
             }
             return f"Approval request {approval.id} is pending; the protected action was not executed.", False
 
+        if isinstance(action, ReviewAction):
+            if task.task_type != "review":
+                raise ActionRejected("The review action is only available on pull-request review tasks.")
+            outcome = await review_service.submit_review(db, task, agent, event=action.event, body=action.body)
+            message.response_payload = {**(message.response_payload or {}), "review_outcome": outcome}
+            next_step = (
+                f"follow-up task {outcome['follow_up_task_id']} created for the author"
+                if outcome.get("follow_up_task_id")
+                else f"merge approval {outcome.get('merge_approval_id')} awaits a human decision"
+            )
+            return f"Review submitted ({action.event}); {next_step}.", True
+
         if isinstance(action, DoneAction):
+            if task.task_type == "review":
+                return (
+                    "Review tasks finish with a review action (COMMENT or REQUEST_CHANGES), not done.",
+                    False,
+                )
             declared = list(dict.fromkeys([*(task.expected_deliverables or []), *action.deliverables]))
             if not declared:
                 artifacts = (

@@ -138,6 +138,13 @@ async def decide_approval(
     )
     await db.commit()
     await db.refresh(app)
+    if app.action_type == "merge":
+        from app.orchestration.review import review_service
+
+        merge_result = await review_service.on_approval_decided(db, app, actor=user.email)
+        await db.refresh(app)
+        if merge_result is not None:
+            await event_bus.emit("approval.merge_result", {"approval_id": app.id, **merge_result})
     return app
 
 

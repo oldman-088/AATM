@@ -81,8 +81,16 @@ class DoneAction(ActionModel):
     deliverables: list[str] = Field(default_factory=list, max_length=100)
 
 
+class ReviewAction(ActionModel):
+    """Reviewer verdict on a pull request. AI reviewers can never APPROVE; merges need a human."""
+
+    action: Literal["review"]
+    event: Literal["COMMENT", "REQUEST_CHANGES"]
+    body: str = Field(min_length=2, max_length=8_000)
+
+
 Action: TypeAlias = Annotated[
-    ReadAction | WriteAction | RunAction | MessageAction | ApprovalAction | DoneAction,
+    ReadAction | WriteAction | RunAction | MessageAction | ApprovalAction | DoneAction | ReviewAction,
     Field(discriminator="action"),
 ]
 _ACTION_ADAPTER = TypeAdapter(Action)
@@ -95,6 +103,7 @@ Supported actions and required shapes:
 - {\"action\":\"message\",\"recipient_id\":\"collaborator-id\",\"instructions\":\"...\"}
 - {\"action\":\"approval\",\"action_type\":\"deploy\",\"title\":\"...\",\"description\":\"...\",\"payload\":{}}
 - {\"action\":\"done\",\"summary\":\"...\",\"deliverables\":[\"relative/file\"]}
+- {\"action\":\"review\",\"event\":\"COMMENT\" or \"REQUEST_CHANGES\",\"body\":\"...\"} (pull-request review tasks only; finishes the review)
 Unknown actions, extra fields, missing fields, multiple objects, prose, or malformed JSON are invalid. Never infer or invent a missing action. Protected, destructive, and credential-touching operations cannot be executed; request approval instead. Paths must be relative to your workspace. Do not read or write credential stores or repository-control metadata."""
 
 REMOTE_ACTION_PROTOCOL = """Return exactly one JSON object and no other text (an optional single ```json fenced block is accepted).
