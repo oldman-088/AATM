@@ -429,6 +429,68 @@ export interface Translations {
     statusOffline: string
     statusNeedsHuman: string
   }
+  arenaAgent: {
+    title: string
+    subtitle: string
+    connector: string
+    connectorOn: string
+    connectorMock: string
+    connectorOff: string
+    activeProfiles: string
+    openSessions: string
+    runningTasks: string
+    completedTasks: string
+    failedTasks: string
+    needsHumanCount: string
+    distribution: string
+    employee: string
+    profile: string
+    mode: string
+    modeAgent: string
+    modeChat: string
+    switchToAgent: string
+    switchToChat: string
+    allAgentMode: string
+    sessionStatus: string
+    currentTask: string
+    pageState: string
+    branch: string
+    pullRequest: string
+    lastActivity: string
+    keepWorking: string
+    error: string
+    humanEvents: string
+    none: string
+    newSession: string
+    submitTask: string
+    chooseTask: string
+    continueWorking: string
+    readLastReply: string
+    selectorTest: string
+    generateScript: string
+    rotateScript: string
+    resumeSession: string
+    viewLiveDiff: string
+    viewPr: string
+    liveDiff: string
+    files: string
+    commits: string
+    additions: string
+    deletions: string
+    compare: string
+    latestChanges: string
+    noDiff: string
+    lastReply: string
+    selectorReport: string
+    selectorOk: string
+    selectorFailed: string
+    humanAlert: string
+    humanAlertHint: string
+    noEmployees: string
+    liveFrames: string
+    states: Record<string, string>
+    phases: Record<string, string>
+  }
   home: {
     title: string
     architecture: string
