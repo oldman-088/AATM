@@ -155,6 +155,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
         },
       ],
     })
+    fireEvent.click(navButton('Executive Dashboard'))
     fireEvent.click(screen.getByRole('button', { name: /Run Orchestration Cycle/ }))
 
     const resume = await screen.findByRole('button', { name: /Resume System/ })
@@ -744,6 +745,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
       },
     })
     await renderWorkspace()
+    fireEvent.click(navButton('Executive Dashboard'))
     expect(await screen.findByText('SANDBOX_UNAVAILABLE')).toBeInTheDocument()
     expect(screen.getByText(/Sandbox image 'aatm-sandbox:latest' is missing\./)).toBeInTheDocument()
   })
@@ -796,6 +798,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
       },
     })
     await renderWorkspace()
+    fireEvent.click(navButton('Executive Dashboard'))
     expect(await screen.findByText('NO_MODEL_CONFIGURED')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Open Provider Setup Wizard/i }))
 
@@ -815,9 +818,9 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
     localStorage.setItem('aatm_jwt_token', 'test-jwt')
     await renderWorkspace()
 
-    // Mobile navigation container exposes all 12 tabs
+    // Mobile navigation exposes the Command Bridge plus the 12 advanced screens.
     const mobileNav = await screen.findByLabelText('Mobile navigation')
-    expect(mobileNav.querySelectorAll('button')).toHaveLength(12)
+    expect(mobileNav.querySelectorAll('button')).toHaveLength(13)
 
     // Light/dark theme toggle updates root element class cleanly
     const themeBtn = screen.getByRole('button', { name: /Theme Mode/i })

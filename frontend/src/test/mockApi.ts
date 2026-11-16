@@ -300,6 +300,33 @@ export const fixtures: Record<string, RouteValue> = {
       pytest_result: { exit_code: 0 },
     }
   },
+  '/api/health': {
+    status: 'ok',
+    service: 'aatm-backend',
+    version: '3.1.0',
+    environment: 'development',
+    sandbox: { status: 'READY', available: true, mode: 'process', image: 'aatm-sandbox:latest', reason: null },
+    model_status: {
+      status: 'CONFIGURED',
+      configured: true,
+      configured_providers: ['anthropic-claude'],
+      diagnostic_only_providers: [],
+      reason: null,
+    },
+  },
+  '/api/v1/dashboard/employees': { employees: [] },
+  '/api/v1/dashboard/home': {
+    architecture: [{ id: 'dashboard', count: null }],
+    counters: { active_employees: 1, total_employees: 2, tasks_by_status: {}, open_prs: 0, cost_today_usd: 0, daily_budget_usd: 20, needs_human: 0 },
+  },
+  '/api/v1/code-stream': { agents: {}, pending: 0 },
+  '/api/v1/arena/connector/status': {
+    enabled: false,
+    real_enabled: false,
+    status_label: 'waiting_for_arena_approval',
+    bridge: { ok: false, code: 'not_enabled' },
+  },
+  '/api/v1/arena/profiles': [],
   '/api/v1/security/sanitize': { injection_detected: true, quarantined_text: '[QUARANTINED]' },
   '/api/v1/workspaces/worker-1/files': { files: [{ path: 'hello_aatm.py', size_bytes: 44 }] },
   '/api/v1/workspaces/worker-1/exec': { exit_code: 0, stdout: 'AATM isolated workspace verified' },

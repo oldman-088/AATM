@@ -1,3 +1,10 @@
+// Bundled fonts (no Google Fonts CDN): Arabic UI, code and HUD display faces.
+import '@fontsource/ibm-plex-sans-arabic/arabic-400.css'
+import '@fontsource/ibm-plex-sans-arabic/arabic-700.css'
+import '@fontsource/ibm-plex-sans-arabic/latin-400.css'
+import '@fontsource/ibm-plex-sans-arabic/latin-700.css'
+import '@fontsource/jetbrains-mono/latin-400.css'
+import '@fontsource/orbitron/latin-700.css'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
