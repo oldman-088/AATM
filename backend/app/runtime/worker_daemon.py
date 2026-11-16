@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from app.runtime.agent_protocol import validate_run_command
+from app.runtime.remote_agent_loop import RemoteAgentLoop
 from app.runtime.sandbox import (
     DEFAULT_DOCKER_IMAGE,
     WorkspaceSandboxError,
@@ -59,6 +61,7 @@ class WorkerConfig:
     keepalive_seconds: float | None = None
     max_concurrent: int = 2
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
+    max_iterations: int = 8
     device_type: str = "remote_server"
     sandbox_mode: str = "process"
     sandbox_memory_mb: int = 512
@@ -82,6 +85,8 @@ class WorkerConfig:
             poll_seconds=float(os.environ.get("AATM_WORKER_POLL_SECONDS", DEFAULT_POLL_SECONDS)),
             keepalive_seconds=keepalive,
             max_concurrent=int(os.environ.get("AATM_WORKER_MAX_CONCURRENT", 2)),
+            max_iterations=int(os.environ.get("AATM_WORKER_MAX_ITERATIONS", 8)),
+            command_timeout=int(os.environ.get("AATM_WORKER_COMMAND_TIMEOUT", DEFAULT_COMMAND_TIMEOUT)),
             device_type=os.environ.get("AATM_DEVICE_TYPE", "remote_server"),
             sandbox_mode=os.environ.get("AATM_SANDBOX_MODE", "process").strip().lower() or "process",
             sandbox_memory_mb=int(os.environ.get("AATM_SANDBOX_MEMORY_MB", "512")),
@@ -151,9 +156,15 @@ class WorkerDaemon:
     # ------------------------------------------------------------------ workspace
     @property
     def workspace_root(self) -> Path:
-        root = self.config.workspace_root
+        configured_root = self.config.workspace_root
+        if configured_root is None or not str(configured_root).strip():
+            raise WorkspaceSandboxError("Remote execution requires a configured device workspace jail.")
+        root = Path(configured_root).expanduser()
         root.mkdir(parents=True, exist_ok=True)
-        return root.resolve()
+        root = root.resolve(strict=True)
+        if not root.is_dir() or root == Path(root.anchor):
+            raise WorkspaceSandboxError("The configured device workspace jail must be a non-root directory.")
+        return root
 
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve a path inside this device's isolated workspace."""
@@ -219,8 +230,9 @@ class WorkerDaemon:
             }
 
     def run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
-        """Public wrapper for `_run_tool` preserving backward compatibility."""
-        return self._run_tool(command, sandbox_mode=sandbox_mode)
+        """Run a protocol-approved test/lint command inside the configured sandbox."""
+        safe_command = validate_run_command(self.workspace_root, command)
+        return self._run_tool(safe_command, sandbox_mode=sandbox_mode)
 
     # ------------------------------------------------------------------ server calls
     async def register(self) -> dict[str, Any]:
@@ -252,6 +264,44 @@ class WorkerDaemon:
         self._check_response("claim", resp)
         return resp.json().get("task")
 
+    async def request_model(self, task_id: str, context: dict[str, Any]) -> str:
+        """Request one model turn from the central router; credentials stay on the server."""
+        payload = {"worker_id": self.worker_id, **context}
+        response = await self.client.post(
+            f"/api/v1/devices/{self.config.device_id}/tasks/{task_id}/model",
+            json=payload,
+        )
+        self._check_response("model", response)
+        content = response.json().get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Central model endpoint returned no action response.")
+        return content
+
+    async def report_progress(
+        self,
+        task_id: str,
+        *,
+        progress_percent: int,
+        event: str,
+        summary: str,
+        iteration: int = 0,
+        artifact: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "worker_id": self.worker_id,
+            "progress_percent": progress_percent,
+            "event": event,
+            "summary": summary,
+            "iteration": iteration,
+            "artifact": artifact,
+        }
+        response = await self.client.post(
+            f"/api/v1/devices/{self.config.device_id}/tasks/{task_id}/progress",
+            json=payload,
+        )
+        self._check_response("progress", response)
+        return response.json()
+
     async def report(
         self,
         task_id: str,
@@ -260,6 +310,7 @@ class WorkerDaemon:
         artifacts: list[dict[str, Any]] | None = None,
         error: str | None = None,
         trace: list[dict[str, Any]] | None = None,
+        actual_deliverables: list[str] | None = None,
         total_elapsed_ms: float | None = None,
         keepalive_heartbeats: int = 0,
     ) -> dict[str, Any]:
@@ -268,6 +319,7 @@ class WorkerDaemon:
             "success": success,
             "summary": summary,
             "artifacts": artifacts or [],
+            "actual_deliverables": actual_deliverables or [],
             "error_message": error,
             "trace": trace or [],
             "keepalive_heartbeats": keepalive_heartbeats,
@@ -288,84 +340,41 @@ class WorkerDaemon:
         return min(max(0.5, float(self.config.poll_seconds)), 15.0)
 
     async def _run_task_steps(self, task: dict[str, Any], trace: list[dict[str, Any]]) -> dict[str, Any]:
-        """Run isolated workspace task steps while recording structured timing & exit-code trace entries."""
-        title = task.get("title", "Untitled task")
-        description = task.get("description", "")
-        deliverables = task.get("expected_deliverables") or ["deliverable_report.md"]
-        artifacts: list[dict[str, Any]] = []
-        steps: list[str] = []
+        """Run the structured remote AgentLoop within the device's sandboxed workspace."""
+        root = self.workspace_root
+        task_id = str(task.get("id") or "")
+        if not task_id:
+            raise ValueError("A remote AgentLoop task requires a central task id.")
 
-        # 1. Write the primary deliverable.
-        primary = deliverables[0]
-        step_t0 = time.perf_counter()
-        try:
-            target = self.resolve_path(primary)
-        except WorkspaceSandboxError as exc:
-            trace.append(
-                {
-                    "step": "write_deliverable",
-                    "action": "create",
-                    "status": "rejected",
-                    "exit_code": 1,
-                    "elapsed_ms": round((time.perf_counter() - step_t0) * 1000, 2),
-                    "detail": f"Rejected unsafe deliverable path: {exc}",
-                }
+        async def model_call(context: dict[str, Any]) -> str:
+            return await self.request_model(task_id, context)
+
+        async def progress_reporter(event: dict[str, Any]) -> None:
+            await self.report_progress(
+                task_id,
+                progress_percent=int(event.get("progress_percent", 0)),
+                event=str(event.get("event", "agent_action")),
+                summary=str(event.get("summary", "")),
+                iteration=int(event.get("iteration", 0)),
+                artifact=event.get("artifact"),
             )
-            return {
-                "success": False,
-                "summary": f"Rejected unsafe deliverable path: {exc}",
-                "artifacts": [],
-                "trace": trace,
-            }
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            f"# {title}\n\n"
-            f"## Instructions\n{description or '(none provided)'}\n\n"
-            f"## Execution\n"
-            f"- Device: {self.config.device_id}\n"
-            f"- Worker: {self.worker_id}\n"
-            f"- Workspace: {self.workspace_root}\n"
-            f"- Host: {platform.node()} ({platform.system()} {platform.release()})\n",
-            encoding="utf-8",
+
+        employee = task.get("employee") if isinstance(task.get("employee"), dict) else {}
+        loop = RemoteAgentLoop(
+            workspace_root=root,
+            permissions=list(employee.get("permissions") or []),
+            model_call=model_call,
+            progress_reporter=progress_reporter,
+            tool_runner=self.run_tool,
+            max_iterations=self.config.max_iterations,
         )
-        write_ms = round((time.perf_counter() - step_t0) * 1000, 2)
-        artifacts.append({"relative_path": primary, "action": "create", "exit_code": 0})
-        steps.append(f"Wrote deliverable '{primary}'")
-        trace.append(
-            {
-                "step": "write_deliverable",
-                "action": "create",
-                "status": "completed",
-                "exit_code": 0,
-                "elapsed_ms": write_ms,
-                "detail": f"Wrote '{primary}'",
-            }
-        )
-
-        # 2. Run the project test-suite if one is present, so the report carries evidence.
-        if (self.workspace_root / "pytest.ini").exists() or any(self.workspace_root.glob("test_*.py")):
-            test_result = await asyncio.to_thread(self.run_tool, ["pytest", "-q"])
-            exit_code = int(test_result["exit_code"])
-            artifacts.append(
-                {"relative_path": ".", "action": "test", "exit_code": exit_code}
-            )
-            steps.append(f"pytest exit={exit_code}")
-            trace.append(
-                {
-                    "step": "pytest",
-                    "action": "test",
-                    "status": "completed" if exit_code == 0 else "failed",
-                    "exit_code": exit_code,
-                    "elapsed_ms": float(test_result.get("elapsed_ms", 0.0)),
-                    "detail": f"pytest exit={exit_code}",
-                }
-            )
-
-        summary = "; ".join(steps) or "Deliverable written"
-        return {"success": True, "summary": summary, "artifacts": artifacts, "trace": trace}
+        result = await loop.execute(task)
+        trace.extend(result.get("trace", []))
+        return result
 
     async def execute_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a claimed task inside the isolated workspace with an in-flight heartbeat keepalive loop."""
+        _ = self.workspace_root  # Fail closed before creating model, progress, or subprocess work.
         exec_t0 = time.perf_counter()
         trace: list[dict[str, Any]] = []
         keepalive_heartbeats = 0
@@ -456,6 +465,7 @@ class WorkerDaemon:
 
         Returns the executed task payload, or None when there was no work to do.
         """
+        _ = self.workspace_root  # Do not heartbeat or claim work unless the device jail exists.
         await self.heartbeat()
         task = await self.claim()
         if not task:
@@ -483,6 +493,7 @@ class WorkerDaemon:
             artifacts=result.get("artifacts", []),
             error=result.get("error"),
             trace=result.get("trace", []),
+            actual_deliverables=result.get("actual_deliverables", []),
             total_elapsed_ms=result.get("total_elapsed_ms"),
             keepalive_heartbeats=int(result.get("keepalive_heartbeats", 0)),
         )
@@ -531,7 +542,15 @@ def _parse_args(argv: list[str] | None = None) -> tuple[WorkerConfig, int | None
     parser.add_argument("--poll-seconds", type=float, default=env.poll_seconds)
     parser.add_argument("--keepalive-seconds", type=float, default=env.keepalive_seconds)
     parser.add_argument("--max-concurrent", type=int, default=env.max_concurrent)
+    parser.add_argument("--max-iterations", type=int, default=env.max_iterations)
+    parser.add_argument("--command-timeout", type=int, default=env.command_timeout)
     parser.add_argument("--device-type", default=env.device_type)
+    parser.add_argument("--sandbox-mode", default=env.sandbox_mode, choices=("process", "docker"))
+    parser.add_argument("--sandbox-memory-mb", type=int, default=env.sandbox_memory_mb)
+    parser.add_argument("--sandbox-cpu-seconds", type=int, default=env.sandbox_cpu_seconds)
+    parser.add_argument("--sandbox-cpu-limit", type=float, default=env.sandbox_cpu_limit)
+    parser.add_argument("--sandbox-pids-limit", type=int, default=env.sandbox_pids_limit)
+    parser.add_argument("--sandbox-docker-image", default=env.sandbox_docker_image)
     parser.add_argument("--max-cycles", type=int, default=None, help="Stop after N cycles (testing)")
     parser.add_argument("--print-config", action="store_true", help="Print the effective config and exit")
     args = parser.parse_args(argv)
@@ -545,7 +564,15 @@ def _parse_args(argv: list[str] | None = None) -> tuple[WorkerConfig, int | None
         poll_seconds=args.poll_seconds,
         keepalive_seconds=args.keepalive_seconds,
         max_concurrent=args.max_concurrent,
+        max_iterations=args.max_iterations,
+        command_timeout=args.command_timeout,
         device_type=args.device_type,
+        sandbox_mode=args.sandbox_mode,
+        sandbox_memory_mb=args.sandbox_memory_mb,
+        sandbox_cpu_seconds=args.sandbox_cpu_seconds,
+        sandbox_cpu_limit=args.sandbox_cpu_limit,
+        sandbox_pids_limit=args.sandbox_pids_limit,
+        sandbox_docker_image=args.sandbox_docker_image,
     )
     if args.print_config:
         redacted = json.dumps(
@@ -556,6 +583,13 @@ def _parse_args(argv: list[str] | None = None) -> tuple[WorkerConfig, int | None
                 "workspace_root": str(config.workspace_root),
                 "poll_seconds": config.poll_seconds,
                 "max_concurrent": config.max_concurrent,
+                "max_iterations": config.max_iterations,
+                "command_timeout": config.command_timeout,
+                "sandbox_mode": config.sandbox_mode,
+                "sandbox_memory_mb": config.sandbox_memory_mb,
+                "sandbox_cpu_limit": config.sandbox_cpu_limit,
+                "sandbox_pids_limit": config.sandbox_pids_limit,
+                "sandbox_docker_image": config.sandbox_docker_image,
             },
             indent=2,
         )

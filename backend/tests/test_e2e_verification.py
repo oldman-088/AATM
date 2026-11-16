@@ -19,13 +19,15 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.api.routes import devices as device_routes
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
-from app.models import Task
+from app.models import ExecutionDevice, Task
 from app.orchestration.replacement import EMERGENCY_STOP_MARKER
+from app.providers.base import ProviderResponse
 from app.qa.engine import FORBIDDEN_ARTIFACT_RULES, qa_engine
 from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
 
@@ -585,7 +587,33 @@ async def test_e2e_benign_directives_are_not_gated(client, auth_headers, directi
 # --------------------------------------------------------------------------------------
 # Multi-device worker daemon round trip
 # --------------------------------------------------------------------------------------
-async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, project_id, tmp_path):
+async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, project_id, tmp_path, monkeypatch):
+    model_actions = iter(
+        [
+            '{"action":"write","path":"remote_deliverable.md","content":"# Remote task\\n\\nCompleted by the isolated worker.\\n"}',
+            '{"action":"done","summary":"Created and verified the remote deliverable.","deliverables":["remote_deliverable.md"]}',
+        ]
+    )
+    model_requests = []
+    reserved_slot_counts: list[int] = []
+
+    async def mock_model_turn(db, request, *, preferred_provider_id=None):
+        model_requests.append((request, preferred_provider_id))
+        device = await db.get(ExecutionDevice, "e2e-node-01")
+        if device is not None:
+            reserved_slot_counts.append(device.active_tasks)
+        return ProviderResponse(
+            provider_id="arena-agent",
+            model="arena-agent-coder",
+            content=next(model_actions),
+            input_tokens=10,
+            output_tokens=10,
+            estimated_cost_usd=0.0,
+            latency_ms=0.0,
+            success=True,
+        )
+
+    monkeypatch.setattr(device_routes.provider_router, "route_and_execute", mock_model_turn)
     await _cancel_all_queued(client, auth_headers)
 
     # 1. An operator registers the execution node and receives its device token.
@@ -595,10 +623,11 @@ async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, p
         json={
             "id": "e2e-node-01",
             "name": "E2E Remote Node",
-            "device_type": "remote_server",
-            "host_address": "10.0.0.99",
-            "os_name": "Ubuntu 24.04",
-        },
+                "device_type": "remote_server",
+                "host_address": "10.0.0.99",
+                "os_name": "Ubuntu 24.04",
+                "max_concurrent_tasks": 1,
+            },
     )
     assert reg.status_code == 201
     device_token = reg.json()["device_token"]
@@ -622,6 +651,7 @@ async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, p
                 token=device_token,
                 workspace_root=tmp_path / "e2e-node-01",
                 poll_seconds=0.01,
+                max_concurrent=1,
             ),
             client=daemon_client,
         )
@@ -645,12 +675,20 @@ async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, p
         executed = await daemon.run_once()
         assert executed is not None, "the daemon must claim an eligible task"
         assert executed["id"] == task["id"]
+        assert len(model_requests) == 2
+        assert all(request.task_id == task["id"] for request, _ in model_requests)
+        assert all(provider_id == "arena-agent" for _, provider_id in model_requests)
+        assert reserved_slot_counts == [1, 1]
 
         # 4. The server marks the task complete and records the artifact.
         stored = next(t for t in (await client.get("/api/v1/tasks")).json() if t["id"] == task["id"])
         assert stored["status"] == "completed"
         assert stored["device_id"] == "e2e-node-01"
         assert "remote_deliverable.md" in (stored["actual_deliverables"] or [])
+        async with AsyncSessionLocal() as db:
+            device_record = await db.get(ExecutionDevice, "e2e-node-01")
+            assert device_record is not None
+            assert device_record.active_tasks == 0
 
         # 5. The deliverable really exists inside the remote node's isolated workspace.
         remote_ws = tmp_path / "e2e-node-01"
@@ -1762,8 +1800,3 @@ def test_e2e_round4_settings_env_and_hardened_docker_compose_worker():
     assert "cap_drop:" in compose_text
     assert "pids_limit: 64" in compose_text
     assert "AATM_SANDBOX_MODE" in compose_text
-
-
-
-
-

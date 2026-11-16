@@ -6,10 +6,10 @@ from app.api.deps import get_current_user, require_role
 from app.browser.engines import BROWSER_ENGINE_REGISTRY
 from app.browser.manager import browser_manager, detect_playwright_capabilities
 from app.core.config import get_settings
-from app.core.security import mask_credential_ref
 from app.db.session import get_db
 from app.models import AIProvider, BrowserProfile, BrowserSession, ProviderUsageLog, User
 from app.providers.base import ProviderRequest
+from app.providers.base import validate_credential_ref as validate_provider_credential_ref
 from app.providers.router import provider_router
 from app.schemas.common import (
     BrowserCreateRequest,
@@ -20,25 +20,28 @@ from app.schemas.common import (
     ProviderCreateOrUpdate,
     ProviderTestRequest,
     ProviderUsageResponse,
-    validate_credential_ref,
+)
+from app.schemas.common import (
+    validate_credential_ref as validate_credential_ref_format,
 )
 
 router = APIRouter(tags=["providers-browsers"])
 
 
 def _serialize_provider(p: AIProvider) -> dict:
+    credential_configured, _ = validate_provider_credential_ref(p.credential_ref)
     return {
         "id": p.id,
         "name": p.name,
         "provider_type": p.provider_type,
         "endpoint_url": p.endpoint_url,
-        "credential_status": mask_credential_ref(p.credential_ref),
+        "credential_status": "configured" if credential_configured else "not_configured",
         "credential_ref": p.credential_ref,
         "default_model": p.default_model,
         "available_models": p.available_models,
         "priority": p.priority,
         "is_enabled": p.is_enabled,
-        "health_status": p.health_status,
+        "health_status": p.health_status if credential_configured else "degraded",
         "latency_ms": p.latency_ms,
         "daily_limit_usd": p.daily_limit_usd,
         "last_checked_at": p.last_checked_at,
@@ -46,21 +49,26 @@ def _serialize_provider(p: AIProvider) -> dict:
 
 
 def _serialize_browser(b: BrowserProfile) -> dict:
+    live_context = browser_manager.has_live_context(b.id)
+    status = "unavailable" if b.status == "running" and not live_context else b.status
+    engine_mode = b.engine_mode if live_context or b.status != "running" else "unavailable"
     return {
         "id": b.id,
         "name": b.name,
         "agent_id": b.agent_id,
         "profile_dir": b.profile_dir,
         "mode": b.mode,
-        "status": b.status,
+        "status": status,
+        "live_context": live_context,
         "lock_owner": b.lock_owner,
         "current_url": b.current_url,
         "page_title": b.page_title,
         "viewport_width": b.viewport_width,
         "viewport_height": b.viewport_height,
         "crash_count": b.crash_count,
-        "memory_mb": b.memory_mb,
-        "engine_mode": b.engine_mode,
+        "memory_mb": None,
+        "memory_status": "not_measured",
+        "engine_mode": engine_mode,
         "last_snapshot_svg": b.last_snapshot_svg,
         "last_heartbeat": b.last_heartbeat,
     }
@@ -79,7 +87,7 @@ async def upsert_provider(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        validate_credential_ref(body.credential_ref)
+        validate_credential_ref_format(body.credential_ref)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -162,7 +170,12 @@ async def test_provider(
         "content": resp.content,
         "input_tokens": resp.input_tokens,
         "output_tokens": resp.output_tokens,
+        "input_tokens_estimated": resp.input_tokens_estimated,
+        "output_tokens_estimated": resp.output_tokens_estimated,
         "estimated_cost_usd": resp.estimated_cost_usd,
+        "confirmed_cost_usd": resp.confirmed_cost_usd,
+        "retryable": resp.retryable,
+        "retry_after_s": resp.retry_after_s,
         "latency_ms": resp.latency_ms,
         "error_message": resp.error_message,
     }
@@ -197,7 +210,10 @@ async def get_provider_usage(db: AsyncSession = Depends(get_db)):
                 "model_name": lg.model_name,
                 "input_tokens": lg.input_tokens,
                 "output_tokens": lg.output_tokens,
+                "input_tokens_estimated": lg.input_tokens_estimated,
+                "output_tokens_estimated": lg.output_tokens_estimated,
                 "estimated_cost_usd": lg.estimated_cost_usd,
+                "confirmed_cost_usd": lg.confirmed_cost_usd,
                 "latency_ms": lg.latency_ms,
                 "success": lg.success,
                 "error_message": lg.error_message,

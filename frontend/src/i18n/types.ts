@@ -245,6 +245,7 @@ export interface Translations {
     recover: string
     enginesTitle: string
     userscriptsTitle: string
+    userscriptsStorageNotice: string
     userscriptPolicyError: string
     userscriptNamePlaceholder: string
     matchPatternPlaceholder: string

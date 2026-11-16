@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from typing import Any
 from urllib.parse import urlparse
 
+from fastapi import HTTPException
+
 from app.browser.manager import (
     BrowserManager,
     browser_manager,
@@ -334,29 +336,36 @@ class PlaywrightEngineAdapter(BaseBrowserEngineAdapter):
         caps = detect_playwright_capabilities()
         return {
             "engine": self.engine_name,
-            "supports_persistent_profiles": True,
-            "supports_userscripts": True,
-            "supports_screenshots": True,
+            "supports_persistent_profiles": bool(caps["chromium_installed"]),
+            "supports_userscripts": False,
+            "userscripts_mode": "storage_only",
+            "supports_screenshots": bool(caps["chromium_installed"]),
             "playwright_installed": caps["playwright_installed"],
             "chromium_installed": caps["chromium_installed"],
             "engine_mode": caps["engine_mode"],
-            "status": "ready" if caps["chromium_installed"] else "headless_fallback",
+            "status": "ready" if caps["chromium_installed"] else "not_implemented",
         }
 
+    async def execute_workflow(
+        self,
+        db: Any,
+        profile: Any,
+        steps: list[dict[str, Any]],
+        *,
+        manager: BrowserManager | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        return await _execute_workflow_via_manager(
+            engine_name=self.engine_name,
+            db=db,
+            profile=profile,
+            steps=steps,
+            manager=manager,
+            actor=actor,
+        )
+
     async def execute_action(self, profile_id: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        ok, msg = _validate_engine_action(action, params)
-        if not ok:
-            return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
-        caps = detect_playwright_capabilities()
-        return {
-            "engine": self.engine_name,
-            "profile_id": profile_id,
-            "action": action,
-            "engine_mode": caps["engine_mode"],
-            "executed_live": bool(caps["chromium_installed"]),
-            "status": "executed" if caps["chromium_installed"] else "headless_fallback",
-            "params": _redact_action_params(params),
-        }
+        return await _execute_adapter_action(self, profile_id, action, params)
 
 
 EXECUTABLE_WORKFLOW_STEPS = {
@@ -365,6 +374,7 @@ EXECUTABLE_WORKFLOW_STEPS = {
     "click_element",
     "fill",
     "fill_input",
+    "type",
     "snapshot",
     "capture_snapshot",
     "extract_text",
@@ -404,7 +414,7 @@ def _validate_workflow_steps(steps: Any, *, require_executable: bool = False) ->
                 return False, f"Step {idx} ('navigate') requires a valid 'url'."
             if step_type in ("click", "click_element", "extract_text") and not step.get("selector"):
                 return False, f"Step {idx} ('{step_type}') requires a valid 'selector'."
-            if step_type in ("fill", "fill_input") and (not step.get("selector") or "value" not in step):
+            if step_type in ("fill", "fill_input", "type") and (not step.get("selector") or "value" not in step):
                 return False, f"Step {idx} ('{step_type}') requires 'selector' and 'value'."
         inline_code = step.get("code") or step.get("script")
         if inline_code:
@@ -507,8 +517,9 @@ async def _execute_workflow_via_manager(
                 )
                 if not step_ok:
                     return _fail(idx, res.get("error", f"Step {idx} ('{step_type}') failed."))
-            elif step_type in ("fill", "fill_input"):
-                res = await mgr.fill_input(
+            elif step_type in ("fill", "fill_input", "type"):
+                input_action = mgr.type_text if step_type == "type" else mgr.fill_input
+                res = await input_action(
                     db,
                     profile,
                     str(step["selector"]),
@@ -521,7 +532,7 @@ async def _execute_workflow_via_manager(
                 trace.append(
                     {
                         "step_index": idx,
-                        "type": "fill_input",
+                        "type": "type" if step_type == "type" else "fill_input",
                         "status": "completed" if step_ok else "failed",
                         "elapsed_ms": elapsed_ms,
                         "engine_mode": res.get("engine_mode"),
@@ -601,6 +612,8 @@ async def _execute_workflow_via_manager(
                         "wait_ms": bounded_ms,
                     }
                 )
+        except HTTPException:
+            raise
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - step_t0) * 1000, 2)
             trace.append(
@@ -640,6 +653,41 @@ def _action_params_to_steps(action: str, params: dict[str, Any]) -> list[dict[st
     return [step]
 
 
+async def _execute_adapter_action(adapter: Any, profile_id: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
+    action_clean = (action or "").strip().lower()
+    if action_clean == "run_userscript":
+        raise HTTPException(
+            status_code=501,
+            detail="Userscripts are storage only and are not injected or executed.",
+        )
+    ok, msg = _validate_engine_action(action, params)
+    if not ok:
+        return {"engine": adapter.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
+    steps = _action_params_to_steps(action, params)
+    steps_ok, steps_msg = _validate_workflow_steps(steps, require_executable=True)
+    if not steps_ok:
+        return {
+            "engine": adapter.engine_name,
+            "profile_id": profile_id,
+            "action": action,
+            "status": "rejected",
+            "reason": steps_msg,
+        }
+    if "db" not in params or "profile" not in params:
+        raise HTTPException(
+            status_code=501,
+            detail=f"Browser action '{action_clean}' requires a live Playwright profile context.",
+        )
+    result = await adapter.execute_workflow(
+        params["db"],
+        params["profile"],
+        steps,
+        manager=params.get("manager"),
+        actor=str(params.get("actor") or "system"),
+    )
+    result["action"] = action
+    return result
+
 class BrowserUseEngineAdapter(BaseBrowserEngineAdapter):
     engine_name = "browser_use"
 
@@ -650,13 +698,14 @@ class BrowserUseEngineAdapter(BaseBrowserEngineAdapter):
             installed = True
         except Exception:
             installed = False
+        caps = detect_playwright_capabilities()
         return {
             "engine": self.engine_name,
             "package_installed": installed,
-            "supports_step_execution": True,
+            "supports_step_execution": bool(caps["chromium_installed"]),
             "supported_steps": sorted(EXECUTABLE_WORKFLOW_STEPS),
             "delegates_to": "playwright",
-            "status": "ready" if installed else "adapter_ready_optional_pkg",
+            "status": "ready" if caps["chromium_installed"] else "not_implemented",
         }
 
     async def execute_workflow(
@@ -679,40 +728,20 @@ class BrowserUseEngineAdapter(BaseBrowserEngineAdapter):
         )
 
     async def execute_action(self, profile_id: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        ok, msg = _validate_engine_action(action, params)
-        if not ok:
-            return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
-        if "db" in params and "profile" in params:
-            steps = _action_params_to_steps(action, params)
-            res = await self.execute_workflow(
-                params["db"],
-                params["profile"],
-                steps,
-                manager=params.get("manager"),
-                actor=str(params.get("actor") or "system"),
-            )
-            res["action"] = action
-            return res
-        return {
-            "engine": self.engine_name,
-            "profile_id": profile_id,
-            "action": action,
-            "delegated_to": "playwright",
-            "status": "executed",
-            "params": _redact_action_params(params),
-        }
+        return await _execute_adapter_action(self, profile_id, action, params)
 
 
 class OpenBrowserEngineAdapter(BaseBrowserEngineAdapter):
     engine_name = "openbrowser"
 
     def capabilities(self) -> dict[str, Any]:
+        caps = detect_playwright_capabilities()
         return {
             "engine": self.engine_name,
-            "supports_step_execution": True,
+            "supports_step_execution": bool(caps["chromium_installed"]),
             "supported_steps": sorted(EXECUTABLE_WORKFLOW_STEPS),
             "delegates_to": "playwright",
-            "status": "adapter_ready",
+            "status": "ready" if caps["chromium_installed"] else "not_implemented",
         }
 
     async def execute_workflow(
@@ -735,28 +764,7 @@ class OpenBrowserEngineAdapter(BaseBrowserEngineAdapter):
         )
 
     async def execute_action(self, profile_id: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        ok, msg = _validate_engine_action(action, params)
-        if not ok:
-            return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
-        if "db" in params and "profile" in params:
-            steps = _action_params_to_steps(action, params)
-            res = await self.execute_workflow(
-                params["db"],
-                params["profile"],
-                steps,
-                manager=params.get("manager"),
-                actor=str(params.get("actor") or "system"),
-            )
-            res["action"] = action
-            return res
-        return {
-            "engine": self.engine_name,
-            "profile_id": profile_id,
-            "action": action,
-            "delegated_to": "playwright",
-            "status": "executed",
-            "params": _redact_action_params(params),
-        }
+        return await _execute_adapter_action(self, profile_id, action, params)
 
 
 class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
@@ -765,13 +773,14 @@ class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
     engine_name = "automa"
 
     def capabilities(self) -> dict[str, Any]:
+        caps = detect_playwright_capabilities()
         return {
             "engine": self.engine_name,
             "supports_workflow_json": True,
-            "supports_step_execution": True,
+            "supports_step_execution": bool(caps["chromium_installed"]),
             "supported_steps": sorted(EXECUTABLE_WORKFLOW_STEPS),
             "delegates_to": "playwright",
-            "status": "ready",
+            "status": "ready" if caps["chromium_installed"] else "not_implemented",
         }
 
     @staticmethod
@@ -798,30 +807,7 @@ class AutomaWorkflowAdapter(BaseBrowserEngineAdapter):
         )
 
     async def execute_action(self, profile_id: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        ok, msg = _validate_engine_action(action, params)
-        if not ok:
-            return {"engine": self.engine_name, "profile_id": profile_id, "action": action, "status": "rejected", "reason": msg}
-
-        steps = params.get("steps", [])
-        if "db" in params and "profile" in params:
-            return await self.execute_workflow(
-                params["db"],
-                params["profile"],
-                steps,
-                manager=params.get("manager"),
-                actor=str(params.get("actor") or "system"),
-            )
-
-        steps_ok, steps_msg = _validate_workflow_steps(steps, require_executable=False)
-        if not steps_ok:
-            return {"engine": self.engine_name, "profile_id": profile_id, "status": "rejected", "reason": steps_msg}
-
-        return {
-            "engine": self.engine_name,
-            "profile_id": profile_id,
-            "steps_validated": len(steps),
-            "status": "executed",
-        }
+        return await _execute_adapter_action(self, profile_id, action, params)
 
 
 BROWSER_ENGINE_REGISTRY: dict[str, BaseBrowserEngineAdapter] = {

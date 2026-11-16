@@ -245,6 +245,7 @@ export const en: Translations = {
     recover: 'Recover',
     enginesTitle: 'Modular Browser Automation Engines',
     userscriptsTitle: 'Tampermonkey Userscripts (Policy Audited)',
+    userscriptsStorageNotice: "Scripts are stored and audited only; AATM does not inject or execute them. Regex policy checks are easy to bypass, for example window['ev'+'al'], and are not a security boundary. Enable/disable changes storage metadata only.",
     userscriptPolicyError: 'Userscript policy error',
     userscriptNamePlaceholder: 'Userscript Name',
     matchPatternPlaceholder: '@match pattern',

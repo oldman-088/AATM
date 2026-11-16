@@ -1,3 +1,6 @@
+import asyncio
+import math
+import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -151,10 +154,9 @@ class ProviderRouter:
         *,
         success: bool,
         error_message: str | None,
-        bridge_offline: bool,
-        is_dry_or_diag: bool,
+        transport_unavailable: bool,
     ) -> None:
-        if employee_session is None or is_dry_or_diag:
+        if employee_session is None:
             return
         if success:
             employee_session.message_count += 1
@@ -164,12 +166,99 @@ class ProviderRouter:
             if employee_session.status == "degraded" and employee_session.health_score >= 60.0:
                 employee_session.status = "active"
         else:
-            penalty = 5.0 if bridge_offline else 15.0
+            penalty = 5.0 if transport_unavailable else 15.0
             employee_session.error_count += 1
             employee_session.last_error = error_message
             employee_session.health_score = max(0.0, round(float(employee_session.health_score) - penalty, 2))
             if employee_session.health_score < 50.0 and employee_session.status == "active":
                 employee_session.status = "degraded"
+
+    @staticmethod
+    def _max_retries() -> int:
+        raw = os.environ.get("PROVIDER_MAX_RETRIES")
+        if raw is None:
+            raw = get_settings().PROVIDER_MAX_RETRIES
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 2
+
+    @staticmethod
+    def _retry_delay(response: ProviderResponse | ProviderStreamChunk) -> float:
+        raw = response.retry_after_s
+        if raw is None:
+            return 0.0
+        try:
+            delay = float(raw)
+            raw_cap = os.environ.get("PROVIDER_RETRY_AFTER_MAX_SECONDS")
+            cap = float(raw_cap) if raw_cap is not None else float(get_settings().PROVIDER_RETRY_AFTER_MAX_SECONDS)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(delay):
+            return max(0.0, cap) if delay > 0 else 0.0
+        return min(max(0.0, delay), max(0.0, cap))
+
+    async def _record_usage_attempt(
+        self,
+        db: AsyncSession,
+        provider: AIProvider,
+        req: ProviderRequest,
+        response: ProviderResponse | ProviderStreamChunk,
+        *,
+        attempt: int,
+        streaming: bool = False,
+    ) -> float:
+        """Persist each real provider attempt; never log dry-run placeholders as usage."""
+        if req.dry_run or response.metadata.get("dry_run"):
+            return 0.0
+
+        reported_usage = bool(response.metadata.get("confirmed_usage"))
+        cost = float(response.estimated_cost_usd) if response.success or reported_usage else 0.0
+        if not math.isfinite(cost) or cost < 0:
+            cost = 0.0
+        confirmed_cost = response.confirmed_cost_usd
+        if confirmed_cost is not None and (not math.isfinite(float(confirmed_cost)) or float(confirmed_cost) < 0):
+            confirmed_cost = None
+        db.add(
+            ProviderUsageLog(
+                provider_id=provider.id,
+                agent_id=req.agent_id,
+                task_id=req.task_id,
+                model_name=response.model,
+                input_tokens=max(0, int(response.input_tokens)),
+                output_tokens=max(0, int(response.output_tokens)),
+                input_tokens_estimated=response.input_tokens_estimated,
+                output_tokens_estimated=response.output_tokens_estimated,
+                estimated_cost_usd=cost,
+                confirmed_cost_usd=confirmed_cost,
+                latency_ms=max(0.0, float(response.latency_ms)),
+                success=response.success,
+                error_message=response.error_message,
+            )
+        )
+        if response.metadata.get("transport_unavailable"):
+            provider.health_status = "offline"
+        else:
+            provider.health_status = "healthy" if response.success else "degraded"
+        provider.latency_ms = response.latency_ms
+        provider.last_checked_at = utcnow()
+        await db.commit()
+        await event_bus.emit(
+            "provider.usage",
+            {
+                "provider_id": provider.id,
+                "model": response.model,
+                "success": response.success,
+                "estimated_cost_usd": cost,
+                "confirmed_cost_usd": confirmed_cost,
+                "retryable": response.retryable,
+                "attempt": attempt,
+                "stream": streaming,
+                "session_id": req.metadata.get("session_id"),
+                "account_id": req.metadata.get("account_id"),
+            },
+        )
+        return cost
 
     async def _resolve_employee_session_context(
         self,
@@ -229,6 +318,34 @@ class ProviderRouter:
         req: ProviderRequest,
         preferred_provider_id: str | None = None,
     ) -> ProviderResponse:
+        if req.dry_run:
+            try:
+                await self._resolve_employee_session_context(db, req)
+            except ValueError as exc:
+                return ProviderResponse(
+                    provider_id=preferred_provider_id or "none",
+                    model=req.model or "none",
+                    content="",
+                    input_tokens=0,
+                    output_tokens=0,
+                    estimated_cost_usd=0.0,
+                    latency_ms=0.0,
+                    success=False,
+                    error_message=str(exc),
+                    metadata={"cross_account_denied": True},
+                )
+            return ProviderResponse(
+                provider_id=preferred_provider_id or "none",
+                model=req.model or "none",
+                content="Dry run: no provider request was sent.",
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost_usd=0.0,
+                latency_ms=0.0,
+                success=True,
+                metadata={"dry_run": True, "mode": "dry_run"},
+            )
+
         res = await db.execute(
             select(AIProvider).where(AIProvider.is_enabled.is_(True)).order_by(AIProvider.priority.asc())
         )
@@ -254,117 +371,98 @@ class ProviderRouter:
 
         last_err = "No enabled AI providers available."
         budget_blocked = False
+        budget_error: str | None = None
         non_offline_failure = False
         offline_fallback_candidate: tuple[AIProvider, str, str] | None = None
+        last_provider_id: str | None = None
+        max_retries = self._max_retries()
 
-        for p in providers:
-            cred_ok, cred_err = validate_credential_ref(p.credential_ref)
+        for provider in providers:
+            last_provider_id = provider.id
+            cred_ok, cred_err = validate_credential_ref(provider.credential_ref)
             if not cred_ok:
-                p.health_status = "degraded"
-                p.last_checked_at = utcnow()
+                provider.health_status = "degraded"
+                provider.last_checked_at = utcnow()
                 await db.commit()
-                last_err = f"Provider {p.id}: {cred_err}"
+                last_err = f"Provider {provider.id}: {cred_err}"
                 non_offline_failure = True
                 continue
 
-            if not req.dry_run:
-                within_budget, budget_err = await self.check_spend_caps(db, p)
-                if not within_budget:
-                    last_err = budget_err or last_err
-                    budget_blocked = True
-                    non_offline_failure = True
-                    continue
+            within_budget, budget_err = await self.check_spend_caps(db, provider)
+            if not within_budget:
+                last_err = budget_err or last_err
+                budget_error = budget_err or budget_error
+                budget_blocked = True
+                non_offline_failure = True
+                continue
 
-            effective_model = self._select_model(p, req.model)
-            attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
+            effective_model = self._select_model(provider, req.model)
             adapter = build_adapter(
-                p.provider_type,
-                p.id,
-                p.endpoint_url,
-                p.credential_ref,
+                provider.provider_type,
+                provider.id,
+                provider.endpoint_url,
+                provider.credential_ref,
                 effective_model,
             )
-            response = await adapter.generate(attempt_req)
 
-            # Ensure response metadata preserves resolved employee session context
-            for key in ("session_id", "account_id", "conversation_id"):
-                if key in session_meta and key not in response.metadata:
-                    response.metadata[key] = session_meta[key]
-
-            is_dry_or_diag = bool(req.dry_run or response.metadata.get("dry_run"))
-            recorded_cost = 0.0 if is_dry_or_diag else response.estimated_cost_usd
-            confirmed_cost = (
-                recorded_cost
-                if (response.success and response.metadata.get("confirmed_usage") and not is_dry_or_diag)
-                else None
-            )
-
-            db.add(
-                ProviderUsageLog(
-                    provider_id=p.id,
-                    agent_id=req.agent_id,
-                    task_id=req.task_id,
-                    model_name=response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    estimated_cost_usd=recorded_cost,
-                    confirmed_cost_usd=confirmed_cost,
-                    latency_ms=response.latency_ms,
-                    success=response.success,
-                    error_message=response.error_message,
+            for attempt_index in range(max_retries + 1):
+                attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
+                response = await adapter.generate(attempt_req)
+                for key in ("session_id", "account_id", "conversation_id"):
+                    if key in session_meta and key not in response.metadata:
+                        response.metadata[key] = session_meta[key]
+                response.metadata.setdefault("attempt", attempt_index + 1)
+                await self._record_usage_attempt(
+                    db,
+                    provider,
+                    attempt_req,
+                    response,
+                    attempt=attempt_index + 1,
                 )
-            )
-            if response.metadata.get("bridge_offline"):
-                p.health_status = "offline"
-            else:
-                p.health_status = "healthy" if response.success else "degraded"
-            p.latency_ms = response.latency_ms
-            p.last_checked_at = utcnow()
 
-            self._update_session_health(
-                employee_session,
-                success=response.success,
-                error_message=response.error_message,
-                bridge_offline=bool(response.metadata.get("bridge_offline")),
-                is_dry_or_diag=is_dry_or_diag,
-            )
+                if response.success:
+                    self._update_session_health(
+                        employee_session,
+                        success=True,
+                        error_message=None,
+                        transport_unavailable=False,
+                    )
+                    await db.commit()
+                    return response
 
-            await db.commit()
+                last_err = response.error_message or last_err
+                if response.retryable and attempt_index < max_retries:
+                    delay = self._retry_delay(response)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
 
-            await event_bus.emit(
-                "provider.usage",
-                {
-                    "provider_id": p.id,
-                    "model": response.model,
-                    "success": response.success,
-                    "cost_usd": recorded_cost,
-                    "session_id": session_meta.get("session_id"),
-                    "account_id": session_meta.get("account_id"),
-                },
-            )
-            if response.success:
-                return response
-
-            last_err = response.error_message or last_err
-            if response.metadata.get("bridge_offline"):
-                if offline_fallback_candidate is None:
-                    offline_fallback_candidate = (p, effective_model, last_err)
-            else:
-                non_offline_failure = True
+                self._update_session_health(
+                    employee_session,
+                    success=False,
+                    error_message=response.error_message,
+                    transport_unavailable=bool(response.metadata.get("transport_unavailable")),
+                )
+                await db.commit()
+                if response.metadata.get("bridge_offline"):
+                    if offline_fallback_candidate is None:
+                        offline_fallback_candidate = (provider, effective_model, last_err)
+                else:
+                    non_offline_failure = True
+                break
 
         if req.allow_diagnostic_fallback and offline_fallback_candidate is not None and not non_offline_failure:
             offline_provider, offline_model, offline_reason = offline_fallback_candidate
-            in_tok = BaseProviderAdapter.estimate_tokens(req.system_prompt + req.prompt)
-            diag_content = (
+            diagnostic = (
                 f"[{offline_provider.id} | safe-diagnostic] Local bridge unavailable ({offline_reason}). "
                 "Running in safe zero-spend diagnostic mode until the bridge daemon is started."
             )
             return ProviderResponse(
                 provider_id=offline_provider.id,
                 model=offline_model,
-                content=diag_content,
-                input_tokens=in_tok,
-                output_tokens=BaseProviderAdapter.estimate_tokens(diag_content),
+                content=diagnostic,
+                input_tokens=BaseProviderAdapter.estimate_tokens(req.system_prompt + req.prompt),
+                output_tokens=BaseProviderAdapter.estimate_tokens(diagnostic),
                 estimated_cost_usd=0.0,
                 latency_ms=0.0,
                 success=True,
@@ -373,8 +471,14 @@ class ProviderRouter:
                     "dry_run": True,
                     "bridge_offline": True,
                     "original_error": offline_reason,
-                    **{k: session_meta[k] for k in ("session_id", "account_id", "conversation_id") if k in session_meta},
+                    **{
+                        key: session_meta[key]
+                        for key in ("session_id", "account_id", "conversation_id")
+                        if key in session_meta
+                    },
                 },
+                input_tokens_estimated=True,
+                output_tokens_estimated=True,
             )
 
         return ProviderResponse(
@@ -386,8 +490,12 @@ class ProviderRouter:
             estimated_cost_usd=0.0,
             latency_ms=0.0,
             success=False,
-            error_message=last_err,
-            metadata={"budget_exceeded": budget_blocked},
+            error_message=budget_error or last_err,
+            metadata={
+                "budget_exceeded": budget_blocked,
+                "last_provider_id": last_provider_id,
+                "diagnostic_fallback_requested": req.allow_diagnostic_fallback,
+            },
         )
 
     async def route_and_stream(
@@ -396,7 +504,38 @@ class ProviderRouter:
         req: ProviderRequest,
         preferred_provider_id: str | None = None,
     ) -> AsyncIterator[ProviderStreamChunk]:
-        """Route streaming completion requests across providers with spend caps, cross-account isolation & failover."""
+        """Route streaming requests with provider-agnostic retries and failover."""
+        if req.dry_run:
+            try:
+                await self._resolve_employee_session_context(db, req)
+            except ValueError as exc:
+                yield ProviderStreamChunk(
+                    provider_id=preferred_provider_id or "none",
+                    model=req.model or "none",
+                    done=True,
+                    finish_reason="error",
+                    success=False,
+                    error_message=str(exc),
+                    metadata={"cross_account_denied": True},
+                )
+                return
+            metadata = {"dry_run": True, "mode": "dry_run", "stream": True}
+            yield ProviderStreamChunk(
+                provider_id=preferred_provider_id or "none",
+                model=req.model or "none",
+                delta="Dry run: no provider request was sent.",
+                metadata=metadata,
+            )
+            yield ProviderStreamChunk(
+                provider_id=preferred_provider_id or "none",
+                model=req.model or "none",
+                done=True,
+                finish_reason="stop",
+                success=True,
+                metadata=metadata,
+            )
+            return
+
         res = await db.execute(
             select(AIProvider).where(AIProvider.is_enabled.is_(True)).order_by(AIProvider.priority.asc())
         )
@@ -410,7 +549,6 @@ class ProviderRouter:
             yield ProviderStreamChunk(
                 provider_id=preferred_provider_id or "none",
                 model=req.model or "none",
-                delta="",
                 done=True,
                 finish_reason="error",
                 success=False,
@@ -421,144 +559,134 @@ class ProviderRouter:
 
         last_err = "No enabled AI providers available."
         budget_blocked = False
+        budget_error: str | None = None
         non_offline_failure = False
         offline_fallback_candidate: tuple[AIProvider, str, str] | None = None
+        last_provider_id: str | None = None
+        max_retries = self._max_retries()
 
-        for p in providers:
-            cred_ok, cred_err = validate_credential_ref(p.credential_ref)
+        for provider in providers:
+            last_provider_id = provider.id
+            cred_ok, cred_err = validate_credential_ref(provider.credential_ref)
             if not cred_ok:
-                p.health_status = "degraded"
-                p.last_checked_at = utcnow()
+                provider.health_status = "degraded"
+                provider.last_checked_at = utcnow()
                 await db.commit()
-                last_err = f"Provider {p.id}: {cred_err}"
+                last_err = f"Provider {provider.id}: {cred_err}"
                 non_offline_failure = True
                 continue
 
-            if not req.dry_run:
-                within_budget, budget_err = await self.check_spend_caps(db, p)
-                if not within_budget:
-                    last_err = budget_err or last_err
-                    budget_blocked = True
-                    non_offline_failure = True
-                    continue
+            within_budget, budget_err = await self.check_spend_caps(db, provider)
+            if not within_budget:
+                last_err = budget_err or last_err
+                budget_error = budget_err or budget_error
+                budget_blocked = True
+                non_offline_failure = True
+                continue
 
-            effective_model = self._select_model(p, req.model)
-            attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
+            effective_model = self._select_model(provider, req.model)
             adapter = build_adapter(
-                p.provider_type,
-                p.id,
-                p.endpoint_url,
-                p.credential_ref,
+                provider.provider_type,
+                provider.id,
+                provider.endpoint_url,
+                provider.credential_ref,
                 effective_model,
             )
 
-            emitted_any = False
-            terminal_chunk: ProviderStreamChunk | None = None
-            async for chunk in adapter.generate_stream(attempt_req):
-                for key in ("session_id", "account_id", "conversation_id"):
-                    if key in session_meta and key not in chunk.metadata:
-                        chunk.metadata[key] = session_meta[key]
-                if not chunk.done:
-                    emitted_any = True
-                    yield chunk
-                else:
-                    terminal_chunk = chunk
+            for attempt_index in range(max_retries + 1):
+                attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
+                emitted_any = False
+                terminal_chunk: ProviderStreamChunk | None = None
+                async for chunk in adapter.generate_stream(attempt_req):
+                    for key in ("session_id", "account_id", "conversation_id"):
+                        if key in session_meta and key not in chunk.metadata:
+                            chunk.metadata[key] = session_meta[key]
+                    if not chunk.done:
+                        if chunk.delta:
+                            emitted_any = True
+                        yield chunk
+                    else:
+                        terminal_chunk = chunk
 
-            if terminal_chunk is None:
-                terminal_chunk = ProviderStreamChunk(
-                    provider_id=p.id,
-                    model=effective_model,
-                    done=True,
-                    finish_reason="error",
+                if terminal_chunk is None:
+                    terminal_chunk = ProviderStreamChunk(
+                        provider_id=provider.id,
+                        model=effective_model,
+                        done=True,
+                        finish_reason="error",
+                        success=False,
+                        error_message=f"Provider {provider.id} terminated stream without a completion frame.",
+                        metadata={"stream": True, **session_meta},
+                    )
+                terminal_chunk.metadata.setdefault("attempt", attempt_index + 1)
+                await self._record_usage_attempt(
+                    db,
+                    provider,
+                    attempt_req,
+                    terminal_chunk,
+                    attempt=attempt_index + 1,
+                    streaming=True,
+                )
+
+                if terminal_chunk.success:
+                    self._update_session_health(
+                        employee_session,
+                        success=True,
+                        error_message=None,
+                        transport_unavailable=False,
+                    )
+                    await db.commit()
+                    yield terminal_chunk
+                    return
+
+                last_err = terminal_chunk.error_message or last_err
+                if terminal_chunk.retryable and not emitted_any and attempt_index < max_retries:
+                    delay = self._retry_delay(terminal_chunk)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+
+                self._update_session_health(
+                    employee_session,
                     success=False,
-                    error_message=f"Provider {p.id} terminated stream without completion frame.",
-                    metadata={"stream": True, **session_meta},
-                )
-
-            is_dry_or_diag = bool(req.dry_run or terminal_chunk.metadata.get("dry_run"))
-            recorded_cost = 0.0 if is_dry_or_diag else terminal_chunk.estimated_cost_usd
-            confirmed_cost = (
-                recorded_cost
-                if (terminal_chunk.success and terminal_chunk.metadata.get("confirmed_usage") and not is_dry_or_diag)
-                else None
-            )
-
-            db.add(
-                ProviderUsageLog(
-                    provider_id=p.id,
-                    agent_id=req.agent_id,
-                    task_id=req.task_id,
-                    model_name=terminal_chunk.model,
-                    input_tokens=terminal_chunk.input_tokens,
-                    output_tokens=terminal_chunk.output_tokens,
-                    estimated_cost_usd=recorded_cost,
-                    confirmed_cost_usd=confirmed_cost,
-                    latency_ms=terminal_chunk.latency_ms,
-                    success=terminal_chunk.success,
                     error_message=terminal_chunk.error_message,
+                    transport_unavailable=bool(terminal_chunk.metadata.get("transport_unavailable")),
                 )
-            )
-            if terminal_chunk.metadata.get("bridge_offline"):
-                p.health_status = "offline"
-            else:
-                p.health_status = "healthy" if terminal_chunk.success else "degraded"
-            p.latency_ms = terminal_chunk.latency_ms
-            p.last_checked_at = utcnow()
-
-            self._update_session_health(
-                employee_session,
-                success=terminal_chunk.success,
-                error_message=terminal_chunk.error_message,
-                bridge_offline=bool(terminal_chunk.metadata.get("bridge_offline")),
-                is_dry_or_diag=is_dry_or_diag,
-            )
-            await db.commit()
-
-            await event_bus.emit(
-                "provider.usage",
-                {
-                    "provider_id": p.id,
-                    "model": terminal_chunk.model,
-                    "success": terminal_chunk.success,
-                    "cost_usd": recorded_cost,
-                    "stream": True,
-                    "session_id": session_meta.get("session_id"),
-                    "account_id": session_meta.get("account_id"),
-                },
-            )
-
-            if terminal_chunk.success or emitted_any:
-                yield terminal_chunk
-                return
-
-            last_err = terminal_chunk.error_message or last_err
-            if terminal_chunk.metadata.get("bridge_offline"):
-                if offline_fallback_candidate is None:
-                    offline_fallback_candidate = (p, effective_model, last_err)
-            else:
-                non_offline_failure = True
+                await db.commit()
+                if emitted_any:
+                    yield terminal_chunk
+                    return
+                if terminal_chunk.metadata.get("bridge_offline"):
+                    if offline_fallback_candidate is None:
+                        offline_fallback_candidate = (provider, effective_model, last_err)
+                else:
+                    non_offline_failure = True
+                break
 
         if req.allow_diagnostic_fallback and offline_fallback_candidate is not None and not non_offline_failure:
             offline_provider, offline_model, offline_reason = offline_fallback_candidate
-            in_tok = BaseProviderAdapter.estimate_tokens(req.system_prompt + req.prompt)
-            diag_content = (
+            diagnostic = (
                 f"[{offline_provider.id} | safe-diagnostic] Local bridge unavailable ({offline_reason}). "
                 "Running in safe zero-spend diagnostic mode until the bridge daemon is started."
             )
-            diag_meta = {
+            diagnostic_meta = {
                 "mode": "bridge_offline_diagnostic",
                 "dry_run": True,
-                "stream": True,
                 "bridge_offline": True,
+                "stream": True,
                 "original_error": offline_reason,
-                **{k: session_meta[k] for k in ("session_id", "account_id", "conversation_id") if k in session_meta},
+                **{
+                    key: session_meta[key]
+                    for key in ("session_id", "account_id", "conversation_id")
+                    if key in session_meta
+                },
             }
             yield ProviderStreamChunk(
                 provider_id=offline_provider.id,
                 model=offline_model,
-                delta=diag_content,
+                delta=diagnostic,
                 done=False,
-                metadata=diag_meta,
+                metadata=diagnostic_meta,
             )
             yield ProviderStreamChunk(
                 provider_id=offline_provider.id,
@@ -566,12 +694,13 @@ class ProviderRouter:
                 delta="",
                 done=True,
                 finish_reason="stop",
-                input_tokens=in_tok,
-                output_tokens=BaseProviderAdapter.estimate_tokens(diag_content),
+                input_tokens=BaseProviderAdapter.estimate_tokens(req.system_prompt + req.prompt),
+                output_tokens=BaseProviderAdapter.estimate_tokens(diagnostic),
                 estimated_cost_usd=0.0,
-                latency_ms=0.0,
                 success=True,
-                metadata=diag_meta,
+                metadata=diagnostic_meta,
+                input_tokens_estimated=True,
+                output_tokens_estimated=True,
             )
             return
 
@@ -582,8 +711,12 @@ class ProviderRouter:
             done=True,
             finish_reason="error",
             success=False,
-            error_message=last_err,
-            metadata={"budget_exceeded": budget_blocked, "stream": True},
+            error_message=budget_error or last_err,
+            metadata={
+                "budget_exceeded": budget_blocked,
+                "last_provider_id": last_provider_id,
+                "stream": True,
+            },
         )
 
     async def recover_degraded_sessions(

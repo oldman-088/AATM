@@ -283,10 +283,38 @@ async def list_browser_engines():
     return {k: v.capabilities() for k, v in BROWSER_ENGINE_REGISTRY.items()}
 
 
+USERSCRIPT_STORAGE_ONLY_NOTICE = (
+    "AATM stores and audits userscripts but does not inject or execute them. "
+    "Regex policy checks are bypassable (for example, window['ev'+'al']) and are not a security boundary."
+)
+
+
+def _serialize_userscript(script: Userscript) -> dict[str, Any]:
+    """Expose stored policy metadata without implying script execution or reporting fake run counters."""
+    return {
+        "id": script.id,
+        "name": script.name,
+        "namespace": script.namespace,
+        "version": script.version,
+        "description": script.description,
+        "match_patterns": script.match_patterns,
+        "allowed_roles": script.allowed_roles,
+        "allowed_agent_ids": script.allowed_agent_ids,
+        "code": script.code,
+        "is_enabled": script.is_enabled,
+        "audit_status": script.audit_status,
+        "created_at": script.created_at,
+        "storage_only": True,
+        "execution_supported": False,
+        "policy_checks_security_boundary": False,
+        "policy_notice": USERSCRIPT_STORAGE_ONLY_NOTICE,
+    }
+
+
 @router.get("/userscripts")
 async def list_userscripts(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Userscript).order_by(Userscript.created_at.desc()))).scalars().all()
-    return list(rows)
+    return [_serialize_userscript(row) for row in rows]
 
 
 @router.post("/userscripts", status_code=201)
@@ -317,7 +345,7 @@ async def create_userscript(
     db.add(us)
     await db.commit()
     await db.refresh(us)
-    return us
+    return _serialize_userscript(us)
 
 
 @router.patch("/userscripts/{script_id}/toggle")
@@ -332,7 +360,7 @@ async def toggle_userscript(
     us.is_enabled = not us.is_enabled
     await db.commit()
     await db.refresh(us)
-    return us
+    return _serialize_userscript(us)
 
 
 @router.get("/messages")

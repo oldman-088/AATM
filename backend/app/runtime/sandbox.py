@@ -10,7 +10,7 @@ import os
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 try:
     import resource
@@ -61,9 +61,93 @@ SENSITIVE_ENV_SUBSTRINGS: tuple[str, ...] = (
     "AUTH",
 )
 
+SENSITIVE_WORKSPACE_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".ssh",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".gnupg",
+        ".docker",
+        ".terraform",
+        "secrets",
+        "credentials",
+        "credential",
+        "private_keys",
+        "private-keys",
+    }
+)
+SENSITIVE_WORKSPACE_FILES: frozenset[str] = frozenset(
+    {
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".pgpass",
+        ".git-credentials",
+        ".gitconfig",
+        "authorized_keys",
+        "known_hosts",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials.json",
+        "secrets.json",
+        "service-account.json",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+    }
+)
+SENSITIVE_WORKSPACE_SUFFIXES: tuple[str, ...] = (
+    ".key",
+    ".pem",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".kdbx",
+    ".tfstate",
+    ".tfstate.backup",
+    ".secret",
+    ".secrets",
+    ".credential",
+    ".credentials",
+    ".token",
+    ".password",
+)
+
 
 class WorkspaceSandboxError(PermissionError):
     """Raised when an operation would escape its isolated workspace, use a denied tool, or fail sandbox policy."""
+
+
+def is_sensitive_workspace_path(relative_path: str) -> bool:
+    """Return True for credential stores and repository-control metadata.
+
+    The check is case-insensitive and examines every path component, so a secret
+    file cannot be exposed merely by nesting it below an otherwise ordinary folder.
+    """
+    if not isinstance(relative_path, str):
+        return True
+    normalized = relative_path.strip().replace("\\", "/")
+    if not normalized or "\x00" in normalized or normalized.startswith("/") or PureWindowsPath(normalized).drive:
+        return True
+
+    parts = [part.lower() for part in normalized.split("/") if part not in ("", ".")]
+    if not parts:
+        return True
+    if any(part in SENSITIVE_WORKSPACE_DIRS for part in parts):
+        return True
+    if any(part == ".env" or part.startswith(".env.") for part in parts):
+        return True
+
+    basename = parts[-1]
+    if basename in SENSITIVE_WORKSPACE_FILES:
+        return True
+    return basename.endswith(SENSITIVE_WORKSPACE_SUFFIXES)
 
 
 @dataclass(frozen=True)

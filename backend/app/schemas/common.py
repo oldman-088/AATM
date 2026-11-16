@@ -101,7 +101,7 @@ class TaskUpdate(BaseModel):
 class ProviderCreateOrUpdate(BaseModel):
     id: str | None = None
     name: str
-    provider_type: str = Field(pattern="^(arena_local_bridge|arena_agent|anthropic_claude)$")
+    provider_type: str = Field(pattern="^(arena_local_bridge|arena_agent|anthropic_claude|openai_compatible)$")
     endpoint_url: str | None = None
     credential_ref: str | None = Field(
         default=None,
@@ -156,7 +156,10 @@ class ProviderUsageLogEntry(BaseModel):
     model_name: str
     input_tokens: int
     output_tokens: int
+    input_tokens_estimated: bool
+    output_tokens_estimated: bool
     estimated_cost_usd: float
+    confirmed_cost_usd: float | None
     latency_ms: float
     success: bool
     error_message: str | None
@@ -175,6 +178,73 @@ class DeviceTokenRevokeResponse(BaseModel):
     id: str
     token_version: int = Field(ge=1)
     device_token: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class RemoteWorkspaceTreeEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=400)
+    size_bytes: int = Field(ge=0)
+
+
+class RemoteWorkspaceFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, max_length=400)
+    content: str = Field(max_length=3_000)
+
+
+class RemoteActionIteration(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    iteration: int = Field(ge=1, le=100)
+    action: str = Field(min_length=1, max_length=32)
+    result: str = Field(default="", max_length=4_000)
+    correction: str | None = Field(default=None, max_length=1_000)
+
+
+class DeviceAgentModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    worker_id: str = Field(min_length=1, max_length=64)
+    workspace_file_tree: list[RemoteWorkspaceTreeEntry] = Field(default_factory=list, max_length=200)
+    relevant_workspace_file_contents: list[RemoteWorkspaceFile] = Field(default_factory=list, max_length=5)
+    previous_iterations: list[RemoteActionIteration] = Field(default_factory=list, max_length=8)
+    last_correction: str | None = Field(default=None, max_length=1_000)
+
+
+class RemoteArtifactReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    relative_path: str = Field(min_length=1, max_length=400)
+    action: str = Field(pattern="^(read|create|modify|test|build|agent_iteration)$")
+    exit_code: int = Field(ge=-127, le=32_767)
+    summary: str = Field(default="", max_length=1_000)
+
+
+class DeviceTaskProgressRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    worker_id: str = Field(min_length=1, max_length=64)
+    progress_percent: int = Field(ge=0, le=95)
+    event: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    summary: str = Field(default="", max_length=1_000)
+    iteration: int = Field(default=0, ge=0, le=100)
+    artifact: RemoteArtifactReport | None = None
+
+
+class DeviceTaskReportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    worker_id: str = Field(min_length=1, max_length=64)
+    success: bool
+    summary: str = Field(default="", max_length=4_000)
+    artifacts: list[RemoteArtifactReport] = Field(default_factory=list, max_length=100)
+    actual_deliverables: list[str] = Field(default_factory=list, max_length=100)
+    error_message: str | None = Field(default=None, max_length=2_000)
+    trace: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    total_elapsed_ms: float | None = Field(default=None, ge=0)
+    keepalive_heartbeats: int = Field(default=0, ge=0)
 
 
 class BrowserLaunchRequest(BaseModel):

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -343,9 +344,29 @@ class QAAndIntelligenceEngine:
         # Recover crashed browser profiles
         bp_res = await db.execute(select(BrowserProfile).where(BrowserProfile.status == "crashed"))
         recovered_browsers: list[str] = []
+        browser_recovery_failures: list[dict[str, Any]] = []
         for bp in bp_res.scalars().all():
-            await browser_manager.simulate_crash_and_recover(db, bp, recover=True)
-            recovered_browsers.append(bp.id)
+            try:
+                await browser_manager.simulate_crash_and_recover(db, bp, recover=True)
+            except (HTTPException, ValueError) as exc:
+                browser_recovery_failures.append(
+                    {
+                        "profile_id": bp.id,
+                        "status_code": exc.status_code if isinstance(exc, HTTPException) else 409,
+                        "reason": exc.detail if isinstance(exc, HTTPException) else str(exc),
+                    }
+                )
+                continue
+            if browser_manager.has_live_context(bp.id) and bp.status == "running":
+                recovered_browsers.append(bp.id)
+            else:
+                browser_recovery_failures.append(
+                    {
+                        "profile_id": bp.id,
+                        "status_code": 503,
+                        "reason": "Recovery did not attach a live Playwright context.",
+                    }
+                )
 
         # Reset error-state workers if no active task
         ag_res = await db.execute(select(Agent).where(Agent.status == "error"))
@@ -408,6 +429,7 @@ class QAAndIntelligenceEngine:
                     "offline_devices": device_sweep["offline_devices"],
                     "device_tasks_requeued": device_sweep["requeued_tasks"],
                     "browsers_recovered": recovered_browsers,
+                    "browser_recovery_failures": browser_recovery_failures,
                     "workers_recovered": recovered_workers,
                     "pruned_worktrees": pruned_worktrees,
                 },
@@ -418,6 +440,7 @@ class QAAndIntelligenceEngine:
             or requeued
             or device_sweep["requeued_tasks"]
             or recovered_browsers
+            or browser_recovery_failures
             or recovered_workers
             or pruned_worktrees
         ):
@@ -429,7 +452,8 @@ class QAAndIntelligenceEngine:
                     message=(
                         f"Recovered {len(stalled)} stalled task(s), requeued {len(requeued)} "
                         f"emergency-stopped task(s), {len(device_sweep['requeued_tasks'])} "
-                        f"offline-device task(s), {len(recovered_browsers)} browser(s), "
+                        f"offline-device task(s), {len(recovered_browsers)} browser(s) recovered "
+                        f"({len(browser_recovery_failures)} browser recovery failure(s)), "
                         f"{len(recovered_workers)} worker(s), pruned {len(pruned_worktrees)} worktree(s)."
                     ),
                     link="/qa",
@@ -443,6 +467,7 @@ class QAAndIntelligenceEngine:
             "offline_devices": device_sweep["offline_devices"],
             "device_tasks_requeued": device_sweep["requeued_tasks"],
             "browsers_recovered": recovered_browsers,
+            "browser_recovery_failures": browser_recovery_failures,
             "workers_recovered": recovered_workers,
             "pruned_worktrees": pruned_worktrees,
         }

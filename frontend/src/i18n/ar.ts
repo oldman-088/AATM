@@ -245,6 +245,7 @@ export const ar: Translations = {
     recover: 'استرداد',
     enginesTitle: 'محركات أتمتة المتصفح المعيارية',
     userscriptsTitle: 'سكربتات Tampermonkey (مدققة بالسياسات)',
+    userscriptsStorageNotice: "تُخزَّن السكربتات وتُراجع فقط؛ لا يحقنها AATM ولا ينفذها. يسهل تجاوز فحوصات السياسات القائمة على التعبيرات النمطية، مثل window['ev'+'al']، وهي ليست حدًا أمنيًا. التفعيل والتعطيل يغيّران بيانات التخزين فقط.",
     userscriptPolicyError: 'خطأ في سياسة السكربت',
     userscriptNamePlaceholder: 'اسم السكربت',
     matchPatternPlaceholder: 'نمط @match',
