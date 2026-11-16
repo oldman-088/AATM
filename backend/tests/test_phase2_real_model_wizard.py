@@ -273,7 +273,7 @@ async def test_wizard_endpoints_and_per_employee_model_assignment(
     )
     assert bad_cred.status_code == 400
 
-    monkeypatch.setenv("TEST_WIZARD_OLLAMA_KEY", "dummy-wizard-token")
+    monkeypatch.setenv("TEST_WIZARD_OLLAMA_API_KEY", "dummy-wizard-token")
     srv, base_url = _start_mock_openai("simple")
     try:
         test_res = await client.post(
@@ -282,7 +282,7 @@ async def test_wizard_endpoints_and_per_employee_model_assignment(
             json={
                 "provider_type": "openai_compatible",
                 "endpoint_url": base_url,
-                "credential_ref": "env:TEST_WIZARD_OLLAMA_KEY",
+                "credential_ref": "env:TEST_WIZARD_OLLAMA_API_KEY",
                 "model": "qwen2.5-coder:7b",
             },
         )
@@ -296,7 +296,7 @@ async def test_wizard_endpoints_and_per_employee_model_assignment(
             json={
                 "provider_type": "openai_compatible",
                 "endpoint_url": base_url,
-                "credential_ref": "env:TEST_WIZARD_OLLAMA_KEY",
+                "credential_ref": "env:TEST_WIZARD_OLLAMA_API_KEY",
                 "default_model": "qwen2.5-coder:7b",
                 "available_models": ["qwen2.5-coder:7b", "llama3.1:8b"],
                 "assign_to_manager": True,
@@ -355,7 +355,7 @@ async def test_phase2_arabic_directive_end_to_end_creates_hello_and_runs_pytest(
 ):
     settings = get_settings()
     monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path)
-    monkeypatch.setenv("TEST_ARABIC_MODEL_KEY", "dummy-arabic-e2e-token")
+    monkeypatch.setenv("TEST_ARABIC_MODEL_API_KEY", "dummy-arabic-e2e-token")
     srv, base_url = _start_mock_openai("arabic_e2e")
     try:
         cfg_res = await client.post(
@@ -364,7 +364,7 @@ async def test_phase2_arabic_directive_end_to_end_creates_hello_and_runs_pytest(
             json={
                 "provider_type": "openai_compatible",
                 "endpoint_url": base_url,
-                "credential_ref": "env:TEST_ARABIC_MODEL_KEY",
+                "credential_ref": "env:TEST_ARABIC_MODEL_API_KEY",
                 "default_model": "qwen2.5-coder:7b",
                 "assign_to_manager": True,
                 "assign_to_workers": True,

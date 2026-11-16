@@ -28,6 +28,7 @@ from app.git_workflows.manager import git_workflow_manager
 from app.github_client.client import github_client, sanitize_cli_output
 from app.models import (
     AgentMessage,
+    AIProvider,
     ApprovalRequest,
     AuditLog,
     ExecutionDevice,
@@ -43,6 +44,7 @@ from app.models import (
     WorkspaceArtifact,
 )
 from app.orchestration.replacement import replacement_service
+from app.providers.credential_policy import CredentialPolicyError, validate_provider_credential_ref
 from app.runtime.device_auth import issue_device_token
 from app.runtime.executor import WorkspaceSandboxError, agent_runtime
 from app.schemas.common import (
@@ -63,6 +65,7 @@ from app.schemas.common import (
     WorkspaceExecRequest,
     WorkspaceWriteRequest,
 )
+from app.schemas.common import validate_credential_ref as validate_credential_ref_format
 
 router = APIRouter(tags=["enterprise-platform"], dependencies=[Depends(get_current_user)])
 public_router = APIRouter(tags=["enterprise-platform-webhooks"])
@@ -243,6 +246,19 @@ async def create_provider_account(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    provider = await db.get(AIProvider, body.provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    try:
+        validate_credential_ref_format(body.credential_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    try:
+        credential_ref = validate_provider_credential_ref(
+            body.credential_ref, provider_type=provider.provider_type, endpoint_url=provider.endpoint_url
+        )
+    except CredentialPolicyError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
     acc = ProviderAccount(
         id=f"acct-{uuid.uuid4().hex[:8]}",
         provider_id=body.provider_id,
@@ -250,11 +266,20 @@ async def create_provider_account(
         account_identifier=body.account_identifier,
         allocation_mode=body.allocation_mode,
         max_employees=body.max_employees,
-        credential_ref=body.credential_ref,
+        credential_ref=credential_ref,
         status="active",
         last_verified_at=utcnow(),
     )
     db.add(acc)
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="provider_account.create",
+            resource_type="provider_account",
+            resource_id=acc.id,
+            details={"provider_id": body.provider_id, "credential_ref": credential_ref},
+        )
+    )
     await db.commit()
     await db.refresh(acc)
     return acc

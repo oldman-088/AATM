@@ -1,10 +1,22 @@
 import re
+import ssl
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from app.core.security import resolve_credential_ref
+
+
+@lru_cache(maxsize=1)
+def shared_ssl_context() -> ssl.SSLContext:
+    """One verified TLS context reused by every adapter client (loading the CA bundle
+    costs ~20 ms per client otherwise). Certificate verification stays enabled."""
+    import httpx
+
+    return httpx.create_ssl_context()
+
 
 ENV_CREDENTIAL_REF_PATTERN = re.compile(r"^env:[A-Z_][A-Z0-9_]*$")
 
@@ -91,6 +103,9 @@ class ProviderHealth:
 
 
 class BaseProviderAdapter(ABC):
+    #: Provider type used by the credential policy (bound credentials such as ARENA_BRIDGE_TOKEN).
+    provider_type: str | None = None
+
     def __init__(self, provider_id: str, endpoint_url: str | None, credential_ref: str | None, default_model: str):
         self.provider_id = provider_id
         self.endpoint_url = endpoint_url
@@ -102,6 +117,14 @@ class BaseProviderAdapter(ABC):
     def credential_ref_valid(self) -> bool:
         """Re-check credentials at use time so runtime environment changes are respected."""
         self._credential_ref_valid, self._credential_ref_error = validate_credential_ref(self.credential_ref)
+        if self._credential_ref_valid:
+            from app.providers.credential_policy import runtime_credential_denial
+
+            denial = runtime_credential_denial(
+                self.credential_ref, provider_type=self.provider_type, endpoint_url=self.endpoint_url
+            )
+            if denial:
+                self._credential_ref_valid, self._credential_ref_error = False, denial
         return self._credential_ref_valid
 
     @property

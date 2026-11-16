@@ -1,3 +1,5 @@
+> **SUPERSEDED — see [docs/AATM_BUILD_PLAN.md](AATM_BUILD_PLAN.md)** (phase numbering below is obsolete).
+
 # AATM — Prioritized Implementation Roadmap
 
 | Phase | Scope | Key Deliverables | Verification Gate |

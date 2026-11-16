@@ -12,6 +12,11 @@ from app.models import Agent, AIProvider, AuditLog, BrowserProfile, BrowserSessi
 from app.providers.adapters import build_adapter
 from app.providers.base import ProviderRequest
 from app.providers.base import validate_credential_ref as validate_provider_credential_ref
+from app.providers.credential_policy import (
+    CredentialPolicyError,
+    audit_details,
+    enforce_provider_config_policy,
+)
 from app.providers.router import get_model_configuration_status, provider_router
 from app.runtime.sandbox import ALLOWED_WORKSPACE_BINARIES, SandboxExecutionPolicy, get_sandbox_status
 from app.schemas.common import (
@@ -31,6 +36,30 @@ from app.schemas.common import (
 )
 
 router = APIRouter(tags=["providers-browsers"], dependencies=[Depends(get_current_user)])
+
+
+def _enforce_policy(
+    user: User,
+    provider_type: str,
+    endpoint_url: str | None,
+    credential_ref: str | None,
+    *,
+    credential_required: bool = False,
+) -> tuple[str | None, str | None]:
+    try:
+        validate_credential_ref_format(credential_ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    try:
+        return enforce_provider_config_policy(
+            role=user.role,
+            provider_type=provider_type,
+            endpoint_url=endpoint_url,
+            credential_ref=credential_ref,
+            credential_required=credential_required,
+        )
+    except CredentialPolicyError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from None
 
 
 def _serialize_provider(p: AIProvider) -> dict:
@@ -112,18 +141,15 @@ async def upsert_provider(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        validate_credential_ref_format(body.credential_ref)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+    endpoint_url, credential_ref = _enforce_policy(user, body.provider_type, body.endpoint_url, body.credential_ref)
 
     pid = body.id or body.name.lower().replace(" ", "-")
     existing = await db.get(AIProvider, pid)
     if existing:
         existing.name = body.name
         existing.provider_type = body.provider_type
-        existing.endpoint_url = body.endpoint_url
-        existing.credential_ref = body.credential_ref
+        existing.endpoint_url = endpoint_url
+        existing.credential_ref = credential_ref
         existing.default_model = body.default_model
         existing.available_models = body.available_models or [body.default_model]
         existing.priority = body.priority
@@ -135,8 +161,8 @@ async def upsert_provider(
             id=pid,
             name=body.name,
             provider_type=body.provider_type,
-            endpoint_url=body.endpoint_url,
-            credential_ref=body.credential_ref,
+            endpoint_url=endpoint_url,
+            credential_ref=credential_ref,
             default_model=body.default_model,
             available_models=body.available_models or [body.default_model],
             priority=body.priority,
@@ -144,6 +170,15 @@ async def upsert_provider(
             daily_limit_usd=body.daily_limit_usd,
         )
         db.add(p)
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="provider.upsert",
+            resource_type="ai_provider",
+            resource_id=pid,
+            details=audit_details(body.provider_type, endpoint_url, credential_ref, role=user.role),
+        )
+    )
     await db.commit()
     await db.refresh(p)
     return _serialize_provider(p)
@@ -224,17 +259,39 @@ async def get_provider_wizard_presets(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/providers/wizard/test-connection", dependencies=[Depends(require_role("admin", "operator"))])
-async def test_provider_wizard_connection(body: ProviderWizardTestRequest):
+async def test_provider_wizard_connection(
+    body: ProviderWizardTestRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     try:
-        validate_credential_ref_format(body.credential_ref)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+        endpoint_url, credential_ref = _enforce_policy(
+            user, body.provider_type, body.endpoint_url, body.credential_ref, credential_required=True
+        )
+    except HTTPException as exc:
+        db.add(
+            AuditLog(
+                actor=user.email,
+                action="provider.test_connection_denied",
+                resource_type="ai_provider",
+                resource_id=f"wizard-{body.provider_type}",
+                details=audit_details(
+                    body.provider_type,
+                    None,
+                    None,
+                    role=user.role,
+                    reason=(exc.detail or {}).get("code") if isinstance(exc.detail, dict) else "invalid",
+                ),
+            )
+        )
+        await db.commit()
+        raise
 
     adapter = build_adapter(
         body.provider_type,
         f"wizard-{body.provider_type}",
-        body.endpoint_url,
-        body.credential_ref,
+        endpoint_url,
+        credential_ref,
         body.model,
     )
     resp = await adapter.generate(
@@ -248,6 +305,24 @@ async def test_provider_wizard_connection(body: ProviderWizardTestRequest):
             allow_diagnostic_fallback=False,
         )
     )
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="provider.test_connection",
+            resource_type="ai_provider",
+            resource_id=f"wizard-{body.provider_type}",
+            details=audit_details(
+                body.provider_type,
+                endpoint_url,
+                credential_ref,
+                role=user.role,
+                model=body.model,
+                success=resp.success,
+                latency_ms=resp.latency_ms,
+            ),
+        )
+    )
+    await db.commit()
     return {
         "success": resp.success,
         "provider_type": body.provider_type,
@@ -270,10 +345,9 @@ async def configure_provider_wizard(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        validate_credential_ref_format(body.credential_ref)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+    endpoint_url, credential_ref = _enforce_policy(
+        user, body.provider_type, body.endpoint_url, body.credential_ref, credential_required=True
+    )
 
     default_ids = {
         "anthropic_claude": "anthropic-claude",
@@ -300,8 +374,8 @@ async def configure_provider_wizard(
             id=pid,
             name=name,
             provider_type=body.provider_type,
-            endpoint_url=body.endpoint_url,
-            credential_ref=body.credential_ref,
+            endpoint_url=endpoint_url,
+            credential_ref=credential_ref,
             default_model=body.default_model,
             available_models=models,
             priority=1,
@@ -312,8 +386,8 @@ async def configure_provider_wizard(
     else:
         provider.name = name
         provider.provider_type = body.provider_type
-        provider.endpoint_url = body.endpoint_url
-        provider.credential_ref = body.credential_ref
+        provider.endpoint_url = endpoint_url
+        provider.credential_ref = credential_ref
         provider.default_model = body.default_model
         provider.available_models = models
         provider.priority = 1
@@ -338,12 +412,14 @@ async def configure_provider_wizard(
             action="provider.wizard_configure",
             resource_type="ai_provider",
             resource_id=provider.id,
-            details={
-                "provider_type": provider.provider_type,
-                "default_model": provider.default_model,
-                "credential_ref": provider.credential_ref,
-                "updated_agents": updated_agents,
-            },
+            details=audit_details(
+                provider.provider_type,
+                provider.endpoint_url,
+                provider.credential_ref,
+                role=user.role,
+                default_model=provider.default_model,
+                updated_agents=updated_agents,
+            ),
         )
     )
     await db.commit()
@@ -403,6 +479,23 @@ async def test_provider(
         ),
         preferred_provider_id=provider_id,
     )
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="provider.test",
+            resource_type="ai_provider",
+            resource_id=provider_id,
+            details=audit_details(
+                p.provider_type,
+                p.endpoint_url,
+                p.credential_ref,
+                role=user.role,
+                dry_run=body.dry_run,
+                success=resp.success,
+            ),
+        )
+    )
+    await db.commit()
     return {
         "provider_id": resp.provider_id,
         "model": resp.model,

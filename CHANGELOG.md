@@ -2,6 +2,18 @@
 
 All notable changes to AATM are documented in this file.
 
+## [Unreleased] — 3.1.0 (branch `aatm-complete`)
+
+### Security (A)
+- **Provider credential exfiltration fix**: `credential_ref` accepts only provider API-key env names (`*_API_KEY` or `PROVIDER_CREDENTIAL_ENV_ALLOWLIST`); server secrets (reusing `SENSITIVE_ENV_EXACT`) are always denied; `ARENA_BRIDGE_TOKEN` is bound to the local bridge; `endpoint_url` validated (http/https, no embedded credentials); operators limited to official presets, custom endpoints need admin; every test-connection is audited without the key. Applied to the wizard, provider upsert/test and account creation, plus a runtime deny-list in the adapters.
+- Arena provider accounts no longer default to `env:ARENA_SESSION_TOKEN` (Arena uses the human's own browser sign-in).
+
+### Performance
+- SQLite engine uses WAL + `synchronous=NORMAL` + `busy_timeout=30000`; adapters reuse one verified TLS context. Backend suite runtime 9 min → ~3 min and the flaky retry-latency budget test passes.
+
+### Docs
+- Added `docs/AATM_BUILD_PLAN.md` (source of truth); marked `AATM_MASTER_SPECIFICATION.md`, `docs/IMPLEMENTATION_ROADMAP.md`, `docs/DEVELOPMENT_PLAN.md` as SUPERSEDED.
+
 ## [3.0.0] - 2026-11-16 — Phase 8: Packaging, Installers, Docs & Release Verification
 
 ### Changed

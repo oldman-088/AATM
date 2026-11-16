@@ -20,6 +20,7 @@ from app.providers.base import (
     ProviderRequest,
     ProviderResponse,
     ProviderStreamChunk,
+    shared_ssl_context,
 )
 
 DEFAULT_ARENA_BRIDGE_URL = "http://127.0.0.1:4100"
@@ -166,6 +167,8 @@ def _validate_http_endpoint(url: str) -> tuple[bool, str]:
 
 
 class ArenaLocalBridgeAdapter(BaseProviderAdapter):
+    provider_type = "arena_local_bridge"
+
     def _base_url(self) -> str:
         return (self.endpoint_url or DEFAULT_ARENA_BRIDGE_URL).rstrip("/")
 
@@ -184,7 +187,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
         token = self.resolve_credential()
         headers = {"Authorization": f"Bearer {token}"}
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=2.0, verify=shared_ssl_context()) as client:
                 resp = await client.get(base_url + "/ready", headers=headers)
                 checked_path = "/ready"
                 if resp.status_code == 404:
@@ -327,7 +330,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
 
         try:
             async with _bridge_semaphore():
-                async with httpx.AsyncClient(timeout=_bridge_timeout_seconds()) as client:
+                async with httpx.AsyncClient(timeout=_bridge_timeout_seconds(), verify=shared_ssl_context()) as client:
                     resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -569,7 +572,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
 
         try:
             async with _bridge_semaphore():
-                async with httpx.AsyncClient(timeout=_bridge_timeout_seconds()) as client:
+                async with httpx.AsyncClient(timeout=_bridge_timeout_seconds(), verify=shared_ssl_context()) as client:
                     async with client.stream("POST", url, headers=headers, json=payload) as resp:
                         if resp.status_code >= 400:
                             status_code = resp.status_code
@@ -750,7 +753,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
             headers["X-AATM-Account-Id"] = str(account_id)
         url = f"{normalized_or_err}/v1/sessions/{quote(cleaned_sid, safe='')}"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, verify=shared_ssl_context()) as client:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 404:
                     return None
@@ -801,7 +804,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
 
         url = f"{normalized_or_err}/v1/sessions/{quote(cleaned_sid, safe='')}"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, verify=shared_ssl_context()) as client:
                 resp = await client.delete(url, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json() if resp.content else {}
@@ -859,6 +862,8 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
 
 
 class ArenaAgentAdapter(BaseProviderAdapter):
+    provider_type = "arena_agent"
+
     async def health_check(self) -> ProviderHealth:
         t0 = time.perf_counter()
         return ProviderHealth(
@@ -885,6 +890,8 @@ class ArenaAgentAdapter(BaseProviderAdapter):
 
 
 class AnthropicClaudeAdapter(BaseProviderAdapter):
+    provider_type = "anthropic_claude"
+
     async def health_check(self) -> ProviderHealth:
         t0 = time.perf_counter()
         if not self.credential_ref_valid:
@@ -899,7 +906,7 @@ class AnthropicClaudeAdapter(BaseProviderAdapter):
         api_key = self.resolve_credential()
         headers = {"x-api-key": api_key or "", "anthropic-version": "2023-06-01"}
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, verify=shared_ssl_context()) as client:
                 resp = await client.get(normalized_or_err + "/models", headers=headers)
             ms = round((time.perf_counter() - t0) * 1000, 2)
             if 200 <= resp.status_code < 300:
@@ -988,7 +995,7 @@ class AnthropicClaudeAdapter(BaseProviderAdapter):
             payload["system"] = req.system_prompt
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=shared_ssl_context()) as client:
                 resp = await client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -1103,6 +1110,8 @@ class AnthropicClaudeAdapter(BaseProviderAdapter):
 class OpenAICompatibleAdapter(BaseProviderAdapter):
     """Adapter for OpenAI-compatible APIs such as OpenRouter and Ollama."""
 
+    provider_type = "openai_compatible"
+
     def _base_url(self) -> str:
         return (self.endpoint_url or "").rstrip("/")
 
@@ -1122,7 +1131,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         token = self.resolve_credential()
         headers = {"Authorization": f"Bearer {token}"}
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, verify=shared_ssl_context()) as client:
                 resp = await client.get(normalized_or_err + "/models", headers=headers)
             ms = round((time.perf_counter() - t0) * 1000, 2)
             if 200 <= resp.status_code < 300:
@@ -1205,7 +1214,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             "stream": False,
         }
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=120.0, verify=shared_ssl_context()) as client:
                 resp = await client.post(normalized_or_err + "/chat/completions", headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()

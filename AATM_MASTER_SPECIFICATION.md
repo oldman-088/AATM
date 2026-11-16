@@ -1,3 +1,5 @@
+> **SUPERSEDED — see [docs/AATM_BUILD_PLAN.md](docs/AATM_BUILD_PLAN.md)** (phase numbering below is obsolete).
+
 # AATM – AI Agent Team Manager
 ## Master Project Prompt & Development Specification
 

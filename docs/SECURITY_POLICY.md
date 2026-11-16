@@ -25,6 +25,9 @@ This document defines the mandatory security architecture, permission boundaries
 ### 2.1 Environment-Variable Indirection (`env:VAR_NAME`)
 - Raw API keys, OAuth tokens, session cookies, private keys, and passwords **must never** be stored in source code, database rows, prompts, GitHub issues, pull requests, or audit logs.
 - Provider and account records accept only environment-variable references matching `^env:[A-Z_][A-Z0-9_]*$` (`validate_credential_ref()` in `backend/app/schemas/common.py`). Inline credentials are rejected with `HTTP 400` without echoing the submitted secret value.
+- **Credential exfiltration guard** (`backend/app/providers/credential_policy.py`): a `credential_ref` may only name a provider API-key variable (`^[A-Z][A-Z0-9_]*_API_KEY$`) or an entry of `PROVIDER_CREDENTIAL_ENV_ALLOWLIST`. Server secrets (everything in `SENSITIVE_ENV_EXACT` from `runtime/sandbox.py` that is not a provider key, GitHub tokens, webhook secrets, `ARENA_SESSION_TOKEN`, and any `AATM_*` variable) are always rejected, even if allow-listed. `ARENA_BRIDGE_TOKEN` is bound to the `arena_local_bridge` provider and may only be sent to a loopback host or the configured `ARENA_BRIDGE_URL`.
+- `endpoint_url` must be `http`/`https` with a host, no embedded credentials and no fragment. Operators may only use the official preset endpoint + credential pairs; custom endpoints (or custom pairings) require the `admin` role (`403 CUSTOM_ENDPOINT_REQUIRES_ADMIN`).
+- Every wizard test-connection (allowed or denied), provider upsert/test and account creation writes an audit entry that names the `env:` reference and endpoint origin, never the key value. Adapters re-apply the server-secret deny-list at runtime, so legacy rows that bypassed the API still cannot resolve server secrets.
 - API responses mask credential state through `mask_credential_ref()` (`backend/app/core/security.py`).
 
 ### 2.2 CLI & Subprocess Output Sanitization

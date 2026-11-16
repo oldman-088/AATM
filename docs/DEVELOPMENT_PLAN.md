@@ -1,3 +1,5 @@
+> **SUPERSEDED — see [docs/AATM_BUILD_PLAN.md](AATM_BUILD_PLAN.md)** (phase numbering below is obsolete).
+
 # AATM — Prioritized Development Plan (Post-Specification Alignment)
 
 **Baseline:** `main` (`6ee1f92`, 80/80 verified tests)  

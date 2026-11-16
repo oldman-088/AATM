@@ -89,7 +89,7 @@ async def allocate_account_and_session(
                 account_identifier=f"{agent_id}@{provider_id}.local",
                 allocation_mode=allocation_mode,
                 max_employees=1 if allocation_mode == "one_per_employee" else 8,
-                credential_ref="env:ARENA_SESSION_TOKEN" if "arena" in provider_id else "env:ANTHROPIC_API_KEY",
+                credential_ref=None if "arena" in provider_id else "env:ANTHROPIC_API_KEY",
                 status="active",
             )
             db.add(account)

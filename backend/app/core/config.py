@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     PROVIDER_MAX_RETRIES: int = Field(default=2, ge=0)
     PROVIDER_RETRY_AFTER_MAX_SECONDS: float = Field(default=30.0, ge=0)
     ANTHROPIC_API_KEY_REF: str = "env:ANTHROPIC_API_KEY"
+    # Extra env names (comma separated) accepted as provider credential_ref besides *_API_KEY.
+    # Server secrets are always rejected even when listed here.
+    PROVIDER_CREDENTIAL_ENV_ALLOWLIST: str = ""
     MONTHLY_BUDGET_USD: float = 100.0
     DAILY_BUDGET_USD: float = 20.0
 
