@@ -44,6 +44,16 @@ class ProjectCreate(BaseModel):
     default_branch: str = "main"
     protected_branches: list[str] = Field(default_factory=lambda: ["main", "master", "production"])
     tech_stack: list[str] = Field(default_factory=list)
+    worktree_mode: bool | None = None
+    auto_pr: bool = True
+
+
+class ProjectUpdate(BaseModel):
+    description: str | None = None
+    repo_url: str | None = None
+    default_branch: str | None = None
+    worktree_mode: bool | None = None
+    auto_pr: bool | None = None
 
 
 class EmployeeCreate(BaseModel):

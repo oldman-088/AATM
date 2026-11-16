@@ -11,7 +11,7 @@ from app.db.session import get_db
 from app.git_workflows.manager import PROTECTED_BRANCHES, git_workflow_manager
 from app.memory.engine import memory_engine
 from app.models import AuditLog, GitWorkflowRecord, MemoryEntry, Project, User
-from app.schemas.common import GitWorkflowCreate, MemoryCreate, ProjectCreate
+from app.schemas.common import GitWorkflowCreate, MemoryCreate, ProjectCreate, ProjectUpdate
 
 router = APIRouter(tags=["projects-memory-git"], dependencies=[Depends(get_current_user)])
 
@@ -58,6 +58,7 @@ async def list_projects(db: AsyncSession = Depends(get_db)):
             "default_branch": p.default_branch,
             "protected_branches": p.protected_branches,
             "tech_stack": p.tech_stack,
+            "config": p.config,
             "status": p.status,
             "created_at": p.created_at,
         }
@@ -75,6 +76,12 @@ async def create_project(
     existing = await db.execute(select(Project).where((Project.slug == slug) | (Project.name == body.name)))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Project with this name or slug already exists")
+    repo_dir = _resolve_repo_candidate(body.repo_path, get_settings().REPO_ROOT)
+    worktree_mode = (
+        body.worktree_mode
+        if body.worktree_mode is not None
+        else ((repo_dir / ".git").exists() and repo_dir != get_settings().REPO_ROOT.resolve())
+    )
     proj = Project(
         name=body.name,
         slug=slug,
@@ -84,9 +91,38 @@ async def create_project(
         default_branch=body.default_branch,
         protected_branches=body.protected_branches,
         tech_stack=body.tech_stack,
+        config={"worktree_mode": bool(worktree_mode), "auto_pr": bool(body.auto_pr)},
     )
     db.add(proj)
     db.add(AuditLog(actor=user.email, action="project.create", resource_type="project", resource_id=proj.id, details={"name": proj.name}))
+    await db.commit()
+    await db.refresh(proj)
+    return proj
+
+
+@router.patch("/projects/{project_id}", dependencies=[Depends(require_role("admin", "operator"))])
+async def update_project(
+    project_id: str,
+    body: ProjectUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    proj = await db.get(Project, project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    cfg = dict(proj.config or {})
+    if body.description is not None:
+        proj.description = body.description
+    if body.repo_url is not None:
+        proj.repo_url = body.repo_url
+    if body.default_branch is not None:
+        proj.default_branch = body.default_branch
+    if body.worktree_mode is not None:
+        cfg["worktree_mode"] = body.worktree_mode
+    if body.auto_pr is not None:
+        cfg["auto_pr"] = body.auto_pr
+    proj.config = cfg
+    db.add(AuditLog(actor=user.email, action="project.update", resource_type="project", resource_id=proj.id, details=body.model_dump(exclude_none=True)))
     await db.commit()
     await db.refresh(proj)
     return proj

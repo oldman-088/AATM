@@ -19,6 +19,19 @@ if (-not (Test-Path $Uvicorn)) {
     exit 1
 }
 
+$Alembic = "$RootDir\.venv\Scripts\alembic.exe"
+if (Test-Path $Alembic) {
+    Write-Host "[AATM] Running database migrations (alembic upgrade head)..."
+    Push-Location "$RootDir\backend"
+    & $Alembic upgrade head
+    $alembicExit = $LASTEXITCODE
+    Pop-Location
+    if ($alembicExit -ne 0) {
+        Write-Host "[AATM] ERROR: alembic upgrade head failed." -ForegroundColor Red
+        exit 1
+    }
+}
+
 $SandboxMode = if ($env:AATM_SANDBOX_MODE) { $env:AATM_SANDBOX_MODE.ToLower() } else { "docker" }
 if ($SandboxMode -eq "docker") {
     if (Get-Command docker -ErrorAction SilentlyContinue) {

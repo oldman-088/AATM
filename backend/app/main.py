@@ -18,9 +18,8 @@ from app.browser.manager import browser_manager
 from app.core.config import get_settings, validate_runtime_security
 from app.core.events import event_bus
 from app.core.security import decode_access_token
-from app.db.base import Base
 from app.db.seed import seed_initial_data
-from app.db.session import AsyncSessionLocal, engine, get_db
+from app.db.session import AsyncSessionLocal, get_db
 from app.models import User
 from app.providers.router import get_model_configuration_status
 from app.runtime.sandbox import get_sandbox_status
@@ -31,8 +30,6 @@ WS_AUTH_TIMEOUT_SECONDS = 5.0
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_security(get_settings())
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
 

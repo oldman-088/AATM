@@ -2,6 +2,17 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.6.0-phase3] - 2026-11-16 — Phase 3: Isolated Task Worktrees, Auto-Commit, Draft PRs & Webhook Lifecycle
+
+### Added
+- **Per-Task Git Worktrees (`aatm/<task-id-short>-<slug>`)**: `GitWorkflowManager.create_task_worktree` creates isolated per-task git worktrees under `data/worktrees/task-<short>/` and `AgentLoop` executes worker actions directly inside the task's worktree when `worktree_mode` is enabled on the project.
+- **Worktree `.git` Sandbox Isolation**: `safe_workspace_path` and `validate_run_command` block `.git` file/directory access inside task worktrees while allowing `read`, `write`, `pytest`, and `ruff` on project files.
+- **Auto-Commit & Draft PR Automation**: `GitWorkflowManager.commit_task_worktree` stages and commits worktree edits as `AATM(<agent_name>): <task title>` with an `AATM-Task: <task_id>` trailer, and `push_and_create_draft_pr` pushes to `origin` and opens a draft PR via `gh pr create --draft` using `asyncio.create_subprocess_exec`.
+- **Extended Task Lifecycle & Alembic Migration (`e4b2c9d7a1f3`)**: Added `branch_name`, `worktree_path`, `commit_sha`, `pr_number`, `pr_url`, and `pr_status` on `tasks` and `task_id` / `pr_url` on `git_workflow_records`; supports `pending → in_progress → pr_open → in_review → changes_requested → approved → merged → done`.
+- **GitHub Webhook Lifecycle & Post-Merge Cleanup**: `POST /api/v1/github/webhooks` updates linked `Task` and `GitWorkflowRecord` lifecycle statuses on `pull_request` / `pull_request_review` events and runs `cleanup_task_worktree` after PR merge or cancellation.
+- **Migration-Only Startup**: Removed `Base.metadata.create_all` from `backend/app/main.py` lifespan and added `alembic upgrade head` to `scripts/ubuntu/start.sh` and `scripts/windows/start.ps1`.
+- **Phase 3 Test Suite**: Added `backend/tests/test_phase3_worktrees_pr_lifecycle.py`.
+
 ## [2.6.0-phase2] - 2026-11-16 — Phase 2: Real Model Connection & Setup Wizard
 
 ### Added

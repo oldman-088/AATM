@@ -31,7 +31,9 @@ from app.models import (
     ApprovalRequest,
     AuditLog,
     ExecutionDevice,
+    GitWorkflowRecord,
     Notification,
+    Project,
     ProviderAccount,
     ProviderSession,
     ProviderUsageLog,
@@ -927,9 +929,144 @@ async def receive_github_webhook(
             message=notification_message,
         )
     )
+
+    updated_task_id: str | None = None
+    updated_task_status: str | None = None
+    event_name = (x_github_event or "").strip().lower()
+    if event_name in {"pull_request", "pull_request_review"} and pull_request:
+        head_info = pull_request.get("head") if isinstance(pull_request.get("head"), dict) else {}
+        head_ref = str(head_info.get("ref") or "").strip()
+        pr_html_url = _sanitize_github_webhook_text(pull_request.get("html_url"))
+
+        filters = []
+        if number is not None:
+            filters.append(Task.pr_number == number)
+        if head_ref:
+            filters.append(Task.branch_name == head_ref)
+        linked_task: Task | None = None
+        if filters:
+            linked_task = (
+                await db.execute(select(Task).where(or_(*filters)).order_by(Task.updated_at.desc()))
+            ).scalars().first()
+
+        if linked_task is not None:
+            wf_filters = [GitWorkflowRecord.task_id == linked_task.id]
+            if head_ref:
+                wf_filters.append(GitWorkflowRecord.branch_name == head_ref)
+            wf_record = (
+                await db.execute(select(GitWorkflowRecord).where(or_(*wf_filters)))
+            ).scalars().first()
+
+            action = str(payload.get("action") or "").strip().lower()
+            if number is not None and linked_task.pr_number is None:
+                linked_task.pr_number = number
+            if pr_html_url and not linked_task.pr_url:
+                linked_task.pr_url = pr_html_url
+
+            if event_name == "pull_request":
+                merged = bool(pull_request.get("merged"))
+                if action in {"opened", "reopened"}:
+                    linked_task.status = "pr_open"
+                    linked_task.pr_status = "draft" if pull_request.get("draft") else "open"
+                elif action in {"ready_for_review", "review_requested"}:
+                    linked_task.status = "in_review"
+                    linked_task.pr_status = "open"
+                elif action == "synchronize" and linked_task.status in {"pr_open", "changes_requested"}:
+                    linked_task.status = "in_review"
+                elif action == "closed" and merged:
+                    linked_task.status = "merged"
+                    linked_task.pr_status = "merged"
+                    linked_task.review_status = "approved"
+                    linked_task.progress_percent = 100
+                    linked_task.completed_at = utcnow()
+                    linked_task.lock_owner = None
+                    linked_task.locked_at = None
+                    linked_task.checkpoints = list(linked_task.checkpoints or []) + [
+                        {"ts": utcnow().isoformat(), "status": "merged", "pr_number": number}
+                    ]
+                    if linked_task.worktree_path or linked_task.branch_name:
+                        project = await db.get(Project, linked_task.project_id)
+                        if project:
+                            await git_workflow_manager.cleanup_task_worktree(
+                                repo_path=project.repo_path,
+                                worktree_path=linked_task.worktree_path,
+                                branch_name=linked_task.branch_name,
+                                delete_remote_branch=False,
+                                db=db,
+                                task_id=linked_task.id,
+                                actor="github-webhook",
+                            )
+                        linked_task.worktree_path = None
+                    linked_task.status = "done"
+                    linked_task.checkpoints = list(linked_task.checkpoints or []) + [
+                        {"ts": utcnow().isoformat(), "status": "done", "note": "Post-merge worktree cleanup completed"}
+                    ]
+                elif action == "closed" and not merged:
+                    linked_task.status = "cancelled"
+                    linked_task.pr_status = "closed"
+                    linked_task.lock_owner = None
+                    linked_task.locked_at = None
+                    if linked_task.worktree_path or linked_task.branch_name:
+                        project = await db.get(Project, linked_task.project_id)
+                        if project:
+                            await git_workflow_manager.cleanup_task_worktree(
+                                repo_path=project.repo_path,
+                                worktree_path=linked_task.worktree_path,
+                                branch_name=linked_task.branch_name,
+                                delete_remote_branch=False,
+                                db=db,
+                                task_id=linked_task.id,
+                                actor="github-webhook",
+                            )
+                        linked_task.worktree_path = None
+
+            elif event_name == "pull_request_review":
+                review = payload.get("review") if isinstance(payload.get("review"), dict) else {}
+                review_state = str(review.get("state") or "").strip().lower()
+                if review_state == "approved":
+                    linked_task.status = "approved"
+                    linked_task.review_status = "approved"
+                elif review_state == "changes_requested":
+                    linked_task.status = "changes_requested"
+                    linked_task.review_status = "changes_requested"
+                elif review_state == "commented" and linked_task.status == "pr_open":
+                    linked_task.status = "in_review"
+
+            if wf_record is not None:
+                wf_record.pr_number = linked_task.pr_number
+                wf_record.pr_url = linked_task.pr_url
+                if linked_task.pr_status:
+                    wf_record.pr_status = linked_task.pr_status
+                wf_record.review_status = linked_task.review_status
+
+            updated_task_id = linked_task.id
+            updated_task_status = linked_task.status
+            db.add(
+                AuditLog(
+                    actor="github-webhook",
+                    action="github.task_lifecycle",
+                    resource_type="task",
+                    resource_id=linked_task.id,
+                    details={
+                        "event": event_name,
+                        "action": action,
+                        "status": linked_task.status,
+                        "pr_number": linked_task.pr_number,
+                    },
+                )
+            )
+
     await db.commit()
     await event_bus.emit("github.webhook", safe_payload)
-    return {"accepted": True, "delivery_id": safe_payload["delivery_id"], "event": safe_payload["event"]}
+    if updated_task_id is not None:
+        await event_bus.emit("task.updated", {"task_id": updated_task_id, "status": updated_task_status})
+    return {
+        "accepted": True,
+        "delivery_id": safe_payload["delivery_id"],
+        "event": safe_payload["event"],
+        "task_id": updated_task_id,
+        "task_status": updated_task_status,
+    }
 
 
 @router.post("/github/prs", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])

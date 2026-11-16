@@ -18,6 +18,9 @@ fi
 
 mkdir -p logs
 
+echo "[AATM] Running database migrations (alembic upgrade head)..."
+(cd "$ROOT_DIR/backend" && "$ROOT_DIR/.venv/bin/alembic" upgrade head)
+
 if [[ "${AATM_SANDBOX_MODE:-docker}" == "docker" ]]; then
   if command -v docker >/dev/null 2>&1; then
     if ! docker image inspect aatm-sandbox:latest >/dev/null 2>&1; then

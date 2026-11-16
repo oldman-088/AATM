@@ -576,17 +576,38 @@ export function TasksView({
                 <Badge variant="info">{task.division_code}</Badge>
                 <Badge
                   variant={
-                    task.status === 'completed'
+                    task.status === 'completed' || task.status === 'done' || task.status === 'merged' || task.status === 'approved'
                       ? 'success'
-                      : task.status === 'failed'
+                      : task.status === 'failed' || task.status === 'changes_requested'
                         ? 'danger'
-                        : task.status === 'in_progress'
+                        : task.status === 'in_progress' || task.status === 'in_review'
                           ? 'warning'
-                          : 'neutral'
+                          : task.status === 'pr_open'
+                            ? 'info'
+                            : 'neutral'
                   }
                 >
                   {task.status}
                 </Badge>
+                {task.branch_name && (
+                  <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[11px] text-sky-300">
+                    {task.branch_name}
+                  </span>
+                )}
+                {task.pr_number && (
+                  task.pr_url && String(task.pr_url).startsWith('https://') ? (
+                    <a
+                      href={task.pr_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded bg-emerald-950/60 px-1.5 py-0.5 font-mono text-[11px] text-emerald-300 underline"
+                    >
+                      PR #{task.pr_number}
+                    </a>
+                  ) : (
+                    <Badge variant="info">PR #{task.pr_number}</Badge>
+                  )
+                )}
                 <span className="font-medium text-white">{task.title}</span>
               </div>
               <div className="text-xs text-slate-400">
@@ -595,7 +616,7 @@ export function TasksView({
               </div>
             </div>
             <div className="flex gap-2">
-              {task.status !== 'completed' && (
+              {!['completed', 'done', 'merged'].includes(task.status) && (
                 <Button size="sm" variant="secondary" onClick={() => updateTaskStatus(task.id, 'completed')}>
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
                   {t.tasks.complete}

@@ -196,7 +196,7 @@ class TaskScheduler:
         deps = list(res.scalars().all())
         if len(deps) != len(task.dependencies):
             return False
-        return all(d.status == "completed" for d in deps)
+        return all(d.status in {"completed", "done", "merged"} for d in deps)
 
     async def acquire_lock(self, db: AsyncSession, task: Task, worker_id: str) -> bool:
         """Acquire a task lock atomically; an in-progress owner may re-enter its own lock."""
@@ -382,11 +382,19 @@ class TaskScheduler:
         """Alias for `run_orchestration_cycle` that also runs the periodic degraded-session recovery hook."""
         return await self.run_orchestration_cycle(db, force_session_recovery=force_session_recovery)
 
-    async def complete_task(self, db: AsyncSession, task: Task, summary: str = "Completed and verified") -> Task:
-        task.status = "completed"
+    async def complete_task(
+        self,
+        db: AsyncSession,
+        task: Task,
+        summary: str = "Completed and verified",
+        *,
+        target_status: str = "completed",
+    ) -> Task:
+        task.status = target_status
         task.progress_percent = 100
         task.result_summary = summary
-        task.completed_at = utcnow()
+        if target_status in {"completed", "done", "merged"}:
+            task.completed_at = utcnow()
         task.lock_owner = None
         task.locked_at = None
 
@@ -401,15 +409,15 @@ class TaskScheduler:
         db.add(
             AuditLog(
                 actor=task.assigned_agent_id or "orchestrator",
-                action="task.completed",
+                action=f"task.{target_status}",
                 resource_type="task",
                 resource_id=task.id,
-                details={"summary": summary},
+                details={"summary": summary, "status": target_status},
             )
         )
         await db.commit()
         await db.refresh(task)
-        await event_bus.emit("task.updated", {"task_id": task.id, "status": "completed"})
+        await event_bus.emit("task.updated", {"task_id": task.id, "status": target_status})
         return task
 
     async def fail_and_retry_or_escalate(self, db: AsyncSession, task: Task, error_msg: str) -> Task:
@@ -466,7 +474,7 @@ class TaskScheduler:
     async def _manager_context(db: AsyncSession, project_id: str | None) -> tuple[list[Agent], dict[str, Any]]:
         employee_result = await db.execute(select(Agent).where(Agent.role == "worker").order_by(Agent.id.asc()))
         employees = list(employee_result.scalars().all())
-        task_stmt = select(Task).where(~Task.status.in_(["completed", "failed", "cancelled"]))
+        task_stmt = select(Task).where(~Task.status.in_(["completed", "done", "merged", "failed", "cancelled"]))
         if project_id:
             task_stmt = task_stmt.where(Task.project_id == project_id)
         task_result = await db.execute(task_stmt.order_by(Task.created_at.asc(), Task.id.asc()))

@@ -90,11 +90,12 @@ class AgentRuntimeExecutor:
         *,
         policy: SandboxExecutionPolicy | None = None,
         sandbox_mode: str | None = None,
+        workspace_root: Path | None = None,
     ) -> dict[str, Any]:
         """Execute an allowed development tool strictly inside the employee's isolated workspace with env scrubbing & limits."""
         exe = assert_allowed_binary(command)
 
-        ws = ensure_employee_workspace(agent_id)
+        ws = Path(workspace_root).resolve() if workspace_root is not None else ensure_employee_workspace(agent_id)
         settings = get_settings()
         eff_policy = policy or SandboxExecutionPolicy.from_env(timeout_seconds=20)
         eff_mode = (sandbox_mode or eff_policy.sandbox_mode).strip().lower() or "process"
