@@ -574,5 +574,7 @@ export const ar: Translations = {
     connectorBusy: 'مشغول',
     connectorIdle: 'جاهز',
     connectorOffline: 'غير متصل',
+    demoMode: 'وضع العرض',
+    demoHint: 'إطارات تجريبية من الخادم (DEMO_MODE) — ليست من وكيل حقيقي',
   },
 }

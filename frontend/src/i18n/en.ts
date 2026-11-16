@@ -574,5 +574,7 @@ export const en: Translations = {
     connectorBusy: 'Busy',
     connectorIdle: 'Ready',
     connectorOffline: 'Offline',
+    demoMode: 'Demo mode',
+    demoHint: 'Scripted frames from the backend (DEMO_MODE) — not produced by an agent',
   },
 }

@@ -1395,3 +1395,12 @@ html.bridge-mounted body {
   text-align: start;
   unicode-bidi: plaintext;
 }
+
+/* Demo mode badge: unmistakable, so scripted frames are never read as a real run. */
+.bridge-chip--demo {
+  color: #fde68a;
+  border-color: rgba(251, 191, 36, 0.85);
+  background: rgba(69, 45, 4, 0.6);
+  letter-spacing: 1px;
+  font-weight: 700;
+}

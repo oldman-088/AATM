@@ -415,6 +415,44 @@ describe('Command Bridge (جسر القيادة)', () => {
     expect(screen.getByTestId('bridge-chat').textContent).not.toContain('Chief AI Engineering Manager online')
   })
 
+  it('shows labelled demo frames in demo mode and never mixes them with live ones', async () => {
+    const demoFrames = {
+      demo: true,
+      tick_seconds: 3,
+      agents: {
+        'worker-1': [
+          {
+            agent_id: 'worker-1',
+            demo: true,
+            action: 'write',
+            path: 'demo/stream.py',
+            language: 'python',
+            content: 'def demo_frame():\n    return True\n',
+          },
+        ],
+      },
+    }
+    const { calls } = await renderBridge('en', {
+      '/api/health': {
+        status: 'ok',
+        demo_mode: true,
+        model_status: { status: 'CONFIGURED', configured: true, configured_providers: ['demo'], reason: null },
+      },
+      '/api/v1/demo/code-stream': demoFrames,
+    })
+
+    expect(screen.getByTestId('bridge-demo-chip').textContent).toBe('Demo mode')
+    await waitFor(() => expect(calls.some((call) => call.path.startsWith('/api/v1/demo/code-stream'))).toBe(true))
+    await waitFor(() => expect(screen.getByTestId('bridge-screen-worker-1').textContent).toContain('def demo_frame'))
+  })
+
+  it('does not poll the demo feed outside demo mode', async () => {
+    const { calls } = await renderBridge('en')
+    expect(screen.queryByTestId('bridge-demo-chip')).toBeNull()
+    await settle()
+    expect(calls.some((call) => call.path.includes('/demo/code-stream'))).toBe(false)
+  })
+
   it('localises the bridge (Arabic RTL and English LTR)', async () => {
     const arabic = await renderBridge('ar')
     expect(document.documentElement.dir).toBe('rtl')

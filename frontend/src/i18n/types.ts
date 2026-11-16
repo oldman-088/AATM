@@ -573,5 +573,7 @@ export interface Translations {
     connectorBusy: string
     connectorIdle: string
     connectorOffline: string
+    demoMode: string
+    demoHint: string
   }
 }

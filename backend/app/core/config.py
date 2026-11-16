@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     APP_VERSION: str = "3.1.0"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
+    # B3 — scripted demo feed for the Command Bridge. Off by default, refused in production, and
+    # every frame it serves is flagged `demo: true`.
+    DEMO_MODE: bool = False
 
     HOST: str = "127.0.0.1"
     PORT: int = 8000

@@ -574,5 +574,7 @@ export const fa: Translations = {
     connectorBusy: 'مشغول',
     connectorIdle: 'آماده',
     connectorOffline: 'آفلاین',
+    demoMode: 'حالت نمایش',
+    demoHint: 'قاب‌های نمایشی از سمت سرور (DEMO_MODE) — ساختهٔ یک عامل واقعی نیستند',
   },
 }

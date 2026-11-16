@@ -123,7 +123,10 @@ export function CommandBridge({
   const workers = useMemo(() => data.agents.filter((agent) => agent?.role !== 'manager'), [data.agents])
   const manager = useMemo(() => data.agents.find((agent) => agent?.role === 'manager') || null, [data.agents])
   const workerIds = useMemo(() => workers.map((agent) => agent.id), [workers])
-  const { stations } = useBridgeFeed(data.agents.map((agent) => agent.id))
+  const { stations } = useBridgeFeed(
+    data.agents.map((agent) => agent.id),
+    data.demoMode,
+  )
 
   const [focusId, setFocusId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -424,6 +427,11 @@ export function CommandBridge({
         >
           {wsLabel}
         </span>
+        {data.demoMode && (
+          <span className="bridge-chip bridge-chip--demo" title={t.bridge.demoHint} data-testid="bridge-demo-chip">
+            {t.bridge.demoMode}
+          </span>
+        )}
         {onOpenAdvanced && (
           <button type="button" className="bridge-adv-link" onClick={() => onOpenAdvanced('dashboard')} data-testid="bridge-advanced">
             {t.bridge.advanced}

@@ -78,7 +78,7 @@ const routes: Array<[string, unknown]> = [
   ['/api/health', { status: 'ok', model_status: { status: 'CONFIGURED', configured: true, configured_providers: ['anthropic-claude'], reason: null }, sandbox: { status: 'READY', available: true } }],
 ]
 
-async function mockApi(page: Page) {
+async function mockApi(page: Page, overrides: Record<string, unknown> = {}) {
   await page.addInitScript(() => {
     localStorage.setItem('aatm_jwt_token', 'e2e-jwt')
     localStorage.setItem('aatm_language', 'ar')
@@ -86,9 +86,16 @@ async function mockApi(page: Page) {
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
     const match = routes.find(([key]) => path === key || path.startsWith(`${key}/`))
+    const override = Object.keys(overrides).find((key) => path === key)
     // Unknown collections answer `[]`, unknown objects `{}` — the shell loads ~20 endpoints and
     // only the ones listed above matter for the bridge.
-    const body = match ? match[1] : path.includes('/status') || path.startsWith('/api/health') ? {} : []
+    const body = override
+      ? overrides[override]
+      : match
+        ? match[1]
+        : path.includes('/status') || path.startsWith('/api/health')
+          ? {}
+          : []
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
   })
   // The live socket is not needed for layout; the HUD shows the real "offline" state.
@@ -156,4 +163,36 @@ test('390×844 shows the station cards on screen', async ({ page }) => {
   await page.getByTestId('bridge-mobile-station-worker-1').click()
   await expect(page.getByTestId('bridge-focus')).toBeVisible()
   await page.screenshot({ path: '../docs/design/bridge-mobile-focus-390x844-ar.png' })
+})
+
+test('demo mode is clearly badged and renders the scripted feed', async ({ page }) => {
+  await mockApi(page, {
+    '/api/health': {
+      status: 'ok',
+      demo_mode: true,
+      model_status: { status: 'CONFIGURED', configured: true, configured_providers: ['demo'], reason: null },
+      sandbox: { status: 'READY', available: true },
+    },
+    '/api/v1/demo/code-stream': {
+      demo: true,
+      tick_seconds: 3,
+      agents: {
+        'worker-1': [
+          {
+            agent_id: 'worker-1',
+            demo: true,
+            action: 'write',
+            path: 'demo/stream.py',
+            language: 'python',
+            content: 'def demo_frame():\n    return True\n',
+          },
+        ],
+      },
+    },
+  })
+  await page.goto('/')
+  await expect(page.getByTestId('bridge-demo-chip')).toBeVisible()
+  await expect(page.getByTestId('bridge-demo-chip')).toHaveText('وضع العرض')
+  await expect(page.getByTestId('bridge-screen-worker-1')).toContainText('demo_frame')
+  await page.screenshot({ path: '../docs/design/bridge-demo-1440x900-ar.png' })
 })
