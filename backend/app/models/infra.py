@@ -91,6 +91,8 @@ class ArenaSession(Base):
     agent_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     profile_id: Mapped[str] = mapped_column(String(64), ForeignKey("browser_profiles.id"), nullable=False, index=True)
     task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # The task currently driving this session: the implementation task, or a correction follow-up.
+    active_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # Page state reported by the userscript: ready|generating|idle|keep_working_visible|needs_human|offline
     page_state: Mapped[str] = mapped_column(String(32), default="offline", nullable=False)
     # Workflow phase: new|starting|submitting|working|awaiting_pr|reporting|reviewing|correcting|

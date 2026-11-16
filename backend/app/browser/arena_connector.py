@@ -245,8 +245,9 @@ USERSCRIPT_BODY = r"""(function () {
       var els = qa(selectors[i]);
       for (var j = 0; j < els.length; j++) {
         var rect = els[j].getBoundingClientRect();
-        if (rect.width > 50 && rect.height > 10 && rect.bottom > 0 && rect.top < window.innerHeight && isVisible(els[j])) {
-          candidates.push({ el: els[j], top: rect.top });
+        // Long transcripts can scroll the composer out of view: size + visibility decide, not the viewport.
+        if (rect.width > 50 && rect.height > 10 && isVisible(els[j])) {
+          candidates.push({ el: els[j], top: rect.top + window.scrollY });
         }
       }
     }
@@ -412,7 +413,8 @@ USERSCRIPT_BODY = r"""(function () {
   /* ---------------------------------------------------------------- page checks (data from the bridge) */
   function transcriptText() {
     if (!settings) return [];
-    return qa(settings.dom.assistant_message).concat(qa(settings.dom.user_message)).concat(replyCandidates());
+    return qa(settings.dom.assistant_message).concat(qa(settings.dom.user_message)).concat(qa("[data-message-author-role]"))
+      .concat(replyCandidates());
   }
 
   function pageTextWithoutTranscript() {
@@ -580,6 +582,7 @@ USERSCRIPT_BODY = r"""(function () {
     }
     if (!input) throw fail("composer_not_found", "message composer not found (signed out or page changed)");
     if (input.disabled || input.readOnly) throw fail("composer_busy", "the composer is disabled");
+    try { input.scrollIntoView({ block: "center" }); } catch (e) {}
     setInputText(input, text);
     await sleep(300);
     if (inputText(input).trim() === "") throw fail("insert_failed", "the page did not accept the text");

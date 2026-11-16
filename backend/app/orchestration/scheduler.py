@@ -234,9 +234,18 @@ class TaskScheduler:
     ) -> dict[str, Any]:
         """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
         session_recovery = await self.recover_sessions_if_needed(db, force=force_session_recovery)
+        from app.orchestration.arena_runner import arena_reservations, arena_runner
         from app.orchestration.review import review_service
 
+        try:
+            arena = await arena_runner.tick(db)
+        except Exception as exc:  # noqa: BLE001 - Arena monitoring must never break dispatch
+            logger.warning("Arena runner tick failed: %s", type(exc).__name__)
+            await db.rollback()
+            arena = {"error": type(exc).__name__}
         review_tasks_created = await review_service.create_pending_reviews(db)
+        # Employees whose Arena session still owns a PR only take that PR's follow-ups (same session).
+        reserved = await arena_reservations(db)
 
         settings = get_settings()
         agents_res = await db.execute(
@@ -272,7 +281,11 @@ class TaskScheduler:
 
             chosen: Agent | None = None
             wants_reviewer = task.task_type == "review"
-            eligible = [w for w in idle_workers if (w.role == "reviewer") == wants_reviewer]
+            eligible = [
+                w for w in idle_workers
+                if (w.role == "reviewer") == wants_reviewer
+                and (w.id not in reserved or reserved[w.id] in {task.id, task.parent_task_id})
+            ]
             if task.execution_mode == "manual":
                 if not task.assigned_agent_id:
                     continue
@@ -392,6 +405,7 @@ class TaskScheduler:
             "idle_workers": len(idle_workers),
             "session_recovery": session_recovery,
             "review_tasks_created": review_tasks_created,
+            "arena": arena,
             "scaling": scaling,
         }
 

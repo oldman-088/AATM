@@ -410,7 +410,7 @@ async def test_router_daily_monthly_spend_caps_and_failover(db_session, monkeypa
     monkeypatch.setenv("PHASE2_ANTHROPIC_KEY", "phase2-anthropic-key")
 
     # Point the bridge to an unused loopback port and use a live local Anthropic mock
-    # as the real failover target; the arena_agent provider is intentionally a stub.
+    # as the real failover target; the arena_agent provider needs a connected Arena Agent profile.
     bridge = await db_session.get(AIProvider, "arena-local-bridge")
     bridge.endpoint_url = "http://127.0.0.1:1"
     anthropic = await db_session.get(AIProvider, "anthropic-claude")

@@ -1,3 +1,4 @@
+import json
 import re
 import shutil
 from collections.abc import Callable, Coroutine, Iterable
@@ -906,6 +907,121 @@ class GitWorkflowManager:
                 "ready_output": out_ready or err_ready,
             }
         return {"ok": True, "merged": True, "ready_rc": rc_ready, "output": out}
+
+    # ------------------------------------------------------------------ Arena Agent (GitHub API)
+    _SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+    async def _gh_json(self, args: list[str], cwd: str | Path, *, timeout: int = 30) -> tuple[bool, Any, str]:
+        rc, out, err = await self._exec(["gh", *args], Path(cwd), timeout=timeout)
+        if rc != 0:
+            return False, None, sanitize_cli_output(err or out or "gh failed")[:300]
+        try:
+            return True, json.loads(out or "null"), ""
+        except ValueError:
+            return False, None, "gh returned invalid JSON"
+
+    async def find_task_pull_request(self, *, repo_slug: str, task_id: str, cwd: str | Path) -> dict[str, Any]:
+        """Find the PR whose title starts with ``[AATM-<task_id>]`` through the GitHub API (open first)."""
+        if not self._SLUG_RE.fullmatch(repo_slug or "") or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", task_id or ""):
+            return {"ok": False, "error": "Invalid repository slug or task id."}
+        prefix = f"[AATM-{task_id}]"
+        ok, data, err = await self._gh_json(
+            ["pr", "list", "--repo", repo_slug, "--state", "all", "--limit", "20", "--search", f'"{prefix}" in:title',
+             "--json", "number,title,url,headRefName,headRefOid,baseRefName,state,isDraft,createdAt,author"],
+            cwd,
+        )
+        if not ok:
+            return {"ok": False, "error": err}
+        matches = [pr for pr in (data or []) if isinstance(pr, dict) and str(pr.get("title") or "").startswith(prefix)]
+        matches.sort(key=lambda pr: (pr.get("state") != "OPEN", -int(pr.get("number") or 0)))
+        return {"ok": True, "pull_request": matches[0] if matches else None, "count": len(matches)}
+
+    async def list_arena_branches(self, *, repo_slug: str, cwd: str | Path, prefix: str = "arena/") -> dict[str, Any]:
+        """``arena/*`` branches with their head SHA (GitHub matching-refs API)."""
+        if not self._SLUG_RE.fullmatch(repo_slug or "") or not re.fullmatch(r"[A-Za-z0-9_./-]{1,60}", prefix):
+            return {"ok": False, "error": "Invalid repository slug or prefix.", "branches": []}
+        ok, data, err = await self._gh_json(["api", f"repos/{repo_slug}/git/matching-refs/heads/{prefix}", "--paginate"], cwd)
+        if not ok:
+            return {"ok": False, "error": err, "branches": []}
+        branches = []
+        for ref in data or []:
+            name = str((ref or {}).get("ref") or "")
+            if name.startswith("refs/heads/"):
+                branches.append({"name": name[len("refs/heads/"):], "sha": ((ref.get("object") or {}).get("sha"))})
+        return {"ok": True, "branches": branches}
+
+    async def compare_branch(
+        self, *, repo_slug: str, base: str, head: str, cwd: str | Path, max_patch_chars: int = 20_000
+    ) -> dict[str, Any]:
+        """Commits and changed files of ``base...head`` from the GitHub compare API (patches truncated)."""
+        for ref in (base, head):
+            ok_ref, _ = validate_branch_name(ref)
+            if not ok_ref or not _COMMIT_REF_RE.fullmatch(ref):
+                return {"ok": False, "error": "Invalid branch name."}
+        if not self._SLUG_RE.fullmatch(repo_slug or ""):
+            return {"ok": False, "error": "Invalid repository slug."}
+        ok, data, err = await self._gh_json(["api", f"repos/{repo_slug}/compare/{base}...{head}"], cwd)
+        if not ok or not isinstance(data, dict):
+            return {"ok": False, "error": err or "compare failed"}
+        budget = max_patch_chars
+        files = []
+        for f in data.get("files") or []:
+            patch = str(f.get("patch") or "")
+            take = patch[: max(0, budget)]
+            budget -= len(take)
+            files.append({
+                "filename": str(f.get("filename") or ""),
+                "status": str(f.get("status") or ""),
+                "additions": int(f.get("additions") or 0),
+                "deletions": int(f.get("deletions") or 0),
+                "changes": int(f.get("changes") or 0),
+                "patch": take,
+                "patch_truncated": len(take) < len(patch),
+            })
+        commits = []
+        for c in data.get("commits") or []:
+            message = str((c.get("commit") or {}).get("message") or "")
+            commits.append({"sha": str(c.get("sha") or ""), "message": (message.splitlines() or [""])[0][:200]})
+        return {
+            "ok": True,
+            "ahead_by": int(data.get("ahead_by") or 0),
+            "behind_by": int(data.get("behind_by") or 0),
+            "head_sha": commits[-1]["sha"] if commits else None,
+            "html_url": data.get("html_url") or f"https://github.com/{repo_slug}/compare/{base}...{head}",
+            "commits": commits,
+            "files": files,
+            "additions": sum(f["additions"] for f in files),
+            "deletions": sum(f["deletions"] for f in files),
+        }
+
+    async def checkout_review_worktree(self, *, repo_path: str | Path, branch_name: str, task_id: str) -> dict[str, Any]:
+        """Fetch a remote (Arena-pushed) branch into a detached, read-only review worktree."""
+        root = Path(repo_path).resolve()
+        if not (root / ".git").exists():
+            return {"ok": False, "error": "Git repository not found."}
+        ok_br, clean_branch = validate_branch_name(branch_name)
+        if not ok_br or is_protected_branch(clean_branch, PROTECTED_BRANCHES):
+            return {"ok": False, "error": "Invalid or protected branch."}
+        short = re.sub(r"[^a-zA-Z0-9]", "", task_id or "")[:8].lower()
+        if not short:
+            return {"ok": False, "error": "Invalid task id."}
+        wt_base = (root / "data" / "worktrees").resolve()
+        wt_base.mkdir(parents=True, exist_ok=True)
+        try:
+            target = resolve_contained_path(wt_base, f"arena-{short}")
+        except WorkspaceSandboxError as exc:
+            return {"ok": False, "error": sanitize_cli_output(str(exc))}
+        rc, out, err = await self._exec(["git", "fetch", "origin", f"+refs/heads/{clean_branch}:refs/remotes/origin/{clean_branch}"], root, timeout=120)
+        if rc != 0:
+            return {"ok": False, "error": err or out or "git fetch failed."}
+        if (target / ".git").exists():
+            rc, out, err = await self._exec(["git", "checkout", "--detach", f"origin/{clean_branch}"], target)
+        else:
+            rc, out, err = await self._exec(["git", "worktree", "add", "--detach", str(target), f"origin/{clean_branch}"], root)
+        if rc != 0:
+            return {"ok": False, "error": err or out or "git worktree add failed."}
+        rc_sha, sha, _ = await self._exec(["git", "rev-parse", "HEAD"], target)
+        return {"ok": True, "worktree_path": str(target), "head_sha": sha if rc_sha == 0 else None}
 
     async def cleanup_task_worktree(
         self,

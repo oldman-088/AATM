@@ -59,6 +59,8 @@
   var finalReport = params.get("report") || "Implementation summary: mock work done.\nModified files: feature.py\nTests: 1 passed";
   var stats = { submits: 0, kw_clicks: 0, new_sessions: 0, generations: 0 };
   window.__mockArena = stats;
+  // Test hook: the next final reply (the agent's report) changes between review rounds.
+  stats.setReport = function (text) { finalReport = String(text); };
 
   var log = document.getElementById("log");
   var widget = document.getElementById("widget");

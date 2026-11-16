@@ -309,7 +309,12 @@ async def test_bridge_concurrency_limit_uses_module_semaphore(monkeypatch):
     assert server.max_active_completions == 1
 
 
-async def test_arena_agent_stub_never_answers_or_reports_healthy(db_session, monkeypatch):
+async def test_arena_agent_never_answers_or_reports_healthy_while_the_connector_is_off(db_session, monkeypatch):
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "ARENA_CONNECTOR_ENABLED", False)
+    monkeypatch.setattr(settings, "ARENA_MOCK_URL", "")
     monkeypatch.setenv("ARENA_SESSION_TOKEN", "configured-test-session-token")
     await _enable_only(db_session, "arena-agent")
 
@@ -321,14 +326,13 @@ async def test_arena_agent_stub_never_answers_or_reports_healthy(db_session, mon
     )
     health = await adapter.health_check()
     assert health.status != "healthy"
-    assert health.detail == "arena_agent runtime is not implemented"
+    assert health.detail.startswith("not_enabled")
 
     prompt = "echo-stub-must-not-return-this"
-    direct = await adapter.generate(ProviderRequest(prompt=prompt))
+    direct = await adapter.generate(ProviderRequest(prompt=prompt, metadata={"browser_profile_id": "profile-qa-e2e"}))
     assert direct.success is False
-    assert direct.error_message == "arena_agent runtime is not implemented"
+    assert direct.metadata["code"] == "not_enabled"
     assert direct.content == ""
-    assert direct.content != prompt
     assert direct.estimated_cost_usd == 0.0
 
     routed = await ProviderRouter().route_and_execute(
@@ -338,7 +342,7 @@ async def test_arena_agent_stub_never_answers_or_reports_healthy(db_session, mon
     )
     assert routed.success is False
     assert routed.provider_id == "none"
-    assert routed.error_message == "arena_agent runtime is not implemented"
+    assert "Arena connector is not enabled" in (routed.error_message or "")
     assert routed.content == ""
     assert routed.estimated_cost_usd == 0.0
     provider = await db_session.get(AIProvider, "arena-agent")

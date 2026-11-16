@@ -175,6 +175,22 @@ class AgentLoop(ClaimMixin, ContextMixin, ActionsMixin, ApprovalsMixin):
             if agent.status == "working" and agent.current_task_id not in {None, task.id}:
                 await self._unclaim_in_session(db, message)
                 return
+            from app.browser.arena_sessions import is_arena_agent_worker
+
+            if await is_arena_agent_worker(db, agent):
+                # Arena Agent mode: the employee's own Arena session does the work on GitHub; the
+                # orchestrator's arena runner monitors it (no local model loop, no local workspace).
+                from app.orchestration.arena_runner import arena_runner
+
+                if not await task_scheduler.acquire_lock(db, task, agent.id):
+                    await self._unclaim_in_session(db, message)
+                    return
+                agent.status = "working"
+                agent.current_task_id = task.id
+                agent.last_heartbeat = utcnow()
+                await db.commit()
+                await arena_runner.run_message(db, message, task, agent)
+                return
             if isinstance(self.provider_router, ProviderRouter):
                 model_status = await get_model_configuration_status(db)
                 if not model_status["configured"]:

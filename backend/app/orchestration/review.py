@@ -173,7 +173,12 @@ class ReviewMergeService:
         if review_task.worktree_path and Path(review_task.worktree_path).is_dir():
             diff = await git_workflow_manager.branch_diff(review_task.worktree_path, base)
         quarantined = sanitize_untrusted_content(diff.get("diff") or "", source="pull_request:diff")["quarantined_text"]
-        return {
+        arena = None
+        if parent is not None:
+            from app.orchestration.arena_runner import arena_runner
+
+            arena = await arena_runner.review_material(db, parent)
+        context = {
             "pr_number": review_task.pr_number,
             "pr_url": review_task.pr_url,
             "base_branch": base,
@@ -192,6 +197,13 @@ class ReviewMergeService:
                 "Finish with exactly one review action."
             ),
         }
+        if arena is not None:
+            # Arena Agent built this PR: verify its report independently against the real GitHub diff.
+            context["arena_agent"] = arena
+            if not context["changed_files"]:
+                context["changed_files"] = [f["filename"] for f in arena["changed_files"]]
+            context["instructions"] += " " + arena["verify"]
+        return context
 
     async def submit_review(
         self,
@@ -361,7 +373,11 @@ class ReviewMergeService:
         if parent is None:
             return {"ok": False, "error": "Parent task missing."}
         push: dict[str, Any] = {"ok": False, "skipped": True}
-        if follow_up.worktree_path and follow_up.branch_name:
+        from app.browser.arena_sessions import session_for_task
+
+        if await session_for_task(db, parent.id) is not None:
+            push = {"ok": True, "skipped": True, "reason": "Arena Agent pushes its own branch to GitHub."}
+        elif follow_up.worktree_path and follow_up.branch_name:
             push = await git_workflow_manager.push_task_branch(follow_up.worktree_path, branch_name=follow_up.branch_name)
         parent.commit_sha = follow_up.commit_sha or parent.commit_sha
         parent.status = "pr_open"
@@ -475,6 +491,9 @@ class ReviewMergeService:
             if helper.status not in FINISHED_TASK_STATUSES | {"cancelled", "failed"}:
                 helper.status = "cancelled"
             helper.worktree_path = None
+        from app.orchestration.arena_runner import arena_runner
+
+        await arena_runner.on_task_merged(db, task)
         await db.commit()
         await event_bus.emit("task.updated", {"task_id": task.id, "status": task.status})
         await self.check_project_completion(db, task.project_id)
