@@ -817,7 +817,7 @@ export function TeamScalingPanel({ onReload }: { onReload: () => void }) {
     {status?.sqlite_warning && <div role="alert" className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-start text-xs text-amber-200">{t.scaling.sqliteWarning}</div>}
     {status && <div className="grid grid-cols-2 gap-2 text-xs text-slate-300 md:grid-cols-4">
       <div><span className="text-slate-500">{t.scaling.defaultWorkers}: </span>{formatNumber(status.default_workers ?? 0)}</div>
-      <div><span className="text-slate-500">{t.scaling.extraWorkers}: </span>{formatNumber(status.extra_workers ?? 0)} / {formatNumber(status.max_workers ?? 0)}</div>
+      <div><span className="text-slate-500">{t.scaling.extraWorkers}: </span>{formatNumber(status.extra_workers ?? 0)} / {status.max_workers == null ? '∞' : formatNumber(status.max_workers)}</div>
       <div><span className="text-slate-500">{t.scaling.backlog}: </span>{formatNumber(status.ready_backlog ?? 0)}</div>
       <div><span className="text-slate-500">{t.scaling.mode}: </span><span dir="ltr">{status.mode}</span></div>
       <div><span className="text-slate-500">{t.scaling.queue}: </span><span dir="ltr">{status.queue?.configured_backend ?? '—'}</span></div>

@@ -52,7 +52,10 @@ from app.runtime.agent_loop import AgentLoop
 
 BRIDGE_TOKEN = "bridge-test-token-phase6-0123456789"
 PLANTED = ("MOCK-PLANTED-CSRF-9d41c2", "MOCK-PLANTED-COOKIE-5be7aa", "MOCK-PLANTED-STORAGE-1c08ef")
-ARENA_FLAGS = ("ARENA_CONNECTOR_ENABLED", "ARENA_AUTOMATION_APPROVED", "ARENA_APPROVAL_REFERENCE")
+ARENA_FLAGS = ("ARENA_CONNECTOR_ENABLED",)
+# Settings removed with the temporary authorization system; they must never come back.
+REMOVED_SETTINGS = ("ARENA_AUTOMATION_APPROVED", "ARENA_APPROVAL_REFERENCE", "ARENA_DOMAINS",
+                    "ARENA_MIN_REQUEST_INTERVAL_SECONDS", "ARENA_DAILY_CAP_PER_PROFILE")
 
 
 def _free_port() -> int:
@@ -104,10 +107,9 @@ def bridge(monkeypatch):
 @pytest.fixture()
 def arena_settings(monkeypatch):
     settings = get_settings()
-    for name in ARENA_FLAGS:
-        monkeypatch.setattr(settings, name, "" if name == "ARENA_APPROVAL_REFERENCE" else False)
+    monkeypatch.setattr(settings, "ARENA_CONNECTOR_ENABLED", False)
+    monkeypatch.setattr(settings, "ARENA_ALLOWED_ORIGINS", "https://arena.ai")
     monkeypatch.setattr(settings, "ARENA_MOCK_URL", "")
-    monkeypatch.setattr(settings, "ARENA_MIN_REQUEST_INTERVAL_SECONDS", 0.0)
     return settings
 
 
@@ -156,14 +158,16 @@ async def test_flags_off_every_real_arena_path_returns_not_enabled(env, arena_se
     gate = arena_gate()
     assert gate["mode"] == "disabled" and gate["code"] == "not_enabled" and gate["real_enabled"] is False
 
-    # Partial approvals never enable real Arena.
-    for connector, approved, ref in ((True, False, "REF-1"), (True, True, ""), (False, True, "REF-1")):
-        monkeypatch.setattr(arena_settings, "ARENA_CONNECTOR_ENABLED", connector)
-        monkeypatch.setattr(arena_settings, "ARENA_AUTOMATION_APPROVED", approved)
-        monkeypatch.setattr(arena_settings, "ARENA_APPROVAL_REFERENCE", ref)
-        assert arena_gate()["real_enabled"] is False and arena_gate()["mode"] == "disabled"
-    for name in ARENA_FLAGS:
-        monkeypatch.setattr(arena_settings, name, "" if name == "ARENA_APPROVAL_REFERENCE" else False)
+    # The connector switch is the only gate: no approval reference, expiry or quota settings exist.
+    for name in REMOVED_SETTINGS:
+        assert not hasattr(arena_settings, name), name
+    # Enabled without any allowed origin -> still off (nothing to @match).
+    monkeypatch.setattr(arena_settings, "ARENA_CONNECTOR_ENABLED", True)
+    monkeypatch.setattr(arena_settings, "ARENA_ALLOWED_ORIGINS", " , ")
+    assert arena_gate()["real_enabled"] is False and arena_gate()["mode"] == "disabled"
+    monkeypatch.setattr(arena_settings, "ARENA_ALLOWED_ORIGINS", "https://arena.ai")
+    assert arena_gate()["real_enabled"] is True and arena_gate()["mode"] == "real"
+    monkeypatch.setattr(arena_settings, "ARENA_CONNECTOR_ENABLED", False)
     # A "mock" URL that is not loopback is refused (it would be a back door to the real site).
     monkeypatch.setattr(arena_settings, "ARENA_MOCK_URL", "https://arena.ai/")
     assert arena_gate()["mode"] == "disabled" and arena_gate()["mock_url_rejected"] is True
@@ -177,7 +181,7 @@ async def test_flags_off_every_real_arena_path_returns_not_enabled(env, arena_se
     headers = await _admin_headers(factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         status = (await client.get("/api/v1/arena/connector/status", headers=headers)).json()
-        assert status["status_label"] == "waiting_for_arena_approval" and status["enabled"] is False
+        assert status["status_label"] == "disabled" and status["enabled"] is False
         for path in ("userscript", "register", "open-for-sign-in"):
             r = await client.post(f"/api/v1/arena/profiles/profile-qa-e2e/{path}", headers=headers)
             assert r.status_code == 409 and r.json()["detail"]["code"] == "not_enabled", (path, r.text)
@@ -198,7 +202,7 @@ async def test_flags_off_every_real_arena_path_returns_not_enabled(env, arena_se
         assert exc.value.status_code == 501
 
 
-def test_bridge_refuses_real_arena_origins_unless_the_bridge_itself_is_approved(bridge, monkeypatch):
+def test_bridge_refuses_real_arena_origins_unless_the_bridge_itself_is_enabled(bridge, monkeypatch):
     import httpx
 
     headers = {"Authorization": f"Bearer {BRIDGE_TOKEN}"}
@@ -206,10 +210,8 @@ def test_bridge_refuses_real_arena_origins_unless_the_bridge_itself_is_approved(
     r = httpx.put(f"{bridge.base}/v1/connector/profiles/p1", json=body, headers=headers)
     assert r.status_code == 403 and r.json()["detail"]["code"] == "not_enabled"
     r = httpx.put(f"{bridge.base}/v1/connector/profiles/p1", json={**body, "real_enabled": True}, headers=headers)
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "not_enabled"  # bridge env flags are off
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "not_enabled"  # bridge env flag is off
     monkeypatch.setenv("ARENA_CONNECTOR_ENABLED", "true")
-    monkeypatch.setenv("ARENA_AUTOMATION_APPROVED", "true")
-    monkeypatch.setenv("ARENA_APPROVAL_REFERENCE", "OWNER-APPROVAL-REF")
     r = httpx.put(f"{bridge.base}/v1/connector/profiles/p1", json={**body, "real_enabled": True}, headers=headers)
     assert r.status_code == 200
     # Admin endpoints always need the bridge token.
@@ -236,7 +238,7 @@ async def test_generated_userscript_is_scoped_minimal_and_token_is_stored_hashed
     assert data["mode"] == "mock" and data["bridge_registration"]["ok"] is True
     assert data["match_patterns"] == [f"{bridge.base}/mock-arena/*"]
     assert "// @grant        none" in script and "@grant GM" not in script
-    assert "arena.ai" not in script.split("==/UserScript==")[0]  # real domain only after approval
+    assert "arena.ai" not in script.split("==/UserScript==")[0]  # real origins only once the connector is enabled
     lowered = script.lower()
     for forbidden in ("cookie", "localstorage", "sessionstorage", "gm_xmlhttprequest", "unsafewindow", "eval(", "captcha"):
         assert forbidden not in lowered, forbidden
@@ -250,11 +252,10 @@ async def test_generated_userscript_is_scoped_minimal_and_token_is_stored_hashed
         dump = json.dumps([list(row) for row in (await db.execute(text("SELECT * FROM audit_logs"))).all()], default=str)
         assert token not in dump
 
-    # With the owner's approval recorded, the real domain is added to @match.
+    # With the connector enabled, every allowed origin gets its own @match.
     monkeypatch.setattr(arena_settings, "ARENA_CONNECTOR_ENABLED", True)
-    monkeypatch.setattr(arena_settings, "ARENA_AUTOMATION_APPROVED", True)
-    monkeypatch.setattr(arena_settings, "ARENA_APPROVAL_REFERENCE", "OWNER-REF-1")
-    assert "https://arena.ai/*" in match_patterns()
+    monkeypatch.setattr(arena_settings, "ARENA_ALLOWED_ORIGINS", "https://arena.ai, beta.arena.ai")
+    assert "https://arena.ai/*" in match_patterns() and "https://beta.arena.ai/*" in match_patterns()
     real_script = build_userscript(profile, None, "t")
     assert validate_userscript_policy(real_script, match_patterns()) == (True, "approved")
 
@@ -262,14 +263,15 @@ async def test_generated_userscript_is_scoped_minimal_and_token_is_stored_hashed
 # --------------------------------------------------------------------------- bridge rules
 
 
-async def test_bridge_connector_auth_origin_one_in_flight_delay_cap_and_needs_human(bridge):
+async def test_bridge_connector_auth_origin_one_in_flight_no_quota_and_needs_human(bridge):
     import httpx
 
     token = "profile-token-abc"
     origin = bridge.base
     admin = {"Authorization": f"Bearer {BRIDGE_TOKEN}"}
+    # Legacy limit fields from an old backend are ignored: the bridge has no interval or cap.
     reg = {"token_sha256": hashlib.sha256(token.encode()).hexdigest(), "agent_id": "worker-1",
-           "allowed_origins": [origin], "min_interval_seconds": 0.3, "daily_cap": 3}
+           "allowed_origins": [origin], "min_interval_seconds": 30, "daily_cap": 1}
     async with httpx.AsyncClient(base_url=bridge.base, headers=admin) as http:
         assert (await http.put("/v1/connector/profiles/p1", json=reg)).status_code == 200
         ws_url = f"ws://127.0.0.1:{bridge.port}/v1/connector"
@@ -321,7 +323,7 @@ async def test_bridge_connector_auth_origin_one_in_flight_delay_cap_and_needs_hu
             first, second = await asyncio.gather(ask("one"), ask("two"))
             assert {first.json()["choices"][0]["message"]["content"], second.json()["choices"][0]["message"]["content"]} == {"ok:one", "ok:two"}
             assert peak == 1, "one in-flight request per profile"
-            assert prompts[1] - prompts[0] >= 0.3 + 0.1 - 0.02, "minimum delay between requests"
+            assert prompts[1] - prompts[0] < 5, "no artificial delay between requests"
 
             stopped = await ask("please STOP here")
             assert stopped.status_code == 409 and stopped.json()["detail"]["code"] == "needs_human"
@@ -333,10 +335,12 @@ async def test_bridge_connector_auth_origin_one_in_flight_delay_cap_and_needs_hu
             assert sessions["connector"]["profiles"][0]["status"] == "needs_human"
 
             assert (await http.post("/v1/connector/profiles/p1/reset")).json()["status"] == "ready"
-            capped = await ask("four")
-            assert capped.status_code == 429 and capped.json()["detail"]["code"] == "daily_cap_reached"
-            # Re-registering (e.g. token rotation) never resets the daily counter.
-            assert (await http.put("/v1/connector/profiles/p1", json=reg)).json()["requests_today"] == 3
+            # No daily cap or usage quota: many more requests than the legacy "daily_cap" all succeed.
+            many = [await ask(f"n{i}") for i in range(6)]
+            assert all(r.status_code == 200 for r in many), [r.text for r in many if r.status_code != 200]
+            summary = (await http.put("/v1/connector/profiles/p1", json=reg)).json()
+            assert "daily_cap" not in summary and "min_interval_seconds" not in summary and "requests_today" not in summary
+            assert summary["requests_total"] == 9  # history survives re-registration
             page.cancel()
 
 

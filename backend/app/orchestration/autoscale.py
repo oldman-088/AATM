@@ -3,7 +3,8 @@
 * Backlog >= ``SCALE_UP_BACKLOG_THRESHOLD`` ready tasks that waited >= ``SCALE_UP_WAIT_SECONDS``
   with no idle worker -> one pending ``scale_up`` ApprovalRequest (``AUTO_SCALE_MODE=approval``),
   or direct creation (``automatic``), or nothing (``off``).
-* Total workers never exceed ``MAX_CONCURRENT_WORKERS``.
+* Total workers never exceed ``MAX_CONCURRENT_WORKERS`` (0 = no ceiling).
+* New workers inherit the template worker's Arena mode, so Arena Agent mode scales with the team.
 * Extra workers idle for ``SCALE_DOWN_IDLE_MINUTES`` are disabled (never deleted, never defaults).
 """
 
@@ -77,7 +78,7 @@ class AutoscaleService:
             "default_workers": len([w for w in enabled if not is_extra(w)]),
             "extra_workers": len(extras),
             "total_workers": len(enabled),
-            "max_workers": settings.MAX_CONCURRENT_WORKERS,
+            "max_workers": settings.worker_ceiling(),
             "parallel_slots": settings.AGENT_MAX_PARALLEL,
             "idle_workers": len([w for w in enabled if w.status == "idle" and not w.is_emergency_stopped]),
             "ready_backlog": len(backlog),
@@ -116,7 +117,8 @@ class AutoscaleService:
         waited = [t for t in backlog if (now - to_naive_utc(t.created_at)).total_seconds() >= settings.SCALE_UP_WAIT_SECONDS]
         if len(waited) < settings.SCALE_UP_BACKLOG_THRESHOLD:
             return result
-        headroom = settings.MAX_CONCURRENT_WORKERS - len(workers)
+        ceiling = settings.worker_ceiling()
+        headroom = len(backlog) if ceiling is None else ceiling - len(workers)
         count = min(settings.SCALE_UP_STEP, headroom, len(backlog))
         if count <= 0:
             result["at_capacity"] = True
@@ -134,7 +136,8 @@ class AutoscaleService:
             description=(
                 f"{len(backlog)} ready tasks have waited at least {int(settings.SCALE_UP_WAIT_SECONDS)}s and all "
                 f"{len(workers)} workers are busy. Approve to add {count} extra worker(s) "
-                f"(limit {settings.MAX_CONCURRENT_WORKERS}). Extra workers increase provider spend."
+                + (f"(limit {settings.MAX_CONCURRENT_WORKERS}). " if ceiling else "")
+                + "Extra workers increase provider spend."
             ),
             requested_by="autoscaler",
             payload={"count": count, "backlog": len(backlog), "workers": len(workers), "kind": "spend"},
@@ -174,8 +177,10 @@ class AutoscaleService:
         settings = get_settings()
         workers = await self._workers(db)
         enabled = [w for w in workers if w.is_enabled]
-        count = max(0, min(count, settings.MAX_CONCURRENT_WORKERS - len(enabled)))
+        ceiling = settings.worker_ceiling()
+        count = max(0, count if ceiling is None else min(count, ceiling - len(enabled)))
         template = next((w for w in workers if w.id == TEMPLATE_WORKER_ID), None) or next(iter(workers), None)
+        arena_mode = await self.template_arena_mode(db, template)
         created: list[Agent] = []
         # Re-enable retired extras first, then create new ones.
         retired = sorted([w for w in workers if is_extra(w) and not w.is_enabled], key=lambda w: w.id)
@@ -184,6 +189,9 @@ class AutoscaleService:
             agent.status = "idle"
             agent.current_task_id = None
             agent.last_heartbeat = utcnow()
+            profile = await db.get(BrowserProfile, agent.browser_profile_id) if agent.browser_profile_id else None
+            if profile is not None:
+                profile.arena_mode = arena_mode
             created.append(agent)
         existing_ids = {w.id for w in workers}
         n = 1
@@ -202,6 +210,7 @@ class AutoscaleService:
                         profile_dir=str(settings.BROWSER_PROFILES_DIR / agent_id),
                         mode="visible",
                         status="ready",
+                        arena_mode=arena_mode,
                     )
                 )
             agent = Agent(
@@ -230,13 +239,21 @@ class AutoscaleService:
                     action="scaling.workers_added",
                     resource_type="agent",
                     resource_id=",".join(a.id for a in created),
-                    details={"count": len(created), "reason": reason},
+                    details={"count": len(created), "reason": reason, "arena_mode": arena_mode},
                 )
             )
         await db.commit()
         if created:
             await event_bus.emit("scaling.workers_added", {"agents": [a.id for a in created], "reason": reason})
         return created
+
+    @staticmethod
+    async def template_arena_mode(db: AsyncSession, template: Agent | None) -> str:
+        """Arena mode for new workers: the template worker's mode, so Arena Agent mode scales with the team."""
+        if template is None or not template.browser_profile_id:
+            return "chat"
+        profile = await db.get(BrowserProfile, template.browser_profile_id)
+        return (profile.arena_mode if profile is not None and profile.arena_mode in ("chat", "agent") else "chat")
 
     @staticmethod
     async def _close_profile(db: AsyncSession, agent: Agent) -> None:

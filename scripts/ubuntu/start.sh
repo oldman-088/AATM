@@ -72,8 +72,8 @@ if [[ "${AATM_SANDBOX_MODE:-docker}" == "docker" ]]; then
 fi
 
 # Local Arena bridge (loopback only): connector WebSocket + mock Arena page + local bridge API.
-# It reads ARENA_BRIDGE_TOKEN and the Arena approval flags from .env; real Arena stays off
-# unless ARENA_CONNECTOR_ENABLED, ARENA_AUTOMATION_APPROVED and ARENA_APPROVAL_REFERENCE are set.
+# It reads ARENA_BRIDGE_TOKEN and ARENA_CONNECTOR_ENABLED from .env; real Arena stays off
+# unless ARENA_CONNECTOR_ENABLED=true.
 if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
   if [[ -f logs/bridge.pid ]] && kill -0 "$(cat logs/bridge.pid)" 2>/dev/null && \
      bridge_port_open "${ARENA_BRIDGE_PORT:-4100}"; then

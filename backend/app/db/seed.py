@@ -441,7 +441,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 ram_gb=4.0,
                 capabilities=["fastapi", "python", "node", "playwright", "git"],
                 status="online",
-                max_concurrent_tasks=settings.MAX_CONCURRENT_WORKERS,
+                max_concurrent_tasks=settings.worker_ceiling() or 1000,
             )
         )
 

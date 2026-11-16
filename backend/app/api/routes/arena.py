@@ -1,7 +1,6 @@
-"""Phase 6 API: Profiles Manager (Browser Wall) and the Arena browser connector.
+"""Profiles Manager (Browser Wall), the Arena browser connector and Arena Agent sessions.
 
-Real-Arena paths return ``not_enabled`` (HTTP 409) unless ARENA_CONNECTOR_ENABLED and
-ARENA_AUTOMATION_APPROVED are true and ARENA_APPROVAL_REFERENCE is recorded.
+Real-Arena paths return ``not_enabled`` (HTTP 409) unless ARENA_CONNECTOR_ENABLED is true.
 """
 
 from __future__ import annotations
@@ -9,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,15 +23,23 @@ from app.browser.arena_connector import (
     ensure_arena_browser_provider,
     match_patterns,
     mint_token,
+    profile_arena_mode,
     real_arena_enabled,
     register_profile_with_bridge,
+)
+from app.browser.arena_sessions import (
+    arena_agent_overview,
+    open_session_for,
+    session_dict,
+    set_arena_mode,
 )
 from app.browser.engines import validate_userscript_policy
 from app.browser.manager import browser_manager
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.db.session import get_db
-from app.models import Agent, AgentMessage, AuditLog, BrowserProfile, Task, User, Userscript
+from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, Task, User, Userscript
+from app.runtime.agent_protocol import redact_secrets
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
 
@@ -49,7 +57,7 @@ async def connector_status():
     bridge: dict[str, Any] = {"ok": False, "code": "not_enabled"} if not gate["enabled"] else await bridge_call("GET", "/v1/connector/profiles")
     return {
         **gate,
-        "status_label": "waiting_for_arena_approval" if not gate["real_enabled"] else "approved",
+        "status_label": "enabled" if gate["real_enabled"] else ("mock" if gate["mode"] == "mock" else "disabled"),
         "bridge": bridge,
         "run_userscript": "disabled (501): AATM never injects scripts; the human installs the userscript in Tampermonkey.",
     }
@@ -104,6 +112,7 @@ async def browser_wall(db: AsyncSession = Depends(get_db)):
                 "connector": connector,
                 "needs_human_reason": (connector or {}).get("needs_human_reason") or profile.needs_human_reason,
                 "token_issued": bool(profile.connector_token_hash),
+                "arena_mode": profile_arena_mode(profile),
                 "health": _health(profile.connector_status, connector),
             }
         )
@@ -232,3 +241,92 @@ async def open_for_sign_in(profile_id: str, user: User = Depends(get_current_use
     await db.commit()
     return {"profile_id": launched.id, "status": launched.status, "url": url,
             "next": "Sign in to Arena yourself in the opened window. AATM never types or reads credentials."}
+
+
+# ---------------------------------------------------------------------------- Arena Agent mode
+
+MAX_REPLY_CHARS = 60_000
+COMMAND_TIMEOUTS = {"new_session": 90.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
+
+
+class ArenaModeBody(BaseModel):
+    mode: str = Field(pattern="^(chat|agent)$")
+
+
+class ArenaCommandBody(BaseModel):
+    command: str = Field(pattern="^(new_session|submit|keep_working|read_last_reply|selector_test)$")
+    text: str | None = Field(default=None, max_length=120_000)
+
+
+def redact_reply(text: str) -> dict[str, Any]:
+    """Size-limit and redact an Arena Agent reply before it is stored or shown."""
+    raw = str(text or "")
+    clean = redact_secrets(raw)
+    return {"text": clean[:MAX_REPLY_CHARS], "truncated": len(clean) > MAX_REPLY_CHARS, "chars": len(raw)}
+
+
+@router.get("/arena/agent/overview")
+async def agent_overview(db: AsyncSession = Depends(get_db)):
+    """Arena Agent dashboard data: every worker profile, its mode, open session and live page state."""
+    return await arena_agent_overview(db)
+
+
+@router.get("/arena/sessions")
+async def list_sessions(open_only: bool = False, limit: int = 100, db: AsyncSession = Depends(get_db)):
+    query = select(ArenaSession).order_by(ArenaSession.created_at.desc()).limit(max(1, min(limit, 500)))
+    if open_only:
+        query = query.where(ArenaSession.is_open.is_(True))
+    return {"sessions": [session_dict(s) for s in (await db.execute(query)).scalars()]}
+
+
+@router.put("/arena/agents/{agent_id}/mode", dependencies=[Depends(require_role("admin", "operator"))])
+async def set_agent_mode(agent_id: str, body: ArenaModeBody, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    try:
+        return await set_arena_mode(db, agent, body.mode, actor=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_mode", "message": str(exc)}) from exc
+
+
+@router.put("/arena/agents/mode", dependencies=[Depends(require_role("admin", "operator"))])
+async def set_all_agents_mode(body: ArenaModeBody, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Switch every enabled worker that has a browser profile (no profile-count limit)."""
+    agents = list((await db.execute(select(Agent).where(Agent.role == "worker", Agent.is_enabled.is_(True)))).scalars())
+    changed = []
+    for agent in agents:
+        if agent.browser_profile_id and await db.get(BrowserProfile, agent.browser_profile_id) is not None:
+            changed.append(await set_arena_mode(db, agent, body.mode, actor=user.email))
+    return {"mode": body.mode, "changed": changed, "count": len(changed)}
+
+
+@router.post("/arena/profiles/{profile_id}/command", dependencies=[Depends(require_role("admin", "operator"))])
+async def run_profile_command(profile_id: str, body: ArenaCommandBody, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Operator control: run one Arena Agent command on this profile's page through the bridge."""
+    if not arena_gate()["enabled"]:
+        raise _not_enabled()
+    profile = await _profile_or_404(db, profile_id)
+    args: dict[str, Any] = {}
+    if body.command == "submit":
+        if not (body.text or "").strip():
+            raise HTTPException(status_code=422, detail={"code": "text_required", "message": "Submit needs a task prompt."})
+        args["text"] = body.text
+    res = await bridge_call(
+        "POST",
+        f"/v1/connector/profiles/{profile.id}/command",
+        {"command": body.command, "args": args, "timeout_seconds": COMMAND_TIMEOUTS[body.command]},
+        timeout=COMMAND_TIMEOUTS[body.command] + 10,
+    )
+    result = dict(res.get("result") or {}) if res.get("ok") else {}
+    if body.command == "read_last_reply" and "text" in result:
+        result.update(redact_reply(result.get("text") or ""))
+    session = await open_session_for(db, profile.id)
+    db.add(AuditLog(actor=user.email, action=f"arena.command.{body.command}", resource_type="browser_profile", resource_id=profile.id,
+                    details={"ok": bool(res.get("ok")), "code": res.get("code"), "session_id": session.id if session else None,
+                             "text_chars": len(body.text or "")}))
+    await db.commit()
+    if not res.get("ok"):
+        status = 409 if res.get("code") in ("needs_human", "not_enabled") else (503 if res.get("code") in ("offline", "bridge_unreachable", "not_registered") else 502)
+        raise HTTPException(status_code=status, detail={"code": res.get("code"), "message": res.get("message")})
+    return {"profile_id": profile.id, "command": body.command, "result": result, "state": res.get("state")}

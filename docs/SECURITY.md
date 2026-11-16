@@ -117,7 +117,8 @@ bash scripts/ubuntu/verify.sh
 ```
 
 ## 8. Arena Browser Connector Safety (Phase 6)
-- Real Arena use is **off by default**: it needs `ARENA_CONNECTOR_ENABLED=true`, `ARENA_AUTOMATION_APPROVED=true` and a non-empty `ARENA_APPROVAL_REFERENCE`. Otherwise every real-Arena path returns `not_enabled`. The bridge checks the same three flags in its own environment before accepting a non-loopback origin. `ARENA_MOCK_URL` accepts loopback URLs only.
+- Real Arena use is **off by default**: it needs `ARENA_CONNECTOR_ENABLED=true`; the userscript only runs on the origins in `ARENA_ALLOWED_ORIGINS`. Otherwise every real-Arena path returns `not_enabled`. The bridge checks `ARENA_CONNECTOR_ENABLED` in its own environment before accepting a non-loopback origin. `ARENA_MOCK_URL` accepts loopback URLs only.
+- There are no request intervals, daily caps or profile-count limits; each browser tab still runs one prompt/command at a time, and any human check stops that profile until a person resumes it.
 - The human signs in to Arena manually in each employee's own profile. There is no account pooling or rotation, and AATM never reads cookies, storage or tokens.
 - Demo mode (`DEMO_MODE`) is a read-only scripted feed: no writes, no model calls, refused in production,
   every frame flagged `demo: true`, badged in the UI and never mixed with live agent output.

@@ -158,18 +158,20 @@ class Settings(BaseSettings):
             self.AGENT_MAX_PARALLEL = max(self.DEFAULT_ACTIVE_WORKERS, self.ARENA_BRIDGE_MAX_CONCURRENCY)
         return self
 
-    # Supports 20+ concurrent AI employees subject to host capacity
-    MAX_CONCURRENT_WORKERS: int = 25
-    # Phase 6 - Arena browser connector (Tampermonkey userscript <-> local bridge).
-    # Real Arena is contacted ONLY when both flags are true AND an approval reference is recorded.
+    # Host-capacity ceiling for autoscaled workers; 0 = no ceiling (scale to every available profile).
+    MAX_CONCURRENT_WORKERS: int = Field(default=25, ge=0)
+    # Arena connector (Tampermonkey userscript in each employee's own Chrome profile <-> local bridge).
+    # Controlled only by the connector switch and the Arena origins it may run on; there are no
+    # authorization references, expirations, request intervals or usage quotas.
     ARENA_CONNECTOR_ENABLED: bool = False
-    ARENA_AUTOMATION_APPROVED: bool = False
-    ARENA_APPROVAL_REFERENCE: str = ""
-    ARENA_DOMAINS: str = "arena.ai"
+    # Comma-separated https origins the userscript may run on (one @match per origin).
+    ARENA_ALLOWED_ORIGINS: str = "https://arena.ai"
+    # Arena Agent mode: optional URL of a fresh Agent session (empty = click the page's "New" button).
+    ARENA_AGENT_NEW_SESSION_URL: str = ""
+    # Keep Working continuations per task; 0 = unlimited.
+    ARENA_AGENT_MAX_KEEP_WORKING: int = Field(default=0, ge=0)
     # Local mock Arena page for end-to-end testing at any time (e.g. http://127.0.0.1:4100/mock-arena/).
     ARENA_MOCK_URL: str = ""
-    ARENA_MIN_REQUEST_INTERVAL_SECONDS: float = Field(default=20.0, ge=0)
-    ARENA_DAILY_CAP_PER_PROFILE: int = Field(default=100, ge=1)
     ARENA_REPLY_TIMEOUT_SECONDS: float = Field(default=600.0, gt=0)
     # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
     ARENA_DOM_SELECTORS: str = ""
@@ -191,6 +193,10 @@ class Settings(BaseSettings):
     # Phase 4: reviewer change-request rounds before the PR is escalated to a human.
     MAX_REVIEW_ROUNDS: int = Field(default=2, ge=0)
     STALLED_TASK_MINUTES: int = 15
+
+    def worker_ceiling(self) -> int | None:
+        """MAX_CONCURRENT_WORKERS as a ceiling, or None when it is 0 (no ceiling)."""
+        return self.MAX_CONCURRENT_WORKERS or None
 
     def get_cors_origins(self) -> list[str]:
         origins = [o.strip() for o in (self.CORS_ORIGINS or "").split(",") if o.strip()]

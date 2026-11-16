@@ -71,8 +71,50 @@ class BrowserProfile(Base):
     connector_token_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     connector_status: Mapped[str] = mapped_column(String(24), default="offline", server_default="offline", nullable=False)
     needs_human_reason: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    # chat = one prompt -> one answer (arena_browser provider); agent = drives an Arena Agent session.
+    arena_mode: Mapped[str] = mapped_column(String(16), default="chat", server_default="chat", nullable=False)
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ArenaSession(Base):
+    """One Arena Agent session driven by one employee's browser profile for one task.
+
+    The browser profile owns at most one open session at a time. A session is closed when its PR is
+    merged (Arena may lock the branch afterwards), so the employee's next task starts with
+    ``new_session``.
+    """
+
+    __tablename__ = "arena_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    profile_id: Mapped[str] = mapped_column(String(64), ForeignKey("browser_profiles.id"), nullable=False, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Page state reported by the userscript: ready|generating|idle|keep_working_visible|needs_human|offline
+    page_state: Mapped[str] = mapped_column(String(32), default="offline", nullable=False)
+    # Workflow phase: new|starting|submitting|working|awaiting_pr|reporting|reviewing|correcting|
+    # awaiting_approval|merged|needs_human|escalated|failed|closed
+    phase: Mapped[str] = mapped_column(String(32), default="new", nullable=False, index=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    keep_working_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    follow_up_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    correction_rounds: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    recovery_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    branch_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    report: Mapped[str | None] = mapped_column(Text, nullable=True)
+    needs_human_reason: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    events: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    last_state_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class BrowserSession(Base):

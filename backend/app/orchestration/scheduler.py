@@ -257,7 +257,8 @@ class TaskScheduler:
         queued.sort(key=lambda t: (-PRIORITY_WEIGHT.get(t.priority, 2), to_naive_utc(t.created_at) or to_naive_utc(utcnow())))
 
         assigned: list[dict[str, str]] = []
-        available_slots = max(0, settings.MAX_CONCURRENT_WORKERS - working_count)
+        ceiling = settings.worker_ceiling()
+        available_slots = len(workers) if ceiling is None else max(0, ceiling - working_count)
 
         for task in queued:
             if available_slots <= 0 or not idle_workers:

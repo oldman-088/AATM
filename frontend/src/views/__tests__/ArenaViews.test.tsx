@@ -19,10 +19,10 @@ const card = (overrides: Record<string, any> = {}) => ({
 describe('ArenaConnectorPanel (Phase 6)', () => {
   beforeEach(() => localStorage.clear())
 
-  it('shows "Waiting for Arena approval" and disables script generation while flags are off', async () => {
+  it('shows that the connector is off and disables script generation while it is disabled', async () => {
     installFetchMock({ '/api/v1/arena/profiles': { gate: { mode: 'disabled', enabled: false, real_enabled: false }, profiles: [card()] } })
     renderWith()
-    expect((await screen.findByTestId('arena-gate')).textContent).toContain('Waiting for Arena approval')
+    expect((await screen.findByTestId('arena-gate')).textContent).toContain('ARENA_CONNECTOR_ENABLED=true')
     expect((screen.getByRole('button', { name: /Generate userscript/ }) as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -47,6 +47,6 @@ describe('ArenaConnectorPanel (Phase 6)', () => {
     installFetchMock({ '/api/v1/arena/profiles': { gate: { mode: 'disabled', enabled: false, real_enabled: false }, profiles: [] } })
     renderWith('ar')
     expect(await screen.findByText('موصّل Arena عبر المتصفح')).toBeTruthy()
-    expect((await screen.findByTestId('arena-gate')).textContent).toContain('بانتظار موافقة Arena')
+    expect((await screen.findByTestId('arena-gate')).textContent).toContain('موصل Arena متوقف')
   })
 })

@@ -409,7 +409,7 @@ export const en: Translations = {
   },
   arena: {
     title: 'Arena browser connector',
-    waiting: 'Waiting for Arena approval — real Arena is off until ARENA_CONNECTOR_ENABLED and ARENA_AUTOMATION_APPROVED are true and an approval reference is recorded.',
+    waiting: 'Arena connector is off — set ARENA_CONNECTOR_ENABLED=true (origins in ARENA_ALLOWED_ORIGINS) for both the backend and the bridge.',
     mockMode: 'Test mode: connected to the local mock Arena page only.',
     approved: 'Arena approval recorded — connector enabled for the approved Arena domain.',
     profiles: 'Employee profiles',

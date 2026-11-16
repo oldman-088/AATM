@@ -1,14 +1,16 @@
-"""Phase 6 - Arena browser connector (backend side).
+"""Arena browser connector (backend side).
 
 The human signs in to Arena manually in each employee's own Chrome profile and installs the
 userscript generated here (after reviewing it). The userscript talks only to the local bridge
 (``ws://127.0.0.1:4100/v1/connector``) with a per-profile token. AATM never injects scripts
-(``BrowserManager.run_userscript`` stays 501), never reads cookies/tokens, never pools or rotates
-accounts, and never solves or bypasses a human check: the profile is stopped as ``needs_human``.
+(``BrowserManager.run_userscript`` stays 501), never reads cookies/tokens, and never solves or
+bypasses a human check: the profile is stopped as ``needs_human`` until a person resumes it.
 
-Real Arena is contacted only when ``ARENA_CONNECTOR_ENABLED`` and ``ARENA_AUTOMATION_APPROVED``
-are both true AND ``ARENA_APPROVAL_REFERENCE`` is recorded. ``ARENA_MOCK_URL`` (loopback only)
-allows full end-to-end testing against a local mock page at any time.
+Real Arena is used when ``ARENA_CONNECTOR_ENABLED`` is true; the userscript then runs on the
+origins listed in ``ARENA_ALLOWED_ORIGINS``. There are no authorization references, expiry dates,
+request intervals, usage quotas or profile-count limits: every employee profile with an installed
+userscript is an independent Arena worker. ``ARENA_MOCK_URL`` (loopback only) allows full
+end-to-end testing against the local mock page at any time.
 """
 
 from __future__ import annotations
@@ -26,12 +28,12 @@ import httpx
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "2.0.0"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
+ARENA_MODES = ("chat", "agent")
 DOM_KEYS = ("input", "send", "assistant_message", "user_message", "busy")
 NOT_ENABLED_MESSAGE = (
-    "Arena connector is not enabled: waiting for Arena approval "
-    "(ARENA_CONNECTOR_ENABLED, ARENA_AUTOMATION_APPROVED and ARENA_APPROVAL_REFERENCE), "
+    "Arena connector is not enabled: set ARENA_CONNECTOR_ENABLED=true (with ARENA_ALLOWED_ORIGINS), "
     "or set ARENA_MOCK_URL to test against the local mock page."
 )
 
@@ -58,13 +60,26 @@ def _is_loopback(url: str) -> bool:
         return False
 
 
+def configured_origins() -> list[str]:
+    """Valid origins from ARENA_ALLOWED_ORIGINS (bare hosts are read as https)."""
+    origins: list[str] = []
+    for raw in (get_settings().ARENA_ALLOWED_ORIGINS or "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        origin = _origin(raw if "://" in raw else f"https://{raw}")
+        if origin:
+            origins.append(origin)
+    return list(dict.fromkeys(origins))
+
+
 def real_arena_enabled() -> bool:
-    s = get_settings()
-    return bool(s.ARENA_CONNECTOR_ENABLED and s.ARENA_AUTOMATION_APPROVED and s.ARENA_APPROVAL_REFERENCE.strip())
+    return bool(get_settings().ARENA_CONNECTOR_ENABLED and configured_origins())
 
 
 def arena_domains() -> list[str]:
-    return [d.strip().lower() for d in (get_settings().ARENA_DOMAINS or "").split(",") if d.strip()]
+    """Host names of the configured Arena origins (kept for callers that need a host)."""
+    return [urlparse(o).netloc for o in configured_origins()]
 
 
 def mock_url() -> str | None:
@@ -83,15 +98,14 @@ def arena_gate() -> dict[str, Any]:
         "enabled": mode != "disabled",
         "real_enabled": real,
         "connector_enabled": bool(s.ARENA_CONNECTOR_ENABLED),
-        "automation_approved": bool(s.ARENA_AUTOMATION_APPROVED),
-        "approval_reference_recorded": bool(s.ARENA_APPROVAL_REFERENCE.strip()),
+        "allowed_origins": configured_origins() if real else [],
         "mock_url": mock,
         "mock_url_rejected": bool((s.ARENA_MOCK_URL or "").strip()) and mock is None,
         "domains": arena_domains() if real else [],
+        "agent_new_session_url": (s.ARENA_AGENT_NEW_SESSION_URL or "").strip() or None,
+        "max_keep_working": s.ARENA_AGENT_MAX_KEEP_WORKING or None,  # None = unlimited
         "code": None if mode != "disabled" else "not_enabled",
         "message": None if mode != "disabled" else NOT_ENABLED_MESSAGE,
-        "min_interval_seconds": s.ARENA_MIN_REQUEST_INTERVAL_SECONDS,
-        "daily_cap_per_profile": s.ARENA_DAILY_CAP_PER_PROFILE,
     }
 
 
@@ -107,7 +121,7 @@ def allowed_origins() -> list[str]:
     if mock:
         origins.append(_origin(mock))  # type: ignore[arg-type]
     if real_arena_enabled():
-        origins.extend(f"https://{d}" for d in arena_domains())
+        origins.extend(configured_origins())
     return [o for o in dict.fromkeys(origins) if o]
 
 
@@ -118,8 +132,8 @@ def match_patterns() -> list[str]:
         parsed = urlparse(mock)
         patterns.append(f"{_origin(mock)}{parsed.path.rstrip('/') or ''}/*")
     if real_arena_enabled():
-        patterns.extend(f"https://{d}/*" for d in arena_domains())
-    return patterns
+        patterns.extend(f"{o}/*" for o in configured_origins())
+    return list(dict.fromkeys(patterns))
 
 
 def bridge_ws_url() -> str:
@@ -295,8 +309,13 @@ def _bridge_base() -> str:
     return (get_settings().ARENA_BRIDGE_URL or "http://127.0.0.1:4100").rstrip("/")
 
 
+def profile_arena_mode(profile: BrowserProfile) -> str:
+    mode = (getattr(profile, "arena_mode", None) or "chat").strip().lower()
+    return mode if mode in ARENA_MODES else "chat"
+
+
 async def register_profile_with_bridge(profile: BrowserProfile, *, dom: dict[str, str] | None = None) -> dict[str, Any]:
-    """Tell the bridge which token hash / origins / limits this profile may use."""
+    """Tell the bridge which token hash / origins / mode this profile uses."""
     gate = arena_gate()
     if not gate["enabled"]:
         return {"ok": False, "code": "not_enabled", "message": NOT_ENABLED_MESSAGE}
@@ -308,8 +327,8 @@ async def register_profile_with_bridge(profile: BrowserProfile, *, dom: dict[str
         "agent_id": profile.agent_id,
         "allowed_origins": allowed_origins(),
         "real_enabled": gate["real_enabled"],
-        "min_interval_seconds": s.ARENA_MIN_REQUEST_INTERVAL_SECONDS,
-        "daily_cap": s.ARENA_DAILY_CAP_PER_PROFILE,
+        "mode": profile_arena_mode(profile),
+        "new_session_url": (s.ARENA_AGENT_NEW_SESSION_URL or "").strip() or None,
     }
     configured_dom: dict[str, str] = {}
     raw_dom = (s.ARENA_DOM_SELECTORS or "").strip()
@@ -334,10 +353,10 @@ async def register_profile_with_bridge(profile: BrowserProfile, *, dom: dict[str
     return {"ok": True, **res.json()}
 
 
-async def bridge_call(method: str, path: str) -> dict[str, Any]:
+async def bridge_call(method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 10) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.request(method, f"{_bridge_base()}{path}", headers=_bridge_headers())
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.request(method, f"{_bridge_base()}{path}", headers=_bridge_headers(), json=body)
     except httpx.HTTPError as exc:
         return {"ok": False, "code": "bridge_unreachable", "message": f"Local bridge unreachable: {type(exc).__name__}"}
     if res.status_code >= 400:

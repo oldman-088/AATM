@@ -323,7 +323,7 @@ export const fixtures: Record<string, RouteValue> = {
   '/api/v1/arena/connector/status': {
     enabled: false,
     real_enabled: false,
-    status_label: 'waiting_for_arena_approval',
+    status_label: 'disabled',
     bridge: { ok: false, code: 'not_enabled' },
   },
   '/api/v1/arena/profiles': [],

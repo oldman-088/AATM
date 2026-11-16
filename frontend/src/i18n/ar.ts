@@ -409,7 +409,7 @@ export const ar: Translations = {
   },
   arena: {
     title: 'موصّل Arena عبر المتصفح',
-    waiting: 'بانتظار موافقة Arena — يبقى Arena الحقيقي متوقفاً حتى تفعيل ARENA_CONNECTOR_ENABLED و ARENA_AUTOMATION_APPROVED وتسجيل مرجع الموافقة.',
+    waiting: 'موصل Arena متوقف — فعّل ARENA_CONNECTOR_ENABLED=true (والأصول في ARENA_ALLOWED_ORIGINS) للخادم والجسر معاً.',
     mockMode: 'وضع الاختبار: متصل بصفحة Arena التجريبية المحلية فقط.',
     approved: 'تم تسجيل موافقة Arena — الموصّل مفعّل لنطاق Arena المعتمد.',
     profiles: 'ملفات الموظفين',

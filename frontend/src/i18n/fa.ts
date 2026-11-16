@@ -409,7 +409,7 @@ export const fa: Translations = {
   },
   arena: {
     title: 'اتصال‌دهنده مرورگر Arena',
-    waiting: 'در انتظار تأیید Arena — تا فعال شدن ARENA_CONNECTOR_ENABLED و ARENA_AUTOMATION_APPROVED و ثبت مرجع تأیید، Arena واقعی خاموش است.',
+    waiting: 'اتصال‌دهنده Arena خاموش است — ARENA_CONNECTOR_ENABLED=true (و مبداها در ARENA_ALLOWED_ORIGINS) را برای سرور و پل تنظیم کنید.',
     mockMode: 'حالت آزمایشی: فقط به صفحه آزمایشی محلی Arena متصل است.',
     approved: 'تأیید Arena ثبت شد — اتصال‌دهنده برای دامنه تأییدشده فعال است.',
     profiles: 'پروفایل‌های کارمندان',

@@ -31,10 +31,9 @@ Windows 11: `.\scripts\windows\install.ps1`, then `.\scripts\windows\start.ps1`.
 - **A model:** an API key referenced as `env:VAR` (Claude, OpenAI-compatible) or a local Ollama model.
 - **GitHub:** `gh auth login` on the host, and a project linked to your repository.
 - **Approvals:** merges, extra workers and other high-risk actions wait for you in the Approval Center.
-- **Arena (optional):** real Arena use stays **off** until you record Arena's approval
-  (`ARENA_CONNECTOR_ENABLED`, `ARENA_AUTOMATION_APPROVED`, `ARENA_APPROVAL_REFERENCE`). You then sign in
-  yourself in each employee's profile and install the reviewed userscript. AATM never solves
-  verification checks, reads cookies, or rotates accounts.
+- **Arena (optional):** real Arena use stays **off** until you set `ARENA_CONNECTOR_ENABLED=true`
+  (origins in `ARENA_ALLOWED_ORIGINS`). You then sign in yourself in each employee's profile and install
+  the reviewed userscript. AATM never solves verification checks, reads cookies, or rotates accounts.
 
 ## The Command Bridge (v3.2.0 home screen)
 After login AATM opens **جسر القيادة / Command Bridge**: a starship bridge where each employee sits at a

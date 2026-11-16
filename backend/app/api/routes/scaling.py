@@ -45,7 +45,8 @@ async def request_extra_workers(
         action_type=SCALE_ACTION,
         title=f"Add {body.count} extra AI employee(s)",
         description=(body.reason or "Manual request from the dashboard.")
-        + f" Limit {settings.MAX_CONCURRENT_WORKERS} workers. Extra workers increase provider spend.",
+        + (f" Limit {settings.MAX_CONCURRENT_WORKERS} workers." if settings.worker_ceiling() else "")
+        + " Extra workers increase provider spend.",
         requested_by=user.email,
         payload={"count": body.count, "kind": "spend", "manual": True},
     )
