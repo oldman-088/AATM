@@ -138,6 +138,25 @@ async def get_me(user: User = Depends(get_current_user)):
     return _serialize_user(user)
 
 
+@router.post("/logout")
+async def logout(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user.token_version = int(user.token_version or 1) + 1
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="auth.logout",
+            resource_type="user",
+            resource_id=user.id,
+            details={"token_version": user.token_version},
+        )
+    )
+    await db.commit()
+    return {"ok": True}
+
+
 @router.patch("/preferences")
 async def update_preferences(
     body: UserPreferencesUpdate,

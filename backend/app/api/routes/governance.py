@@ -3,7 +3,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
+from app.core.config import get_settings
 from app.core.events import event_bus
+from app.core.security import redact_sensitive_mapping
 from app.db.base import utcnow
 from app.db.session import get_db
 from app.models import (
@@ -12,6 +14,7 @@ from app.models import (
     ApprovalRequest,
     AuditLog,
     BrowserProfile,
+    ExecutionDevice,
     Notification,
     SystemSetting,
     Task,
@@ -95,7 +98,7 @@ async def create_approval(
         description=body.description,
         requested_by=user.email,
         estimated_cost_usd=body.estimated_cost_usd,
-        payload=body.payload,
+        payload=redact_sensitive_mapping(body.payload),
         status="pending",
     )
     db.add(app)
@@ -115,6 +118,11 @@ async def decide_approval(
     app = await db.get(ApprovalRequest, approval_id)
     if not app:
         raise HTTPException(status_code=404, detail="Approval request not found")
+    if app.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Approval request '{approval_id}' has already been decided (status='{app.status}').",
+        )
     app.status = body.decision
     app.reviewed_by = user.email
     app.review_note = body.review_note
@@ -135,8 +143,50 @@ async def decide_approval(
 
 @router.get("/audit")
 async def list_audit_logs(limit: int = 80, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit))
-    return list(res.scalars().all())
+    bounded_limit = max(1, min(int(limit), 500))
+    res = await db.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(bounded_limit))
+    rows = list(res.scalars().all())
+    return [
+        {
+            "id": row.id,
+            "actor": row.actor,
+            "action": row.action,
+            "severity": row.severity,
+            "resource_type": row.resource_type,
+            "resource_id": row.resource_id,
+            "details": redact_sensitive_mapping(row.details),
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/governance/security-posture")
+async def governance_security_posture(db: AsyncSession = Depends(get_db)):
+    settings = get_settings()
+    users = list((await db.execute(select(User))).scalars().all())
+    approvals = list((await db.execute(select(ApprovalRequest).where(ApprovalRequest.status == "pending"))).scalars().all())
+    warnings = list(
+        (await db.execute(select(AuditLog).where(AuditLog.severity.in_(["warning", "critical"])))).scalars().all()
+    )
+    devices = list((await db.execute(select(ExecutionDevice))).scalars().all())
+    return {
+        "environment": settings.ENVIRONMENT,
+        "sandbox": get_sandbox_status(),
+        "model_status": await get_model_configuration_status(db),
+        "users_requiring_password_change": sum(1 for u in users if u.must_change_password),
+        "pending_approvals": len(approvals),
+        "security_warnings_count": len(warnings),
+        "active_devices": sum(1 for d in devices if d.status in {"online", "paired", "active"}),
+        "offline_or_degraded_devices": sum(1 for d in devices if d.status in {"offline", "disconnected", "degraded", "revoked"}),
+        "headers_enforced": [
+            "X-Content-Type-Options",
+            "X-Frame-Options",
+            "Referrer-Policy",
+            "Permissions-Policy",
+            "Content-Security-Policy",
+        ],
+    }
 
 
 @router.get("/notifications")

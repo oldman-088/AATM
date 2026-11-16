@@ -2,6 +2,15 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.6.0-phase6] - 2026-11-16 — Phase 6: Security & Governance Hardening
+
+### Added
+- **Security Headers & No-Store Auth Cache**: Added HTTP security headers middleware (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, `Content-Security-Policy`) and `Cache-Control: no-store` on `/api/v1/auth/*` responses.
+- **Server-Side Logout Token Revocation**: Added `POST /api/v1/auth/logout` incrementing `token_version` + recording `auth.logout` audit events (allowed even during forced password change), wired into `AuthContext.logout()`.
+- **Approval Replay Protection & Payload/Audit Redaction**: `decide_approval` rejects re-deciding already decided approvals (`409 Conflict`); `redact_sensitive_mapping` strips secret/token/password keys from approval payloads and audit detail responses.
+- **Security Posture Endpoint**: Added `GET /api/v1/governance/security-posture` reporting sandbox, model, password-change, warning, device, and header enforcement status.
+- **Phase 6 Test Suite**: Added `backend/tests/test_phase6_security_governance.py`.
+
 ## [2.6.0-phase5] - 2026-11-16 — Phase 5: Real Browser Engine & Live PNG Snapshots
 
 ### Added

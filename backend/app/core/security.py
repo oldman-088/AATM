@@ -99,3 +99,28 @@ def sanitize_untrusted_content(text: str, source: str = "external") -> dict[str,
         "matched_patterns": hits,
         "quarantined_text": f"[UNTRUSTED_DATA source={source}]\n{cleaned}\n[/UNTRUSTED_DATA]",
     }
+
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(secret|password|passwd|token|api[_-]?key|credential|authorization|cookie|private[_-]?key)",
+    re.IGNORECASE,
+)
+_INLINE_BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]{6,}", re.IGNORECASE)
+
+
+def redact_sensitive_mapping(value: Any) -> Any:
+    """Recursively redact sensitive keys and inline bearer credentials from audit/approval payloads."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            key_str = str(k)
+            if _SENSITIVE_KEY_RE.search(key_str) and not key_str.endswith("_status") and key_str != "token_version":
+                out[key_str] = "[REDACTED]"
+            else:
+                out[key_str] = redact_sensitive_mapping(v)
+        return out
+    if isinstance(value, list):
+        return [redact_sensitive_mapping(item) for item in value]
+    if isinstance(value, str):
+        return _INLINE_BEARER_RE.sub(r"\1[REDACTED]", value)
+    return value
