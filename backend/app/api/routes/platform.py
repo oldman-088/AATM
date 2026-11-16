@@ -568,24 +568,24 @@ async def sanitize_external_text(body: SanitizeRequest):
 
 @router.get("/github/repos")
 async def list_github_repos():
-    return github_client.list_repositories()
+    return await github_client.list_repositories()
 
 
 @router.get("/github/prs")
 async def list_github_prs(repo: str | None = None):
-    return github_client.list_pull_requests(repo=repo)
+    return await github_client.list_pull_requests(repo=repo)
 
 
 @router.get("/github/issues")
 async def list_github_issues(repo: str | None = None):
-    return github_client.list_issues(repo=repo)
+    return await github_client.list_issues(repo=repo)
 
 
 @router.get("/github/summary")
 async def github_change_summary():
     return {
-        "auth": github_client.get_auth_status(),
-        "changes": github_client.generate_change_summary(),
+        "auth": await github_client.get_auth_status(),
+        "changes": await github_client.generate_change_summary(),
     }
 
 
@@ -853,7 +853,7 @@ async def comment_on_github_pull_request(
     ):
         raise HTTPException(status_code=403, detail="Approval does not match the requested pull request comment/review")
 
-    result = github_client.comment_on_pull_request(
+    result = await github_client.comment_on_pull_request(
         repo=body.repo,
         pr_number=pr_number,
         body=body.body,

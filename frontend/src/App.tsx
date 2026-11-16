@@ -28,6 +28,7 @@ import {
   AgentMessagingPanel,
   ArenaAccountsSessionsPanel,
   EmployeeCreatorAndOrgPanel,
+  TeamScalingPanel,
   MultiDeviceNodesPanel,
   PromptInjectionGuardPanel,
   SDLCIdeaExecutorPanel,
@@ -550,6 +551,7 @@ function AATMWorkspace() {
           )}
           {tab === 'agents' && (
             <div className="space-y-6">
+              <TeamScalingPanel onReload={() => loadAll()} />
               <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={() => loadAll()} />
               <AgentsView agents={agents} providers={providers} onReload={() => loadAll()} />
             </div>

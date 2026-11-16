@@ -51,3 +51,57 @@ class SlidingWindowRateLimiter:
 
 
 login_rate_limiter = SlidingWindowRateLimiter(max_attempts=5, window_seconds=300)
+
+
+class SharedLoginRateLimiter:
+    """Async facade: Redis sorted-set sliding window when REDIS_URL is set (shared by every
+    backend process), otherwise the in-memory limiter above. Same limits either way."""
+
+    def __init__(self, local: SlidingWindowRateLimiter) -> None:
+        self.local = local
+
+    @staticmethod
+    def _redis():
+        from app.coordination import get_coordinator
+        from app.coordination.redis_backend import RedisCoordinator
+
+        coordinator = get_coordinator()
+        return coordinator._redis if isinstance(coordinator, RedisCoordinator) else None
+
+    async def check_allowed(self, key: str) -> tuple[bool, int]:
+        redis = self._redis()
+        if redis is None:
+            return self.local.check_allowed(key)
+        now = time.time()
+        rkey = f"aatm:login_fail:{key}"
+        await redis.zremrangebyscore(rkey, 0, now - self.local.window_seconds)
+        count = await redis.zcard(rkey)
+        if count >= self.local.max_attempts:
+            oldest = await redis.zrange(rkey, 0, 0, withscores=True)
+            first = oldest[0][1] if oldest else now
+            return False, max(1, int(first + self.local.window_seconds - now))
+        return True, 0
+
+    async def record_failure(self, key: str) -> int:
+        redis = self._redis()
+        if redis is None:
+            return self.local.record_failure(key)
+        now = time.time()
+        rkey = f"aatm:login_fail:{key}"
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.zremrangebyscore(rkey, 0, now - self.local.window_seconds)
+            pipe.zadd(rkey, {f"{now:.6f}:{threading.get_ident()}": now})
+            pipe.zcard(rkey)
+            pipe.expire(rkey, int(self.local.window_seconds) + 1)
+            _, _, count, _ = await pipe.execute()
+        return int(count)
+
+    async def reset_key(self, key: str) -> None:
+        redis = self._redis()
+        if redis is None:
+            self.local.reset_key(key)
+            return
+        await redis.delete(f"aatm:login_fail:{key}")
+
+
+shared_login_rate_limiter = SharedLoginRateLimiter(login_rate_limiter)

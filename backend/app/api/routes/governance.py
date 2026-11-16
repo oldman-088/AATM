@@ -71,7 +71,7 @@ async def dashboard_overview(db: AsyncSession = Depends(get_db)):
         "resources": intel["resources"],
         "recommendations": intel["recommendations"],
         "recent_events": event_bus.recent_events(15),
-        "sandbox": get_sandbox_status(),
+        "sandbox": await get_sandbox_status(),
         "model_status": await get_model_configuration_status(db),
     }
 
@@ -138,6 +138,13 @@ async def decide_approval(
     )
     await db.commit()
     await db.refresh(app)
+    if app.action_type == "scale_up":
+        from app.orchestration.autoscale import autoscale_service
+
+        scale_result = await autoscale_service.on_approval_decided(db, app, actor=user.email)
+        await db.refresh(app)
+        if scale_result is not None:
+            await event_bus.emit("approval.scale_result", {"approval_id": app.id, **scale_result})
     if app.action_type == "merge":
         from app.orchestration.review import review_service
 
@@ -179,7 +186,7 @@ async def governance_security_posture(db: AsyncSession = Depends(get_db)):
     devices = list((await db.execute(select(ExecutionDevice))).scalars().all())
     return {
         "environment": settings.ENVIRONMENT,
-        "sandbox": get_sandbox_status(),
+        "sandbox": await get_sandbox_status(),
         "model_status": await get_model_configuration_status(db),
         "users_requiring_password_change": sum(1 for u in users if u.must_change_password),
         "pending_approvals": len(approvals),
@@ -219,7 +226,7 @@ async def mark_notification_read(
 @router.get("/qa/summary")
 async def qa_summary(db: AsyncSession = Depends(get_db)):
     return {
-        "security_scan": qa_engine.run_security_scan(),
+        "security_scan": await qa_engine.run_security_scan_async(),
         "intelligence": await qa_engine.compute_team_intelligence(db),
     }
 

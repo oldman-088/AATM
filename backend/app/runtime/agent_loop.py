@@ -201,6 +201,8 @@ class AgentLoop:
         self.worker_id = worker_id or f"agent-loop-{uuid.uuid4().hex[:12]}"
         self._active: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
+        self._pending_wake = None
+        self.wakes_received = 0
 
     async def claim_one(self) -> str | None:
         """Claim one eligible running task message with one conditional UPDATE ... RETURNING."""
@@ -279,10 +281,7 @@ class AgentLoop:
                     raise
                 except Exception:
                     logger.exception("Agent loop polling cycle failed")
-                try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.poll_seconds)
-                except TimeoutError:
-                    continue
+                await self._wait_for_wake_or_poll()
         finally:
             self._stop_event.set()
             active = list(self._active)
@@ -294,6 +293,44 @@ class AgentLoop:
 
     async def stop(self) -> None:
         self._stop_event.set()
+
+    async def _wait_for_wake_or_poll(self) -> None:
+        """Sleep until a broker wake message, stop, or the poll interval - whichever comes first.
+
+        The wake is acknowledged only after the next claim cycle has run (its claim transaction
+        committed), so a crash before claiming lets the broker redeliver. Duplicate wakes are
+        harmless because claiming is an atomic UPDATE ... RETURNING on the AgentMessage row.
+        """
+        from app.queue.base import task_queue_name
+        from app.queue.factory import get_wake_bus
+
+        if self._pending_wake is not None:
+            pending, self._pending_wake = self._pending_wake, None
+            try:
+                await pending.ack()
+            except Exception:  # noqa: BLE001
+                logger.warning("Wake ack failed; broker will redeliver (claim stays idempotent)")
+        stop_waiter = asyncio.create_task(self._stop_event.wait())
+        try:
+            bus = get_wake_bus()
+            wake_waiter = asyncio.create_task(bus.receive(task_queue_name("device-local"), self.poll_seconds))
+        except Exception:  # noqa: BLE001 - broker misconfigured: plain polling
+            wake_waiter = asyncio.create_task(asyncio.sleep(self.poll_seconds))
+        try:
+            done, _ = await asyncio.wait({stop_waiter, wake_waiter}, timeout=self.poll_seconds + 1, return_when=asyncio.FIRST_COMPLETED)
+            if wake_waiter in done and not wake_waiter.cancelled() and wake_waiter.exception() is None:
+                result = wake_waiter.result()
+                if result is not None and hasattr(result, "ack"):
+                    self.wakes_received += 1
+                    self._pending_wake = result
+            elif wake_waiter in done and wake_waiter.exception() is not None:
+                logger.warning("Wake bus receive failed (%s); polling", type(wake_waiter.exception()).__name__)
+                await asyncio.wait({stop_waiter}, timeout=self.poll_seconds)
+        finally:
+            for waiter in (stop_waiter, wake_waiter):
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(stop_waiter, wake_waiter, return_exceptions=True)
 
     async def _unclaim(self, message_id: str) -> None:
         async with self.session_factory() as db:

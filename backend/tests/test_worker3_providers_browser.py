@@ -2396,7 +2396,7 @@ async def test_sandbox_env_scrubbing_and_subprocess_isolation_executor_and_daemo
             workspace_root=tmp_path / "daemon-ws",
         )
     )
-    daemon_res = daemon._run_tool(env_dump_cmd)
+    daemon_res = await daemon._run_tool(env_dump_cmd)
     assert daemon_res["exit_code"] == 0, daemon_res["stderr"]
     assert daemon_res["sandbox_mode"] == "process"
     child_env_daemon = json.loads(daemon_res["stdout"])
@@ -2407,7 +2407,7 @@ async def test_sandbox_env_scrubbing_and_subprocess_isolation_executor_and_daemo
     assert Path(child_env_daemon["HOME"]).resolve() == (tmp_path / "daemon-ws").resolve()
 
     with pytest.raises(WorkspaceSandboxError):
-        daemon._run_tool(["curl", "https://example.com"])
+        await daemon._run_tool(["curl", "https://example.com"])
 
 
 @pytest.mark.asyncio
@@ -2477,7 +2477,7 @@ async def test_sandbox_docker_hardening_flags_and_fail_closed_when_cli_missing(
         )
     )
     with pytest.raises(WorkspaceSandboxError, match="docker"):
-        daemon._run_tool(["python3", "-V"])
+        await daemon._run_tool(["python3", "-V"])
 
 
 @pytest.mark.asyncio

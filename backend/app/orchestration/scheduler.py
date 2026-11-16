@@ -370,13 +370,28 @@ class TaskScheduler:
 
         await db.commit()
         if assigned:
+            # Wake messages are sent only after the dispatch transaction committed; the
+            # AgentMessage row (claimed atomically) remains the source of truth.
+            from app.queue.factory import safe_publish_task
+
+            for item in assigned:
+                await safe_publish_task(LOCAL_DEVICE_ID, item["task_id"], worker_id=item["worker_id"])
             await event_bus.emit("orchestration.cycle", {"dispatched": assigned})
+        from app.orchestration.autoscale import autoscale_service
+
+        try:
+            scaling = await autoscale_service.evaluate(db)
+        except Exception as exc:  # noqa: BLE001 - scaling must never break dispatch
+            logger.warning("Autoscale evaluation failed: %s", type(exc).__name__)
+            await db.rollback()
+            scaling = {"error": type(exc).__name__}
         return {
             "dispatched": assigned,
             "working_workers": working_count + len(assigned),
             "idle_workers": len(idle_workers),
             "session_recovery": session_recovery,
             "review_tasks_created": review_tasks_created,
+            "scaling": scaling,
         }
 
     async def dispatch_ready_tasks(

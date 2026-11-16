@@ -1,7 +1,5 @@
-import asyncio
 import re
 import shutil
-import subprocess
 from collections.abc import Callable, Coroutine, Iterable
 from pathlib import Path
 from typing import Any
@@ -9,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
 from app.github_client.client import (
     GitHubClient,
@@ -27,28 +26,6 @@ _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _COMMIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./~^-]{0,199}$")
 
 
-class _AwaitableResult(dict):
-    """Dictionary result that can also be awaited when used inside async workflows."""
-
-    def __init__(
-        self,
-        data: dict[str, Any],
-        async_fn: Callable[[], Coroutine[Any, Any, dict[str, Any]]] | None = None,
-    ) -> None:
-        super().__init__(data)
-        self._async_fn = async_fn
-
-    def __await__(self):
-        async def _resolve() -> dict[str, Any]:
-            if self._async_fn is not None:
-                updated = await self._async_fn()
-                self.clear()
-                self.update(updated)
-            return dict(self)
-
-        return _resolve().__await__()
-
-
 class GitWorkflowManager:
     """Inspects real Git repository state, worktrees, branches, and enforces protected-branch approvals."""
 
@@ -56,19 +33,9 @@ class GitWorkflowManager:
         self.github_client: GitHubClient = client or github_client
 
     @staticmethod
-    def _run_git(args: list[str], cwd: Path) -> tuple[int, str]:
-        try:
-            proc = subprocess.run(
-                ["git", *args],
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            raw_out = (proc.stdout or proc.stderr or "").strip()
-            return proc.returncode, sanitize_cli_output(raw_out)
-        except Exception as exc:
-            return 1, sanitize_cli_output(str(exc))
+    async def _run_git(args: list[str], cwd: Path) -> tuple[int, str]:
+        result = await run_exec(["git", *args], cwd=cwd, timeout=10)
+        return result.returncode, sanitize_cli_output(result.output)
 
     @staticmethod
     def _resolve_worktree_dir(
@@ -107,15 +74,15 @@ class GitWorkflowManager:
 
         return True, raw_id, root, target_dir
 
-    def inspect_repo(self, repo_path: str | None = None) -> dict[str, Any]:
+    async def inspect_repo(self, repo_path: str | None = None) -> dict[str, Any]:
         root = Path(repo_path) if repo_path else get_settings().REPO_ROOT
         if not (root / ".git").exists():
             return {"git_available": False, "branch": "unknown", "worktrees": [], "recent_commits": [], "dirty_files": []}
 
-        _, branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], root)
-        _, status_out = self._run_git(["status", "--short"], root)
-        _, log_out = self._run_git(["log", "-n", "8", "--oneline"], root)
-        _, wt_out = self._run_git(["worktree", "list", "--porcelain"], root)
+        _, branch = await self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+        _, status_out = await self._run_git(["status", "--short"], root)
+        _, log_out = await self._run_git(["log", "-n", "8", "--oneline"], root)
+        _, wt_out = await self._run_git(["worktree", "list", "--porcelain"], root)
 
         worktrees: list[dict[str, str]] = []
         current: dict[str, str] = {}
@@ -140,7 +107,7 @@ class GitWorkflowManager:
             "worktrees": worktrees,
         }
 
-    def create_agent_worktree(
+    async def create_agent_worktree(
         self,
         agent_id: str,
         branch_name: str,
@@ -151,7 +118,7 @@ class GitWorkflowManager:
         worktrees_root: str | Path | None = None,
         approval: ApprovalRequest | dict[str, Any] | None = None,
         actor: str = "worker-4",
-    ) -> _AwaitableResult:
+    ) -> dict[str, Any]:
         """Create an isolated per-agent git worktree under `data/worktrees/<sanitized_agent_id>/`."""
         ok_agent, agent_or_err, root, target_dir = self._resolve_worktree_dir(
             agent_id,
@@ -167,7 +134,7 @@ class GitWorkflowManager:
                 "error": agent_or_err,
                 "reason": agent_or_err,
             }
-            return _AwaitableResult(result, self._audit_worktree(db, actor, "git.worktree_blocked", agent_id, result))
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", agent_id, result))
 
         clean_agent_id = agent_or_err
         ok_branch, branch_or_err = validate_branch_name(branch_name)
@@ -181,10 +148,7 @@ class GitWorkflowManager:
                 "error": branch_or_err,
                 "reason": branch_or_err,
             }
-            return _AwaitableResult(
-                result,
-                self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-            )
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
         clean_branch = branch_or_err
 
         protected_target = is_protected_branch(clean_branch, PROTECTED_BRANCHES)
@@ -205,10 +169,7 @@ class GitWorkflowManager:
                     "error": reason,
                     "reason": reason,
                 }
-                return _AwaitableResult(
-                    result,
-                    self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-                )
+                return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
 
         clean_base_ref = (base_ref or "HEAD").strip()
         if (
@@ -228,10 +189,7 @@ class GitWorkflowManager:
                 "error": msg,
                 "reason": msg,
             }
-            return _AwaitableResult(
-                result,
-                self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-            )
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
 
         if not (root / ".git").exists():
             msg = f"Git repository not found at '{sanitize_cli_output(str(root))}'."
@@ -244,10 +202,7 @@ class GitWorkflowManager:
                 "error": msg,
                 "reason": msg,
             }
-            return _AwaitableResult(
-                result,
-                self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-            )
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
 
         # Prevent worktree directory or branch conflicts across agents.
         if target_dir.exists() and any(target_dir.iterdir()):
@@ -261,12 +216,9 @@ class GitWorkflowManager:
                 "error": msg,
                 "reason": msg,
             }
-            return _AwaitableResult(
-                result,
-                self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-            )
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
 
-        info = self.inspect_repo(str(root))
+        info = await self.inspect_repo(str(root))
         target_ref = f"refs/heads/{clean_branch}"
         for wt in info.get("worktrees", []):
             if wt.get("branch") == target_ref or Path(wt.get("worktree", "")).resolve() == target_dir:
@@ -280,16 +232,13 @@ class GitWorkflowManager:
                     "error": msg,
                     "reason": msg,
                 }
-                return _AwaitableResult(
-                    result,
-                    self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-                )
+                return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
 
-        rc_ref, _ = self._run_git(["show-ref", "--verify", "--quiet", target_ref], root)
+        rc_ref, _ = await self._run_git(["show-ref", "--verify", "--quiet", target_ref], root)
         if rc_ref == 0:
-            rc, out = self._run_git(["worktree", "add", str(target_dir), clean_branch], root)
+            rc, out = await self._run_git(["worktree", "add", str(target_dir), clean_branch], root)
         else:
-            rc, out = self._run_git(
+            rc, out = await self._run_git(
                 ["worktree", "add", "-b", clean_branch, str(target_dir), clean_base_ref],
                 root,
             )
@@ -305,10 +254,7 @@ class GitWorkflowManager:
                 "error": out,
                 "reason": out,
             }
-            return _AwaitableResult(
-                result,
-                self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result),
-            )
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_blocked", clean_agent_id, result))
 
         result = {
             "ok": True,
@@ -320,12 +266,9 @@ class GitWorkflowManager:
             "is_protected_target": protected_target,
             "output": out,
         }
-        return _AwaitableResult(
-            result,
-            self._audit_worktree(db, actor, "git.worktree_create", clean_agent_id, result),
-        )
+        return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_create", clean_agent_id, result))
 
-    def remove_agent_worktree(
+    async def remove_agent_worktree(
         self,
         agent_id: str,
         db: AsyncSession | None = None,
@@ -334,7 +277,7 @@ class GitWorkflowManager:
         worktrees_root: str | Path | None = None,
         force: bool = True,
         actor: str = "worker-4",
-    ) -> _AwaitableResult:
+    ) -> dict[str, Any]:
         """Remove an agent's isolated git worktree under `data/worktrees/<sanitized_agent_id>/` and prune stale metadata."""
         ok_agent, agent_or_err, root, target_dir = self._resolve_worktree_dir(
             agent_id,
@@ -349,10 +292,7 @@ class GitWorkflowManager:
                 "error": agent_or_err,
                 "reason": agent_or_err,
             }
-            return _AwaitableResult(
-                result,
-                self._audit_worktree(db, actor, "git.worktree_remove_blocked", agent_id, result),
-            )
+            return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_remove_blocked", agent_id, result))
 
         clean_agent_id = agent_or_err
         args = ["worktree", "remove"]
@@ -362,13 +302,13 @@ class GitWorkflowManager:
 
         rc, out = (0, "")
         if (root / ".git").exists() and target_dir.exists():
-            rc, out = self._run_git(args, root)
-            self._run_git(["worktree", "prune"], root)
+            rc, out = await self._run_git(args, root)
+            await self._run_git(["worktree", "prune"], root)
 
         if target_dir.exists():
             shutil.rmtree(target_dir, ignore_errors=True)
             if (root / ".git").exists():
-                self._run_git(["worktree", "prune"], root)
+                await self._run_git(["worktree", "prune"], root)
 
         removed = not target_dir.exists()
         result = {
@@ -380,10 +320,16 @@ class GitWorkflowManager:
             "output": out,
             **({"error": out, "reason": out} if not removed and rc != 0 else {}),
         }
-        return _AwaitableResult(
-            result,
-            self._audit_worktree(db, actor, "git.worktree_remove", clean_agent_id, result),
-        )
+        return await self._finish(result, self._audit_worktree(db, actor, "git.worktree_remove", clean_agent_id, result))
+
+    @staticmethod
+    async def _finish(
+        result: dict[str, Any],
+        audit: Callable[[], Coroutine[Any, Any, dict[str, Any]]] | None,
+    ) -> dict[str, Any]:
+        if audit is not None:
+            return await audit()
+        return dict(result)
 
     @staticmethod
     def _audit_worktree(
@@ -418,7 +364,42 @@ class GitWorkflowManager:
 
         return _record
 
-    def create_branch(
+    async def _resolve_approval(
+        self,
+        approval: ApprovalRequest | dict[str, Any] | None,
+        approval_id: str | None,
+        db: AsyncSession | None,
+    ) -> ApprovalRequest | dict[str, Any] | None:
+        if approval is None and approval_id and db is not None:
+            return await db.get(ApprovalRequest, approval_id)
+        return approval
+
+    @staticmethod
+    async def _audit_github(
+        db: AsyncSession | None,
+        *,
+        actor: str,
+        action: str,
+        resource_type: str,
+        resource_id: str | None,
+        details: dict[str, Any],
+        ok: bool,
+    ) -> None:
+        if db is None:
+            return
+        db.add(
+            AuditLog(
+                actor=actor,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                details=details,
+                severity="info" if ok else "warning",
+            )
+        )
+        await db.commit()
+
+    async def create_branch(
         self,
         branch_name: str,
         base_branch: str = "main",
@@ -433,54 +414,31 @@ class GitWorkflowManager:
         db: AsyncSession | None = None,
         approval_id: str | None = None,
         actor: str = "worker-4",
-    ) -> _AwaitableResult:
+    ) -> dict[str, Any]:
         """Approval-gated branch creation helper wrapping `gh` CLI."""
-        result = self.github_client.create_branch(
+        res = await self.github_client.create_branch(
             branch_name=branch_name,
             base_branch=base_branch,
             repo=repo,
-            approval=approval,
+            approval=await self._resolve_approval(approval, approval_id, db),
             source_sha=source_sha,
             allowed_repos=allowed_repos,
             protected_branches=protected_branches or PROTECTED_BRANCHES,
             require_approval=require_approval,
             cwd=cwd,
         )
+        await self._audit_github(
+            db,
+            actor=actor,
+            action="git.branch_create" if res.get("ok") else "git.branch_blocked",
+            resource_type="git_branch",
+            resource_id=res.get("branch_name") or normalize_branch_name(branch_name),
+            details={"repo": res.get("repo"), "allowed": res.get("allowed"), "ok": res.get("ok")},
+            ok=bool(res.get("ok")),
+        )
+        return res
 
-        async def _with_db() -> dict[str, Any]:
-            resolved_approval = approval
-            if resolved_approval is None and approval_id and db is not None:
-                resolved_approval = await db.get(ApprovalRequest, approval_id)
-                res = self.github_client.create_branch(
-                    branch_name=branch_name,
-                    base_branch=base_branch,
-                    repo=repo,
-                    approval=resolved_approval,
-                    source_sha=source_sha,
-                    allowed_repos=allowed_repos,
-                    protected_branches=protected_branches or PROTECTED_BRANCHES,
-                    require_approval=require_approval,
-                    cwd=cwd,
-                )
-            else:
-                res = dict(result)
-            if db is not None:
-                db.add(
-                    AuditLog(
-                        actor=actor,
-                        action="git.branch_create" if res.get("ok") else "git.branch_blocked",
-                        resource_type="git_branch",
-                        resource_id=res.get("branch_name") or normalize_branch_name(branch_name),
-                        details={"repo": res.get("repo"), "allowed": res.get("allowed"), "ok": res.get("ok")},
-                        severity="info" if res.get("ok") else "warning",
-                    )
-                )
-                await db.commit()
-            return res
-
-        return _AwaitableResult(result, _with_db if db is not None else None)
-
-    def create_pull_request(
+    async def create_pull_request(
         self,
         repo: str,
         title: str,
@@ -497,63 +455,33 @@ class GitWorkflowManager:
         db: AsyncSession | None = None,
         approval_id: str | None = None,
         actor: str = "worker-4",
-    ) -> _AwaitableResult:
+    ) -> dict[str, Any]:
         """Approval-gated pull request creation helper wrapping `gh pr create`."""
-        result = self.github_client.create_pull_request(
+        res = await self.github_client.create_pull_request(
             repo=repo,
             title=title,
             head=head,
             base=base,
             body=body,
             draft=draft,
-            approval=approval,
+            approval=await self._resolve_approval(approval, approval_id, db),
             allowed_repos=allowed_repos,
             protected_branches=protected_branches or PROTECTED_BRANCHES,
             require_approval=require_approval,
             cwd=cwd,
         )
+        await self._audit_github(
+            db,
+            actor=actor,
+            action="git.pr_create" if res.get("ok") else "git.pr_blocked",
+            resource_type="pull_request",
+            resource_id=res.get("head") or normalize_branch_name(head),
+            details={"repo": res.get("repo"), "base": res.get("base"), "allowed": res.get("allowed"), "ok": res.get("ok")},
+            ok=bool(res.get("ok")),
+        )
+        return res
 
-        async def _with_db() -> dict[str, Any]:
-            resolved_approval = approval
-            if resolved_approval is None and approval_id and db is not None:
-                resolved_approval = await db.get(ApprovalRequest, approval_id)
-                res = self.github_client.create_pull_request(
-                    repo=repo,
-                    title=title,
-                    head=head,
-                    base=base,
-                    body=body,
-                    draft=draft,
-                    approval=resolved_approval,
-                    allowed_repos=allowed_repos,
-                    protected_branches=protected_branches or PROTECTED_BRANCHES,
-                    require_approval=require_approval,
-                    cwd=cwd,
-                )
-            else:
-                res = dict(result)
-            if db is not None:
-                db.add(
-                    AuditLog(
-                        actor=actor,
-                        action="git.pr_create" if res.get("ok") else "git.pr_blocked",
-                        resource_type="pull_request",
-                        resource_id=res.get("head") or normalize_branch_name(head),
-                        details={
-                            "repo": res.get("repo"),
-                            "base": res.get("base"),
-                            "allowed": res.get("allowed"),
-                            "ok": res.get("ok"),
-                        },
-                        severity="info" if res.get("ok") else "warning",
-                    )
-                )
-                await db.commit()
-            return res
-
-        return _AwaitableResult(result, _with_db if db is not None else None)
-
-    def create_issue(
+    async def create_issue(
         self,
         repo: str,
         title: str,
@@ -568,52 +496,29 @@ class GitWorkflowManager:
         db: AsyncSession | None = None,
         approval_id: str | None = None,
         actor: str = "worker-4",
-    ) -> _AwaitableResult:
+    ) -> dict[str, Any]:
         """Approval-gated GitHub issue creation helper wrapping `gh issue create`."""
-        result = self.github_client.create_issue(
+        res = await self.github_client.create_issue(
             repo=repo,
             title=title,
             body=body,
             labels=labels,
             assignees=assignees,
-            approval=approval,
+            approval=await self._resolve_approval(approval, approval_id, db),
             allowed_repos=allowed_repos,
             require_approval=require_approval,
             cwd=cwd,
         )
-
-        async def _with_db() -> dict[str, Any]:
-            resolved_approval = approval
-            if resolved_approval is None and approval_id and db is not None:
-                resolved_approval = await db.get(ApprovalRequest, approval_id)
-                res = self.github_client.create_issue(
-                    repo=repo,
-                    title=title,
-                    body=body,
-                    labels=labels,
-                    assignees=assignees,
-                    approval=resolved_approval,
-                    allowed_repos=allowed_repos,
-                    require_approval=require_approval,
-                    cwd=cwd,
-                )
-            else:
-                res = dict(result)
-            if db is not None:
-                db.add(
-                    AuditLog(
-                        actor=actor,
-                        action="git.issue_create" if res.get("ok") else "git.issue_blocked",
-                        resource_type="github_issue",
-                        resource_id=res.get("repo"),
-                        details={"repo": res.get("repo"), "allowed": res.get("allowed"), "ok": res.get("ok")},
-                        severity="info" if res.get("ok") else "warning",
-                    )
-                )
-                await db.commit()
-            return res
-
-        return _AwaitableResult(result, _with_db if db is not None else None)
+        await self._audit_github(
+            db,
+            actor=actor,
+            action="git.issue_create" if res.get("ok") else "git.issue_blocked",
+            resource_type="github_issue",
+            resource_id=res.get("repo"),
+            details={"repo": res.get("repo"), "allowed": res.get("allowed"), "ok": res.get("ok")},
+            ok=bool(res.get("ok")),
+        )
+        return res
 
     async def request_protected_merge(
         self,
@@ -673,24 +578,12 @@ class GitWorkflowManager:
     @staticmethod
     async def _exec(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
         """Run an argv-only command asynchronously without shell expansion, scrubbing credentials from output."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(cwd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                return 124, "", f"Command timed out after {timeout}s."
-            stdout = sanitize_cli_output(stdout_b.decode("utf-8", errors="replace").strip())
-            stderr = sanitize_cli_output(stderr_b.decode("utf-8", errors="replace").strip())
-            return int(proc.returncode or 0), stdout, stderr
-        except Exception as exc:
-            return 1, "", sanitize_cli_output(str(exc))
+        result = await run_exec(cmd, cwd=cwd, timeout=timeout)
+        return (
+            result.returncode,
+            sanitize_cli_output(result.stdout.strip()),
+            sanitize_cli_output(result.stderr.strip()),
+        )
 
     @staticmethod
     def task_branch_name(task_id: str, title: str) -> str:

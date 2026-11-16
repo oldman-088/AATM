@@ -1,10 +1,13 @@
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
+
+logger = logging.getLogger(__name__)
 
 
 class EventBus:
@@ -32,6 +35,22 @@ class EventBus:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "payload": payload,
         }
+        await self._deliver_local(event)
+        # Multi-process fan-out via Redis pub/sub when REDIS_URL is set (no-op in-process otherwise).
+        try:
+            from app.coordination import get_coordinator
+
+            await get_coordinator().publish_event(event)
+        except Exception as exc:  # noqa: BLE001 - live updates must never break the emitting request
+            logger.debug("Event fan-out skipped: %s", type(exc).__name__)
+        return event
+
+    async def deliver_remote(self, event: dict[str, Any]) -> None:
+        """Deliver an event published by another backend process (from the Redis subscriber)."""
+        if isinstance(event, dict) and event.get("type"):
+            await self._deliver_local(event)
+
+    async def _deliver_local(self, event: dict[str, Any]) -> None:
         async with self._lock:
             self._history.append(event)
             if len(self._history) > 200:
@@ -49,7 +68,6 @@ class EventBus:
             async with self._lock:
                 for ws in dead:
                     self._connections.discard(ws)
-        return event
 
     def recent_events(self, limit: int = 50) -> list[dict[str, Any]]:
         return list(self._history[-limit:])

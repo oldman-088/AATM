@@ -30,6 +30,7 @@ from app.providers.base import (
     ProviderStreamChunk,
     validate_credential_ref,
 )
+from app.providers.concurrency import provider_slot
 
 
 class ProviderRouter:
@@ -408,7 +409,8 @@ class ProviderRouter:
 
             for attempt_index in range(max_retries + 1):
                 attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
-                response = await adapter.generate(attempt_req)
+                async with provider_slot(provider.id):
+                    response = await adapter.generate(attempt_req)
                 for key in ("session_id", "account_id", "conversation_id"):
                     if key in session_meta and key not in response.metadata:
                         response.metadata[key] = session_meta[key]
@@ -598,16 +600,17 @@ class ProviderRouter:
                 attempt_req = replace(req, model=effective_model, metadata=dict(session_meta))
                 emitted_any = False
                 terminal_chunk: ProviderStreamChunk | None = None
-                async for chunk in adapter.generate_stream(attempt_req):
-                    for key in ("session_id", "account_id", "conversation_id"):
-                        if key in session_meta and key not in chunk.metadata:
-                            chunk.metadata[key] = session_meta[key]
-                    if not chunk.done:
-                        if chunk.delta:
-                            emitted_any = True
-                        yield chunk
-                    else:
-                        terminal_chunk = chunk
+                async with provider_slot(provider.id):
+                    async for chunk in adapter.generate_stream(attempt_req):
+                        for key in ("session_id", "account_id", "conversation_id"):
+                            if key in session_meta and key not in chunk.metadata:
+                                chunk.metadata[key] = session_meta[key]
+                        if not chunk.done:
+                            if chunk.delta:
+                                emitted_any = True
+                            yield chunk
+                        else:
+                            terminal_chunk = chunk
 
                 if terminal_chunk is None:
                     terminal_chunk = ProviderStreamChunk(

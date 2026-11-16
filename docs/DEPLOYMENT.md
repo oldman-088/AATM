@@ -6,23 +6,36 @@
 - Git & GitHub CLI (`gh`)
 - Optional (Production DB): Docker + Docker Compose for PostgreSQL 16
 
-## 2. Database Setup (PostgreSQL Production or SQLite Local)
-### PostgreSQL via Docker Compose
-```bash
-cp .env.example .env
-# Edit .env and set DATABASE_URL=postgresql+psycopg://aatm:<password>@localhost:5432/aatm
-# (postgres://, postgresql://, postgresql+asyncpg://, and postgresql+psycopg2:// are also normalized automatically)
-docker compose up -d postgres
-cd backend && ../.venv/bin/alembic upgrade head
-```
-The Compose file reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` and
-`POSTGRES_PORT` from the environment, so the credentials are not hard-coded. It also
-includes a hardened `worker` container service (`read_only: true`, `cap_drop: [ALL]`,
-`no-new-privileges:true`, `pids_limit: 64`, `mem_limit: 512m`, non-root user
-`65534:65534`, `AATM_SANDBOX_MODE`).
+## 2. Database, Queue & Coordination (Phase 5: PostgreSQL + RabbitMQ + Redis by default)
+### Default: `scripts/ubuntu/install.sh`
+When Docker is available the installer generates `POSTGRES_PASSWORD`, `RABBITMQ_PASSWORD`
+and `REDIS_PASSWORD` into `.env` (mode 600), runs `docker compose up -d --wait postgres rabbitmq redis`
+(all ports published on `127.0.0.1` only) and writes `DATABASE_URL`, `SYNC_DATABASE_URL`,
+`RABBITMQ_URL` and `REDIS_URL` into `.env` before running migrations.
+`scripts/ubuntu/install.sh --sqlite` keeps the single-file SQLite database.
 
-### SQLite (Zero-Dependency Local)
-Default `.env.example` uses `sqlite+aiosqlite:///./data/aatm.db`.
+### Full stack in Compose
+```bash
+# .env must define POSTGRES_PASSWORD, RABBITMQ_PASSWORD, REDIS_PASSWORD and SECRET_KEY (32+ chars)
+docker compose up -d                        # postgres, rabbitmq, redis, backend, bridge, worker
+docker compose up -d --scale worker=3       # more remote worker daemons
+```
+The RabbitMQ management UI is at `http://127.0.0.1:15672` (user `aatm`, password from `.env`).
+The `worker`, `backend` and `bridge` containers are non-root, `read_only`, `cap_drop: [ALL]`,
+`no-new-privileges:true`; the worker also has `pids_limit: 64`, `mem_limit: 512m`, user `65534:65534`.
+
+### Fallbacks (all optional services)
+| Missing | Behaviour |
+|---|---|
+| `RABBITMQ_URL` | Postgres `LISTEN/NOTIFY` wake bus when on Postgres, otherwise in-process. Workers always also poll the database, and the atomic DB claim is the source of truth. |
+| `REDIS_URL` | In-process locks, login rate limits and event fan-out — correct for a single backend process. |
+| PostgreSQL | SQLite (WAL). The dashboard warns when more than 3 employees run on SQLite. |
+
+### Parallelism & autoscaling settings
+`DEFAULT_ACTIVE_WORKERS=4`, `AGENT_MAX_PARALLEL=4`, `ARENA_BRIDGE_MAX_CONCURRENCY=1` (per profile),
+`AUTO_SCALE_MODE=approval|automatic|off`, `SCALE_UP_BACKLOG_THRESHOLD=3`, `SCALE_UP_WAIT_SECONDS=120`,
+`MAX_CONCURRENT_WORKERS=25`, `SCALE_DOWN_IDLE_MINUTES=30`, `PROVIDER_CONCURRENCY_LIMITS=id=N,...`.
+Load test: `.venv/bin/python scripts/load_test.py --tasks 20` (scripted model, no provider spend).
 
 ## 3. Ubuntu Installation & Run
 ```bash

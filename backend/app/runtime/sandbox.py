@@ -8,7 +8,6 @@ execution stay consistent across local and remote execution nodes.
 
 import os
 import shutil
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -396,7 +395,7 @@ def build_isolated_command(
     ]
 
 
-def get_sandbox_status() -> dict[str, Any]:
+async def get_sandbox_status() -> dict[str, Any]:
     """Inspect sandbox availability without ever falling back silently to process mode."""
     settings = get_settings()
     mode = (
@@ -450,20 +449,16 @@ def get_sandbox_status() -> dict[str, Any]:
             "reason": "Docker CLI is not installed or not on PATH; docker sandbox cannot run.",
         }
 
-    try:
-        proc = subprocess.run(
-            [docker_bin, "image", "inspect", image],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
+    from app.core.async_subprocess import run_exec
+
+    proc = await run_exec([docker_bin, "image", "inspect", image], timeout=3)
+    if proc.returncode == 127:
         return {
             "status": "SANDBOX_UNAVAILABLE",
             "available": False,
             "mode": "docker",
             "image": image,
-            "reason": f"Failed to inspect sandbox image '{image}': {exc}",
+            "reason": f"Failed to inspect sandbox image '{image}': {proc.stderr}",
         }
 
     if proc.returncode != 0:

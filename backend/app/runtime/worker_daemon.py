@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import platform
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -30,6 +29,7 @@ from typing import Any
 
 import httpx
 
+from app.core.async_subprocess import run_exec
 from app.runtime.agent_protocol import validate_run_command
 from app.runtime.remote_agent_loop import RemoteAgentLoop
 from app.runtime.sandbox import (
@@ -172,7 +172,7 @@ class WorkerDaemon:
         """Resolve a path inside this device's isolated workspace."""
         return resolve_contained_path(self.workspace_root, relative_path)
 
-    def _run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
+    async def _run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
         """Execute an allowlisted tool inside the isolated workspace with scrubbed env and OS/Docker bounds."""
         exe = assert_allowed_binary(command)
         ws = self.workspace_root
@@ -205,24 +205,14 @@ class WorkerDaemon:
         )
 
         t0 = time.perf_counter()
-        try:
-            proc = subprocess.run(
-                isolated_cmd,
-                cwd=str(ws),
-                env=sanitized_env,
-                preexec_fn=preexec,
-                capture_output=True,
-                text=True,
-                timeout=self.config.command_timeout,
-            )
-            return {
-                "exit_code": proc.returncode,
-                "stdout": proc.stdout[-8000:],
-                "stderr": proc.stderr[-4000:],
-                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
-                "sandbox_mode": eff_mode,
-            }
-        except subprocess.TimeoutExpired:
+        proc = await run_exec(
+            isolated_cmd,
+            cwd=ws,
+            env=sanitized_env,
+            preexec_fn=preexec,
+            timeout=self.config.command_timeout,
+        )
+        if proc.timed_out:
             return {
                 "exit_code": 124,
                 "stdout": "",
@@ -230,11 +220,18 @@ class WorkerDaemon:
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "sandbox_mode": eff_mode,
             }
+        return {
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout[-8000:],
+            "stderr": proc.stderr[-4000:],
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "sandbox_mode": eff_mode,
+        }
 
-    def run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
+    async def run_tool(self, command: list[str], *, sandbox_mode: str | None = None) -> dict[str, Any]:
         """Run a protocol-approved test/lint command inside the configured sandbox."""
         safe_command = validate_run_command(self.workspace_root, command)
-        return self._run_tool(safe_command, sandbox_mode=sandbox_mode)
+        return await self._run_tool(safe_command, sandbox_mode=sandbox_mode)
 
     # ------------------------------------------------------------------ server calls
     async def register(self) -> dict[str, Any]:

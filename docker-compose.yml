@@ -3,25 +3,121 @@ services:
     image: postgres:16-alpine
     container_name: aatm-postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-aatm}
+      POSTGRES_USER: aatm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-aatm}
+      POSTGRES_DB: aatm
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - aatm_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aatm}"]
+      test: ["CMD-SHELL", "pg_isready -U aatm"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: aatm-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: aatm
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set in .env}
+    ports:
+      # AMQP and the management UI are published on localhost only.
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - aatm_rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aatm-redis
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - aatm_redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: aatm-backend
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DATABASE_URL: postgresql+psycopg://aatm:${POSTGRES_PASSWORD}@postgres:5432/aatm
+      SYNC_DATABASE_URL: postgresql+psycopg://aatm:${POSTGRES_PASSWORD}@postgres:5432/aatm
+      RABBITMQ_URL: amqp://aatm:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ARENA_BRIDGE_URL: http://bridge:4100
+      ARENA_BRIDGE_TOKEN: ${ARENA_BRIDGE_TOKEN:-}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (32+ chars)}
+      DEFAULT_ACTIVE_WORKERS: ${DEFAULT_ACTIVE_WORKERS:-4}
+      AUTO_SCALE_MODE: ${AUTO_SCALE_MODE:-approval}
+      AATM_SANDBOX_MODE: process
+      AATM_ALLOW_PROCESS_SANDBOX: "true"
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - aatm_backend_data:/app/data:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bridge:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: aatm-bridge
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    working_dir: /app
+    command: ["python", "-m", "bridge.server"]
+    environment:
+      # Listens on all interfaces *inside* the compose network only; published on localhost.
+      ARENA_BRIDGE_HOST: 0.0.0.0
+      ARENA_BRIDGE_TOKEN: ${ARENA_BRIDGE_TOKEN:-}
+      ARENA_AUTOMATION_APPROVED: "false"
+    ports:
+      - "127.0.0.1:${ARENA_BRIDGE_PORT:-4100}:4100"
     restart: unless-stopped
 
   worker:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
-    container_name: aatm-worker
+    # No container_name: scale with `docker compose up -d --scale worker=N`.
     user: "65534:65534"
     working_dir: /workspace
     command: ["python", "-m", "app.runtime.worker_daemon"]
@@ -40,6 +136,7 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       AATM_SERVER_URL: ${AATM_SERVER_URL:-http://host.docker.internal:8000}
       AATM_DEVICE_ID: ${AATM_DEVICE_ID:-docker-worker-01}
+      RABBITMQ_URL: amqp://aatm:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       AATM_DEVICE_TOKEN: ${AATM_DEVICE_TOKEN:-}
       AATM_WORKER_WORKSPACE: /workspace
       # Treat this hardened container (non-root 65534:65534, read_only, cap_drop=ALL,
@@ -52,10 +149,13 @@ services:
       - ./backend:/app/backend:ro
       - aatm_worker_workspaces:/workspace:rw
     depends_on:
-      postgres:
-        condition: service_healthy
+      backend:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
   aatm_pgdata:
   aatm_worker_workspaces:
+  aatm_rabbitmq:
+  aatm_redis:
+  aatm_backend_data:

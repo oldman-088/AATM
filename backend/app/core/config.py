@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     AGENT_LOOP_ENABLED: bool = True
     AGENT_LOOP_POLL_SECONDS: float = Field(default=3.0, gt=0)
     AGENT_MAX_ITERATIONS: int = Field(default=8, ge=1)
-    AGENT_MAX_PARALLEL: int = Field(default=1, ge=1)
+    AGENT_MAX_PARALLEL: int = Field(default=4, ge=1)
     AGENT_TASK_BUDGET_USD: float = Field(default=5.0, ge=0)
     SCHEDULER_INTERVAL_SECONDS: float = Field(default=5.0, gt=0)
     SELF_HEALING_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
@@ -123,12 +123,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def default_agent_parallel_from_bridge(self) -> "Settings":
+        # Phase 5: the default team runs DEFAULT_ACTIVE_WORKERS (4) employees in parallel.
+        # ARENA_BRIDGE_MAX_CONCURRENCY is a per-profile limit, so it never caps the team below that.
         if "AGENT_MAX_PARALLEL" not in self.model_fields_set:
-            self.AGENT_MAX_PARALLEL = max(1, self.ARENA_BRIDGE_MAX_CONCURRENCY)
+            self.AGENT_MAX_PARALLEL = max(self.DEFAULT_ACTIVE_WORKERS, self.ARENA_BRIDGE_MAX_CONCURRENCY)
         return self
 
     # Supports 20+ concurrent AI employees subject to host capacity
     MAX_CONCURRENT_WORKERS: int = 25
+    # Phase 5 - True parallelism / autoscaling
+    DEFAULT_ACTIVE_WORKERS: int = Field(default=4, ge=1)
+    AUTO_SCALE_MODE: str = Field(default="approval", pattern="^(approval|automatic|off)$")
+    SCALE_UP_BACKLOG_THRESHOLD: int = Field(default=3, ge=1)
+    SCALE_UP_WAIT_SECONDS: float = Field(default=120.0, ge=0)
+    SCALE_DOWN_IDLE_MINUTES: float = Field(default=30.0, ge=0)
+    SCALE_UP_STEP: int = Field(default=2, ge=1)
+    # Per-provider in-flight limits, e.g. "anthropic-claude=4,openai=8" (unset = unlimited).
+    PROVIDER_CONCURRENCY_LIMITS: str = ""
+    SQLITE_EMPLOYEE_WARNING_THRESHOLD: int = 3
+    # Message broker / coordination. auto: RabbitMQ if RABBITMQ_URL, else Postgres NOTIFY on Postgres, else memory.
+    QUEUE_BACKEND: str = Field(default="auto", pattern="^(auto|rabbitmq|postgres|memory)$")
+    RABBITMQ_URL: str = ""
+    REDIS_URL: str = ""
     MAX_CONCURRENT_BROWSERS: int = 10
     # Phase 4: reviewer change-request rounds before the PR is escalated to a human.
     MAX_REVIEW_ROUNDS: int = Field(default=2, ge=0)

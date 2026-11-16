@@ -7,7 +7,6 @@ locally, and reports each iteration back through the device-authenticated API.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -57,7 +56,7 @@ _SECRET_WORDS = re.compile(r"(?i)api[_-]?key|secret|token|password|credential|pr
 
 ModelCall = Callable[[dict[str, Any]], Awaitable[str]]
 ProgressReporter = Callable[[dict[str, Any]], Awaitable[None]]
-ToolRunner = Callable[[list[str]], dict[str, Any]]
+ToolRunner = Callable[[list[str]], Awaitable[dict[str, Any]]]
 
 
 def _workspace_tree(root: Path) -> list[dict[str, Any]]:
@@ -292,7 +291,7 @@ class RemoteAgentLoop:
             if not can_run_permissions(self.permissions):
                 raise ActionRejected("This remote employee does not have permission to run test or lint tools.")
             command = validate_run_command(self.workspace_root, action.command)
-            result = await asyncio.to_thread(self.tool_runner, command)
+            result = await self.tool_runner(command)
             exit_code = int(result["exit_code"])
             output = (
                 f"Command exit code: {exit_code}\n"
@@ -342,7 +341,7 @@ class RemoteAgentLoop:
             test_files = self._existing_test_files()
             if test_files:
                 command = validate_run_command(self.workspace_root, ["pytest", "-q", *test_files])
-                test_result = await asyncio.to_thread(self.tool_runner, command)
+                test_result = await self.tool_runner(command)
                 test_exit = int(test_result["exit_code"])
                 test_artifact = self._artifact(
                     ".",

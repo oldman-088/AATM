@@ -392,4 +392,19 @@ export interface Translations {
     quarantined: string
     clean: string
   }
+  scaling: {
+    title: string
+    teamLabel: string
+    defaultWorkers: string
+    extraWorkers: string
+    backlog: string
+    mode: string
+    addEmployee: string
+    count: string
+    requested: string
+    pendingApproval: string
+    sqliteWarning: string
+    queue: string
+    coordination: string
+  }
 }

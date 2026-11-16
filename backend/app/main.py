@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.models  # noqa: F401
-from app.api.routes import auth, devices, governance, infra, orchestration, platform, projects, reviews
+from app.api.routes import auth, devices, governance, infra, orchestration, platform, projects, reviews, scaling
 from app.browser.manager import browser_manager
 from app.core.config import get_settings, validate_runtime_security
 from app.core.events import event_bus
@@ -26,6 +27,8 @@ from app.runtime.sandbox import get_sandbox_status
 
 WS_AUTH_TIMEOUT_SECONDS = 5.0
 
+
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -51,16 +54,32 @@ async def lifespan(app: FastAPI):
         loop = AgentLoop()
         app.state.agent_loop = loop
         agent_loop_task = asyncio.create_task(loop.run_forever(), name="aatm-agent-loop")
+    from app.coordination import get_coordinator
+
+    fanout_task: asyncio.Task[None] | None = None
+    try:
+        fanout_task = await get_coordinator().subscribe_events(event_bus.deliver_remote)
+    except Exception as exc:  # noqa: BLE001 - Redis optional; single-process delivery still works
+        logger.warning("Redis event fan-out unavailable (%s); using in-process events only", type(exc).__name__)
     try:
         yield
     finally:
         running_tasks = [orchestration_scheduler_task, self_healing_task]
         if agent_loop_task is not None:
             running_tasks.append(agent_loop_task)
+        if fanout_task is not None:
+            running_tasks.append(fanout_task)
         for task in running_tasks:
             task.cancel()
         await asyncio.gather(*running_tasks, return_exceptions=True)
         await browser_manager.shutdown_all()
+        from app.queue import get_wake_bus
+
+        for closer in (get_wake_bus().stop, get_coordinator().close):
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 settings = get_settings()
@@ -137,7 +156,7 @@ async def health(db: AsyncSession = Depends(get_db)):
         "service": "aatm-backend",
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
-        "sandbox": get_sandbox_status(),
+        "sandbox": await get_sandbox_status(),
         "model_status": model_status,
     }
 
@@ -152,6 +171,7 @@ app.include_router(platform.router, prefix=API_PREFIX)
 app.include_router(platform.public_router, prefix=API_PREFIX)
 app.include_router(devices.router, prefix=API_PREFIX)
 app.include_router(reviews.router, prefix=API_PREFIX)
+app.include_router(scaling.router, prefix=API_PREFIX)
 
 
 async def _authenticate_websocket(websocket: WebSocket) -> tuple[User | None, int, str]:

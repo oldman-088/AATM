@@ -102,14 +102,27 @@ _ARENA_BRIDGE_SEMAPHORE_LIMIT = _bridge_max_concurrency()
 ARENA_BRIDGE_SEMAPHORE = asyncio.Semaphore(_ARENA_BRIDGE_SEMAPHORE_LIMIT)
 
 
-def _bridge_semaphore() -> asyncio.Semaphore:
-    """Return the module-level bridge semaphore, refreshing it if runtime config changed."""
+_PROFILE_SEMAPHORES: dict[str, tuple[int, asyncio.Semaphore]] = {}
+
+
+def _bridge_semaphore(profile_key: str | None = None) -> asyncio.Semaphore:
+    """Per-profile bridge semaphore (Phase 5/6: one in-flight request per Arena profile/account).
+
+    ``ARENA_BRIDGE_MAX_CONCURRENCY`` is the in-flight limit *per profile*; different employees'
+    profiles run in parallel. Requests without an account/agent share the module-level semaphore.
+    """
     global ARENA_BRIDGE_SEMAPHORE, _ARENA_BRIDGE_SEMAPHORE_LIMIT
     limit = _bridge_max_concurrency()
-    if limit != _ARENA_BRIDGE_SEMAPHORE_LIMIT:
-        ARENA_BRIDGE_SEMAPHORE = asyncio.Semaphore(limit)
-        _ARENA_BRIDGE_SEMAPHORE_LIMIT = limit
-    return ARENA_BRIDGE_SEMAPHORE
+    if not profile_key:
+        if limit != _ARENA_BRIDGE_SEMAPHORE_LIMIT:
+            ARENA_BRIDGE_SEMAPHORE = asyncio.Semaphore(limit)
+            _ARENA_BRIDGE_SEMAPHORE_LIMIT = limit
+        return ARENA_BRIDGE_SEMAPHORE
+    held = _PROFILE_SEMAPHORES.get(profile_key)
+    if held is None or held[0] != limit:
+        held = (limit, asyncio.Semaphore(limit))
+        _PROFILE_SEMAPHORES[profile_key] = held
+    return held[1]
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
@@ -329,7 +342,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
             payload["metadata"] = session_meta
 
         try:
-            async with _bridge_semaphore():
+            async with _bridge_semaphore(str(account_id or agent_id or "") or None):
                 async with httpx.AsyncClient(timeout=_bridge_timeout_seconds(), verify=shared_ssl_context()) as client:
                     resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
@@ -571,7 +584,7 @@ class ArenaLocalBridgeAdapter(BaseProviderAdapter):
         stream_error: str | None = None
 
         try:
-            async with _bridge_semaphore():
+            async with _bridge_semaphore(str(account_id or agent_id or "") or None):
                 async with httpx.AsyncClient(timeout=_bridge_timeout_seconds(), verify=shared_ssl_context()) as client:
                     async with client.stream("POST", url, headers=headers, json=payload) as resp:
                         if resp.status_code >= 400:

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings, is_placeholder_password
-from app.core.rate_limit import login_rate_limiter
+from app.core.rate_limit import shared_login_rate_limiter as login_rate_limiter
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models import AuditLog, User
@@ -71,9 +71,9 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     ip_email_key = f"ip_email:{client_ip}:{email_key}"
     email_only_key = f"email:{email_key}"
 
-    allowed_ip_email, retry_ip_email = login_rate_limiter.check_allowed(ip_email_key)
+    allowed_ip_email, retry_ip_email = await login_rate_limiter.check_allowed(ip_email_key)
     allowed_email, retry_email = (
-        login_rate_limiter.check_allowed(email_only_key) if email_key else (True, 0)
+        await login_rate_limiter.check_allowed(email_only_key) if email_key else (True, 0)
     )
     if not allowed_ip_email or not allowed_email:
         retry_after = max(retry_ip_email, retry_email)
@@ -97,8 +97,8 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     res = await db.execute(select(User).where(User.email == body.email))
     user = res.scalar_one_or_none()
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
-        failures_ip_email = login_rate_limiter.record_failure(ip_email_key)
-        failures_email = login_rate_limiter.record_failure(email_only_key) if email_key else 0
+        failures_ip_email = await login_rate_limiter.record_failure(ip_email_key)
+        failures_email = await login_rate_limiter.record_failure(email_only_key) if email_key else 0
         db.add(
             AuditLog(
                 actor=email_key or "anonymous",
@@ -112,9 +112,9 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         await db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    login_rate_limiter.reset_key(ip_email_key)
+    await login_rate_limiter.reset_key(ip_email_key)
     if email_key:
-        login_rate_limiter.reset_key(email_only_key)
+        await login_rate_limiter.reset_key(email_only_key)
     token = create_access_token(
         subject=user.email,
         role=user.role,

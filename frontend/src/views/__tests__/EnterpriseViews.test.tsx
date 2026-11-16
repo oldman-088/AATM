@@ -11,6 +11,7 @@ import {
   MultiDeviceNodesPanel,
   PromptInjectionGuardPanel,
   SDLCIdeaExecutorPanel,
+  TeamScalingPanel,
   UserscriptsEnginesPanel,
   WorkspacesView,
 } from '../EnterpriseViews'
@@ -528,5 +529,30 @@ describe('Round 4 workflow safety', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Not Found')
     expect(screen.queryByText(/Execution summary/)).not.toBeInTheDocument()
+  })
+})
+
+describe('TeamScalingPanel (Phase 5)', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('shows "4 default + N extra", warns about SQLite above 3 employees and requests approval to add workers', async () => {
+    const { calls } = installFetchMock({ '/api/v1/scaling/workers': { approval_id: 'ap-1', status: 'pending', count: 2 } })
+    renderWithLocale(<TeamScalingPanel onReload={() => {}} />)
+    await waitFor(() => expect(screen.getByTestId('team-size-indicator').textContent).toContain('4 + 2'))
+    expect(screen.getByRole('alert').textContent).toContain('SQLite')
+    fireEvent.change(screen.getByLabelText('How many'), { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: /Add employee/ }))
+    await waitFor(() => {
+      const post = calls.find((c) => c.path === '/api/v1/scaling/workers' && c.method === 'POST')
+      expect(post?.body).toEqual({ count: 2 })
+    })
+    expect(await screen.findByText(/Approval requested/)).toBeTruthy()
+  })
+
+  it('renders RTL Arabic labels', async () => {
+    installFetchMock()
+    renderWithLocale(<TeamScalingPanel onReload={() => {}} />, 'ar')
+    expect(await screen.findByText('حجم الفريق والتوسع التلقائي')).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /إضافة موظف/ })).toBeTruthy()
   })
 })

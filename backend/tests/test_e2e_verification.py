@@ -30,6 +30,7 @@ from app.orchestration.replacement import EMERGENCY_STOP_MARKER
 from app.providers.base import ProviderResponse
 from app.qa.engine import FORBIDDEN_ARTIFACT_RULES, qa_engine
 from app.runtime.worker_daemon import WorkerConfig, WorkerDaemon
+from tests.subprocess_compat import patch_run_exec
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -803,7 +804,7 @@ async def test_e2e_github_write_protected_branch_refusal_without_approval(monkey
         calls.append(list(cmd))
         return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("app.github_client.client.subprocess.run", _forbid_subprocess)
+    patch_run_exec(monkeypatch, "app.github_client.client", _forbid_subprocess)
 
     pending_approval = ApprovalRequest(
         id=f"app-pending-{protected_branch}",
@@ -817,7 +818,7 @@ async def test_e2e_github_write_protected_branch_refusal_without_approval(monkey
 
     # 1. Protected branch creation without approval or with pending approval must be refused.
     for candidate_approval in (None, pending_approval):
-        br_client = github_client.create_branch(
+        br_client = await github_client.create_branch(
             branch_name=protected_branch,
             base_branch="main",
             repo="oldman-088/AATM",
@@ -828,7 +829,7 @@ async def test_e2e_github_write_protected_branch_refusal_without_approval(monkey
         assert br_client["is_protected_target"] is True
         assert protected_branch in br_client["reason"]
 
-        br_mgr = git_workflow_manager.create_branch(
+        br_mgr = await git_workflow_manager.create_branch(
             branch_name=protected_branch,
             base_branch="main",
             repo="oldman-088/AATM",
@@ -839,7 +840,7 @@ async def test_e2e_github_write_protected_branch_refusal_without_approval(monkey
         assert br_mgr["is_protected_target"] is True
 
         # 2. Pull request targeting a protected base branch without approved ApprovalRequest must be refused.
-        pr_client = github_client.create_pull_request(
+        pr_client = await github_client.create_pull_request(
             repo="oldman-088/AATM",
             title=f"Target {protected_branch} PR",
             head="feature/sprint-v2-1",
@@ -851,7 +852,7 @@ async def test_e2e_github_write_protected_branch_refusal_without_approval(monkey
         assert pr_client["is_protected_target"] is True
         assert protected_branch in pr_client["reason"]
 
-        pr_mgr = git_workflow_manager.create_pull_request(
+        pr_mgr = await git_workflow_manager.create_pull_request(
             repo="oldman-088/AATM",
             title=f"Target {protected_branch} PR",
             head="feature/sprint-v2-1",
@@ -876,7 +877,7 @@ async def test_e2e_github_write_repo_allowlist_and_validation(monkeypatch, proje
         calls.append(list(cmd))
         return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("app.github_client.client.subprocess.run", _forbid_subprocess)
+    patch_run_exec(monkeypatch, "app.github_client.client", _forbid_subprocess)
 
     approved = ApprovalRequest(
         id="app-approved-allowlist",
@@ -889,21 +890,20 @@ async def test_e2e_github_write_repo_allowlist_and_validation(monkeypatch, proje
     )
 
     for bad_repo in ("untrusted-org/rogue-repo", "not-a-repo-slug", "../escape/repo", "-flag/injection"):
-        assert github_client.create_branch("feature/x", repo=bad_repo, approval=approved)["allowed"] is False
+        assert (await github_client.create_branch("feature/x", repo=bad_repo, approval=approved))["allowed"] is False
         assert (
-            github_client.create_pull_request(
+            await github_client.create_pull_request(
                 repo=bad_repo,
                 title="PR",
                 head="feature/x",
                 base="main",
                 approval=approved,
-            )["allowed"]
-            is False
-        )
-        assert github_client.create_issue(repo=bad_repo, title="Issue", approval=approved)["allowed"] is False
+            )
+        )["allowed"] is False
+        assert (await github_client.create_issue(repo=bad_repo, title="Issue", approval=approved))["allowed"] is False
 
     for bad_branch in ("../../etc/passwd", "-f", "branch..bad", "branch.lock"):
-        assert github_client.create_branch(bad_branch, repo="oldman-088/AATM", approval=approved)["allowed"] is False
+        assert (await github_client.create_branch(bad_branch, repo="oldman-088/AATM", approval=approved))["allowed"] is False
 
     assert calls == [], "disallowed or invalid repos/branches must be rejected before invoking gh"
 
@@ -949,7 +949,7 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
             )
         return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("app.github_client.client.subprocess.run", _mock_subprocess_run)
+    patch_run_exec(monkeypatch, "app.github_client.client", _mock_subprocess_run)
 
     approved = ApprovalRequest(
         id="app-e2e-gh-approved-01",
@@ -962,7 +962,7 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
     )
 
     # 1. Issue creation without approval is refused; with approval it executes `gh issue create`.
-    unapproved_issue = git_workflow_manager.create_issue(
+    unapproved_issue = await git_workflow_manager.create_issue(
         repo="oldman-088/AATM",
         title="Unapproved issue attempt",
         body="Should be blocked",
@@ -972,7 +972,7 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
     assert unapproved_issue["ok"] is False
     assert calls == []
 
-    issue_res = git_workflow_manager.create_issue(
+    issue_res = await git_workflow_manager.create_issue(
         repo="oldman-088/AATM",
         title="Track Sprint v2.1 Verification",
         body="Automated QA verification issue.",
@@ -987,7 +987,7 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
     assert any(c[:3] == ["gh", "issue", "create"] for c in calls)
 
     # 2. Branch creation (feature branch + protected branch with approval) wraps `gh api`.
-    br_res = git_workflow_manager.create_branch(
+    br_res = await git_workflow_manager.create_branch(
         branch_name="feature/v2-1",
         base_branch="main",
         repo="oldman-088/AATM",
@@ -1032,8 +1032,8 @@ async def test_e2e_github_write_approval_gated_branch_pr_and_issue_execution(mon
             stderr=f"HTTP 401: token {gh_secret} rejected for {auth_url} (key={ant_secret})",
         )
 
-    monkeypatch.setattr("app.github_client.client.subprocess.run", _mock_leaking_error)
-    err_res = github_client.create_pull_request(
+    patch_run_exec(monkeypatch, "app.github_client.client", _mock_leaking_error)
+    err_res = await github_client.create_pull_request(
         repo="oldman-088/AATM",
         title="PR with error",
         head="feature/v2-1",
@@ -1280,16 +1280,16 @@ async def test_e2e_agent_git_worktree_lifecycle_isolation_and_hygiene(tmp_path):
 
     # 1. Path traversal / unsafe agent_id values must be rejected.
     for bad_agent in ("../../etc/passwd", "../escape", "/abs/path", "-flag", "worker/sub", ""):
-        res_bad = git_workflow_manager.create_agent_worktree(bad_agent, "feature/test", repo_path=repo)
+        res_bad = await git_workflow_manager.create_agent_worktree(bad_agent, "feature/test", repo_path=repo)
         assert res_bad["allowed"] is False
         assert res_bad["ok"] is False
-        rm_bad = git_workflow_manager.remove_agent_worktree(bad_agent, repo_path=repo)
+        rm_bad = await git_workflow_manager.remove_agent_worktree(bad_agent, repo_path=repo)
         assert rm_bad["allowed"] is False
         assert rm_bad["ok"] is False
 
     # 2. Invalid branch names and unapproved protected branches must be rejected.
     for bad_branch in ("../../bad", "-f", "branch.lock", "main", "master", "production"):
-        res_br = git_workflow_manager.create_agent_worktree("worker-4", bad_branch, repo_path=repo)
+        res_br = await git_workflow_manager.create_agent_worktree("worker-4", bad_branch, repo_path=repo)
         assert res_br["allowed"] is False
         assert res_br["ok"] is False
 
@@ -1326,11 +1326,11 @@ async def test_e2e_agent_git_worktree_lifecycle_isolation_and_hygiene(tmp_path):
         assert not (w1_path / "w4_only.py").exists()
 
         # 4. Conflict prevention: duplicate agent worktree or duplicate checked-out branch is refused.
-        dup_agent = git_workflow_manager.create_agent_worktree("worker-4", "feature/another", repo_path=repo)
+        dup_agent = await git_workflow_manager.create_agent_worktree("worker-4", "feature/another", repo_path=repo)
         assert dup_agent["allowed"] is False
         assert dup_agent["ok"] is False
 
-        dup_branch = git_workflow_manager.create_agent_worktree("worker-2", "feature/w4-worktree", repo_path=repo)
+        dup_branch = await git_workflow_manager.create_agent_worktree("worker-2", "feature/w4-worktree", repo_path=repo)
         assert dup_branch["allowed"] is False
         assert dup_branch["ok"] is False
 
@@ -1372,8 +1372,9 @@ async def test_e2e_github_verify_approval_target_branch_and_base_payload_compati
     from app.github_client.client import verify_approval
     from app.models import ApprovalRequest
 
-    monkeypatch.setattr(
-        "app.github_client.client.subprocess.run",
+    patch_run_exec(
+        monkeypatch,
+        "app.github_client.client",
         lambda cmd, *a, **kw: _subprocess.CompletedProcess(
             args=cmd,
             returncode=0,
@@ -1397,7 +1398,7 @@ async def test_e2e_github_verify_approval_target_branch_and_base_payload_compati
         assert ok is True
         assert resolved_id == f"app-compat-{payload_key}"
 
-        pr_ok = git_workflow_manager.create_pull_request(
+        pr_ok = await git_workflow_manager.create_pull_request(
             repo="oldman-088/AATM",
             title="Compatible approval payload PR",
             head="feature/compat-check",
@@ -1408,7 +1409,7 @@ async def test_e2e_github_verify_approval_target_branch_and_base_payload_compati
         assert pr_ok["ok"] is True
 
         # Using an approval scoped to `main` for `production` must be rejected.
-        pr_mismatch = git_workflow_manager.create_pull_request(
+        pr_mismatch = await git_workflow_manager.create_pull_request(
             repo="oldman-088/AATM",
             title="Mismatched protected target PR",
             head="feature/compat-check",
@@ -1570,7 +1571,7 @@ async def test_e2e_github_branches_endpoint_enforces_branch_approval_and_payload
             )
         return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="{}\n", stderr="")
 
-    monkeypatch.setattr("app.github_client.client.subprocess.run", _fake_gh_run)
+    patch_run_exec(monkeypatch, "app.github_client.client", _fake_gh_run)
 
     # 1. Missing approval_id -> 403
     missing_resp = await client.post(

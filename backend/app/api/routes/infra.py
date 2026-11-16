@@ -116,7 +116,7 @@ def _serialize_browser(b: BrowserProfile) -> dict:
 async def sandbox_status():
     policy = SandboxExecutionPolicy.from_env()
     return {
-        **get_sandbox_status(),
+        **(await get_sandbox_status()),
         "policy": {
             "memory_mb": policy.memory_mb,
             "cpu_seconds": policy.cpu_seconds,
