@@ -1,17 +1,47 @@
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.git_workflows.manager import PROTECTED_BRANCHES, git_workflow_manager
 from app.memory.engine import memory_engine
 from app.models import AuditLog, GitWorkflowRecord, MemoryEntry, Project, User
 from app.schemas.common import GitWorkflowCreate, MemoryCreate, ProjectCreate
 
-router = APIRouter(tags=["projects-memory-git"])
+router = APIRouter(tags=["projects-memory-git"], dependencies=[Depends(get_current_user)])
+
+
+def _resolve_repo_candidate(raw_path: str, repo_root: Path) -> Path:
+    p = Path(raw_path)
+    if p.is_absolute():
+        return p.resolve()
+    return (repo_root / p).resolve()
+
+
+async def _validate_registered_repo_path(repo_path: str | None, db: AsyncSession) -> str:
+    settings = get_settings()
+    repo_root = settings.REPO_ROOT.resolve()
+    if repo_path is None or not repo_path.strip() or repo_path.strip() == ".":
+        return str(repo_root)
+
+    candidate = _resolve_repo_candidate(repo_path.strip(), repo_root)
+    allowed: set[Path] = {repo_root}
+    rows = (await db.execute(select(Project.repo_path))).scalars().all()
+    for registered in rows:
+        if registered and str(registered).strip():
+            allowed.add(_resolve_repo_candidate(str(registered).strip(), repo_root))
+
+    if candidate not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail="repo_path is not a registered project repository or REPO_ROOT.",
+        )
+    return str(candidate)
 
 
 @router.get("/projects")
@@ -35,7 +65,7 @@ async def list_projects(db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/projects", status_code=201)
+@router.post("/projects", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_project(
     body: ProjectCreate,
     user: User = Depends(get_current_user),
@@ -73,7 +103,7 @@ async def search_memory(
     return await memory_engine.search(db, query=q, scope=scope, project_id=project_id, agent_id=agent_id)
 
 
-@router.post("/memory", status_code=201)
+@router.post("/memory", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_memory(
     body: MemoryCreate,
     user: User = Depends(get_current_user),
@@ -99,7 +129,8 @@ async def create_memory(
 
 @router.get("/git/status")
 async def get_git_status(repo_path: str | None = None, db: AsyncSession = Depends(get_db)):
-    info = git_workflow_manager.inspect_repo(repo_path)
+    validated_path = await _validate_registered_repo_path(repo_path, db)
+    info = git_workflow_manager.inspect_repo(validated_path)
     recs = list((await db.execute(select(GitWorkflowRecord).order_by(GitWorkflowRecord.created_at.desc()))).scalars().all())
     return {
         "repository": info,
@@ -121,7 +152,7 @@ async def get_git_status(repo_path: str | None = None, db: AsyncSession = Depend
     }
 
 
-@router.post("/git/workflows", status_code=201)
+@router.post("/git/workflows", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_git_workflow(
     body: GitWorkflowCreate,
     user: User = Depends(get_current_user),
@@ -142,7 +173,7 @@ async def create_git_workflow(
     return rec
 
 
-@router.post("/git/workflows/{workflow_id}/merge")
+@router.post("/git/workflows/{workflow_id}/merge", dependencies=[Depends(require_role("admin", "operator"))])
 async def request_merge(
     workflow_id: str,
     user: User = Depends(get_current_user),

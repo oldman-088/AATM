@@ -23,7 +23,7 @@ ALLOWED_WORKSPACE_BINARIES: frozenset[str] = frozenset(
 )
 
 ALLOWED_SANDBOX_MODES: frozenset[str] = frozenset({"process", "docker"})
-DEFAULT_DOCKER_IMAGE = "python:3.11-slim"
+DEFAULT_DOCKER_IMAGE = "aatm-sandbox:latest"
 
 # Strictly allowlisted non-sensitive host environment variables passed to child tools.
 SAFE_HOST_ENV_KEYS: tuple[str, ...] = (
@@ -154,7 +154,7 @@ def is_sensitive_workspace_path(relative_path: str) -> bool:
 class SandboxExecutionPolicy:
     """Resource and isolation policy for sandboxed tool execution."""
 
-    sandbox_mode: str = "process"
+    sandbox_mode: str = "docker"
     memory_mb: int = 512
     cpu_seconds: int = 30
     cpu_limit: float = 1.0
@@ -163,7 +163,7 @@ class SandboxExecutionPolicy:
     timeout_seconds: int = 20
 
     def __post_init__(self) -> None:
-        norm_mode = (self.sandbox_mode or "process").strip().lower()
+        norm_mode = (self.sandbox_mode or "docker").strip().lower()
         if norm_mode not in ALLOWED_SANDBOX_MODES:
             raise WorkspaceSandboxError(
                 f"Unsupported sandbox mode '{self.sandbox_mode}'. Allowed: {sorted(ALLOWED_SANDBOX_MODES)}."
@@ -179,7 +179,7 @@ class SandboxExecutionPolicy:
 
     @classmethod
     def from_env(cls, *, timeout_seconds: int = 20) -> "SandboxExecutionPolicy":
-        mode = os.environ.get("AATM_SANDBOX_MODE", "process").strip().lower() or "process"
+        mode = os.environ.get("AATM_SANDBOX_MODE", "docker").strip().lower() or "docker"
         memory_mb = int(os.environ.get("AATM_SANDBOX_MEMORY_MB", "512"))
         cpu_seconds = int(os.environ.get("AATM_SANDBOX_CPU_SECONDS", "30"))
         cpu_limit = float(os.environ.get("AATM_SANDBOX_CPU_LIMIT", "1.0"))

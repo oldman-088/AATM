@@ -174,6 +174,32 @@ export const fixtures: Record<string, RouteValue> = {
     role: 'director',
     language: 'en',
     theme: 'dark',
+    must_change_password: false,
+  },
+  '/api/v1/auth/login': {
+    access_token: 'test-jwt-token',
+    token_type: 'bearer',
+    user: {
+      id: 'director-1',
+      email: 'director@aatm.ai',
+      full_name: 'Chief Engineering Director',
+      role: 'director',
+      language: 'en',
+      theme: 'dark',
+      must_change_password: false,
+    },
+  },
+  '/api/v1/auth/change-password': {
+    ok: true,
+    user: {
+      id: 'director-1',
+      email: 'director@aatm.ai',
+      full_name: 'Chief Engineering Director',
+      role: 'director',
+      language: 'en',
+      theme: 'dark',
+      must_change_password: false,
+    },
   },
   '/api/v1/emergency-stop': { scope: 'global', active: true },
   '/api/v1/emergency-stop/clear': { scope: 'global', active: false },
@@ -229,10 +255,15 @@ export function installFetchMock(overrides: Record<string, RouteValue> = {}) {
 export class MockWebSocket {
   static instances: MockWebSocket[] = []
   url: string
+  sent: string[] = []
+  onopen: ((ev: any) => void) | null = null
   onmessage: ((ev: any) => void) | null = null
   constructor(url: string) {
     this.url = url
     MockWebSocket.instances.push(this)
+  }
+  send(data: string) {
+    this.sent.push(data)
   }
   close() {}
 }

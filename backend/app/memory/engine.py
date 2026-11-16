@@ -1,6 +1,6 @@
 import re
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import MemoryEntry
@@ -23,6 +23,7 @@ class MemoryEngine:
         requesting_agent_id: str | None = None,
         limit: int = 30,
     ) -> list[dict]:
+        q_tokens = self._tokenize(query)
         stmt = select(MemoryEntry)
         if scope:
             stmt = stmt.where(MemoryEntry.scope == scope)
@@ -33,10 +34,22 @@ class MemoryEngine:
             )
         if agent_id:
             stmt = stmt.where(MemoryEntry.agent_id == agent_id)
+        if q_tokens:
+            token_clauses = [
+                or_(
+                    MemoryEntry.title.ilike(f"%{tok}%"),
+                    MemoryEntry.content.ilike(f"%{tok}%"),
+                    cast(MemoryEntry.tags, String).ilike(f"%{tok}%"),
+                )
+                for tok in sorted(q_tokens)[:8]
+            ]
+            stmt = stmt.where(or_(*token_clauses))
 
-        res = await db.execute(stmt.order_by(MemoryEntry.importance.desc(), MemoryEntry.updated_at.desc()))
+        candidate_limit = max(int(limit or 30) * 5, 1)
+        res = await db.execute(
+            stmt.order_by(MemoryEntry.importance.desc(), MemoryEntry.updated_at.desc()).limit(candidate_limit)
+        )
         entries = list(res.scalars().all())
-        q_tokens = self._tokenize(query)
 
         scored: list[tuple[float, MemoryEntry]] = []
         for entry in entries:

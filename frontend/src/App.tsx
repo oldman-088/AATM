@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Bell,
   Bot,
@@ -22,7 +22,7 @@ import { Badge, Button, Input } from './components/ui'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { I18nProvider, useI18n } from './i18n/I18nContext'
 import type { Language } from './i18n/types'
-import { apiFetch } from './lib/api'
+import { apiFetch, getToken } from './lib/api'
 import { AgentsView, DashboardView, ManagerChatView, TasksView } from './views/CoreViews'
 import {
   AgentMessagingPanel,
@@ -53,15 +53,18 @@ type NavTab =
 
 function AATMWorkspace() {
   const { t, language, setLanguage, formatNumber } = useI18n()
-  const { user, login, logout, syncPreferences } = useAuth()
+  const { user, loading, login, logout, changePassword, syncPreferences } = useAuth()
 
   const [tab, setTab] = useState<NavTab>('dashboard')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('aatm_theme') === 'light' ? 'light' : 'dark'))
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
 
-  const [email, setEmail] = useState('admin@aatm.local')
-  const [password, setPassword] = useState('aatm-admin-2026')
-  const [showAuthModal, setShowAuthModal] = useState(false)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [authError, setAuthError] = useState<string | null>(null)
 
   const [overview, setOverview] = useState<any>(null)
   const [agents, setAgents] = useState<any[]>([])
@@ -148,18 +151,28 @@ function AATMWorkspace() {
     }
   }, [activeProjectId])
 
-  useEffect(() => {
-    loadAll()
-  }, [loadAll])
+  const loadAllRef = useRef(loadAll)
+  loadAllRef.current = loadAll
 
   useEffect(() => {
+    if (!user || user.must_change_password) return
+    loadAll()
+  }, [loadAll, user])
+
+  useEffect(() => {
+    if (!user || user.must_change_password) return
+    const token = getToken()
+    if (!token) return
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${window.location.host}/ws/events`)
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ token }))
+    }
     ws.onmessage = () => {
-      loadAll()
+      loadAllRef.current()
     }
     return () => ws.close()
-  }, [loadAll])
+  }, [user])
 
   const handleLanguageChange = (next: Language) => {
     setLanguage(next)
@@ -171,14 +184,37 @@ function AATMWorkspace() {
     syncPreferences({ theme: next })
   }
 
-  const handleSignIn = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault()
+  const handleSignIn = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setAuthError(null)
     try {
-      await login(email, password)
-      setShowAuthModal(false)
+      await login(email.trim(), password)
+      setPassword('')
       setErrorBanner(null)
     } catch (err: any) {
-      setErrorBanner(err?.message || t.common.loginFailed)
+      setAuthError(err?.message || t.common.loginFailed)
+    }
+  }
+
+  const handleForcedPasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setAuthError(null)
+    if (newPassword.length < 12) {
+      setAuthError(t.auth.passwordTooShort)
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setAuthError(t.auth.passwordMismatch)
+      return
+    }
+    try {
+      await changePassword(currentPassword, newPassword)
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      setAuthError(null)
+    } catch (err: any) {
+      setAuthError(err?.message || t.auth.passwordChangeFailed)
     }
   }
 
@@ -217,6 +253,136 @@ function AATMWorkspace() {
 
   const unreadNotifs = notifications.filter((n) => !n.is_read).length
 
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-300">
+        {t.common.loading}
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-950 p-4 text-slate-100">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-600 font-bold text-white">AA</div>
+          <div>
+            <div className="text-lg font-bold tracking-tight text-white">{t.appName}</div>
+            <div className="text-xs text-slate-400">{t.appSubtitle}</div>
+          </div>
+        </div>
+
+        <form onSubmit={handleSignIn} className="w-full max-w-sm space-y-4 rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-semibold text-white">{t.auth.signIn}</h1>
+            <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
+              {(['en', 'ar', 'fa'] as const).map((code) => (
+                <button
+                  key={code}
+                  type="button"
+                  onClick={() => handleLanguageChange(code)}
+                  className={`rounded px-2 py-0.5 text-xs font-medium ${
+                    language === code ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {code.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-400">{t.auth.authRequiredHint}</p>
+
+          {authError && (
+            <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+              {authError}
+            </div>
+          )}
+
+          <Input
+            type="email"
+            autoComplete="username"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder={t.auth.email}
+            aria-label={t.auth.email}
+          />
+          <Input
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={t.auth.password}
+            aria-label={t.auth.password}
+          />
+          <Button type="submit" className="w-full">
+            <LogIn className="h-4 w-4" />
+            {t.auth.signIn}
+          </Button>
+        </form>
+      </div>
+    )
+  }
+
+  if (user.must_change_password) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-950 p-4 text-slate-100">
+        <form
+          onSubmit={handleForcedPasswordChange}
+          className="w-full max-w-md space-y-4 rounded-xl border border-amber-500/40 bg-slate-900 p-6 shadow-xl"
+        >
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-semibold text-white">{t.auth.changePasswordTitle}</h1>
+            <Button type="button" size="sm" variant="secondary" onClick={logout}>
+              <LogOut className="h-3.5 w-3.5" />
+              {t.auth.signOut}
+            </Button>
+          </div>
+          <p className="text-xs text-slate-300">{t.auth.changePasswordSubtitle}</p>
+
+          {authError && (
+            <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+              {authError}
+            </div>
+          )}
+
+          <Input
+            type="password"
+            autoComplete="current-password"
+            required
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            placeholder={t.auth.currentPassword}
+            aria-label={t.auth.currentPassword}
+          />
+          <Input
+            type="password"
+            autoComplete="new-password"
+            required
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            placeholder={t.auth.newPassword}
+            aria-label={t.auth.newPassword}
+          />
+          <Input
+            type="password"
+            autoComplete="new-password"
+            required
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder={t.auth.confirmPassword}
+            aria-label={t.auth.confirmPassword}
+          />
+          <Button type="submit" className="w-full">
+            {t.auth.updatePassword}
+          </Button>
+        </form>
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-100">
       <aside className="hidden w-64 shrink-0 flex-col border-e border-slate-800 bg-slate-900/70 p-4 md:flex">
@@ -249,22 +415,15 @@ function AATMWorkspace() {
         </nav>
 
         <div className="mt-4 border-t border-slate-800 pt-3 text-xs">
-          {user ? (
-            <div className="space-y-2">
-              <div className="truncate text-slate-400">
-                {t.auth.signedInAs}: <span className="text-slate-200">{user.email}</span>
-              </div>
-              <Button size="sm" variant="secondary" className="w-full" onClick={logout}>
-                <LogOut className="h-3.5 w-3.5" />
-                {t.auth.signOut}
-              </Button>
+          <div className="space-y-2">
+            <div className="truncate text-slate-400">
+              {t.auth.signedInAs}: <span className="text-slate-200">{user.email}</span>
             </div>
-          ) : (
-            <Button size="sm" className="w-full" onClick={() => setShowAuthModal(true)}>
-              <LogIn className="h-3.5 w-3.5" />
-              {t.auth.signIn}
+            <Button size="sm" variant="secondary" className="w-full" onClick={logout}>
+              <LogOut className="h-3.5 w-3.5" />
+              {t.auth.signOut}
             </Button>
-          )}
+          </div>
         </div>
       </aside>
 
@@ -290,7 +449,6 @@ function AATMWorkspace() {
             <Badge variant="info">
               {formatNumber(devices.length)} {t.common.deviceNodes}
             </Badge>
-            {!user && <span className="text-amber-400">{t.auth.authRequiredHint}</span>}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -322,12 +480,6 @@ function AATMWorkspace() {
             >
               <SunMoon className="h-4 w-4" />
             </Button>
-
-            {!user && (
-              <Button size="sm" onClick={() => handleSignIn()}>
-                {t.auth.quickAdmin}
-              </Button>
-            )}
           </div>
         </header>
 
@@ -408,27 +560,6 @@ function AATMWorkspace() {
           )}
         </main>
       </div>
-
-      {showAuthModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <form onSubmit={handleSignIn} className="w-full max-w-sm space-y-4 rounded-xl border border-slate-800 bg-slate-900 p-5">
-            <h3 className="text-lg font-semibold text-white">{t.auth.signIn}</h3>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t.auth.email} />
-            <Input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={t.auth.password}
-            />
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="secondary" onClick={() => setShowAuthModal(false)}>
-                {t.common.cancel}
-              </Button>
-              <Button type="submit">{t.auth.signIn}</Button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   )
 }

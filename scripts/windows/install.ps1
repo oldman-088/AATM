@@ -31,8 +31,30 @@ Push-Location backend
 Pop-Location
 
 if (-not (Test-Path "$RootDir\.env")) {
-    Write-Host "[AATM Windows 11 Install] Creating .env from .env.example (review it before production use)."
-    Copy-Item "$RootDir\.env.example" "$RootDir\.env"
+    Write-Host "[AATM Windows 11 Install] Generating .env with cryptographically random secrets..."
+    $GeneratedAdminPw = & .\.venv\Scripts\python.exe -c @"
+import secrets
+from pathlib import Path
+
+secret_key = secrets.token_hex(32)
+admin_pw = secrets.token_urlsafe(18)
+bridge_tok = secrets.token_hex(24)
+pg_pw = secrets.token_hex(20)
+
+content = Path(".env.example").read_text(encoding="utf-8")
+for old, new in {
+    "SECRET_KEY=change-this-to-a-secure-random-32-plus-char-secret": f"SECRET_KEY={secret_key}",
+    "DEFAULT_ADMIN_PASSWORD=change-me-immediately": f"DEFAULT_ADMIN_PASSWORD={admin_pw}",
+    "ARENA_BRIDGE_TOKEN=": f"ARENA_BRIDGE_TOKEN={bridge_tok}",
+    "POSTGRES_PASSWORD=": f"POSTGRES_PASSWORD={pg_pw}",
+}.items():
+    content = content.replace(old, new)
+
+Path(".env").write_text(content, encoding="utf-8")
+print(admin_pw)
+"@
+    Write-Host "[AATM Windows 11 Install] Initial admin account: admin@aatm.local"
+    Write-Host "[AATM Windows 11 Install] Generated admin password (shown once - save it now): $GeneratedAdminPw" -ForegroundColor Yellow
 }
 
 if (Get-Command npm -ErrorAction SilentlyContinue) {

@@ -81,14 +81,14 @@ async def auth_headers(client: AsyncClient):
 
 
 @pytest.fixture(scope="module")
-async def project_id(client: AsyncClient):
-    projects = (await client.get("/api/v1/projects")).json()
+async def project_id(client: AsyncClient, auth_headers: dict):
+    projects = (await client.get("/api/v1/projects", headers=auth_headers)).json()
     return projects[0]["id"]
 
 
 async def _cancel_all_queued(client: AsyncClient, auth_headers: dict) -> None:
     """Clear pre-existing queued work so a test can own the queue deterministically."""
-    for task in (await client.get("/api/v1/tasks?status=queued")).json():
+    for task in (await client.get("/api/v1/tasks?status=queued", headers=auth_headers)).json():
         await client.patch(f"/api/v1/tasks/{task['id']}", headers=auth_headers, json={"status": "cancelled"})
 
 
@@ -141,7 +141,7 @@ async def test_e2e_dag_dependency_ordering_and_locks(client, auth_headers, proje
     assert ghost.status_code == 400
 
     await client.post("/api/v1/orchestration/cycle", headers=auth_headers)
-    in_progress = {t["id"] for t in (await client.get("/api/v1/tasks?status=in_progress")).json()}
+    in_progress = {t["id"] for t in (await client.get("/api/v1/tasks?status=in_progress", headers=auth_headers)).json()}
 
     # The dependent task must NOT be dispatched before its dependency completed,
     # even though it carries a higher priority weight.
@@ -149,14 +149,14 @@ async def test_e2e_dag_dependency_ordering_and_locks(client, auth_headers, proje
     assert child["id"] not in in_progress
 
     # A dispatched task holds an exclusive lock.
-    locked = [t for t in (await client.get("/api/v1/tasks?status=in_progress")).json() if t["lock_owner"]]
+    locked = [t for t in (await client.get("/api/v1/tasks?status=in_progress", headers=auth_headers)).json() if t["lock_owner"]]
     assert locked, "dispatched task must hold a lock"
 
     # Completing the dependency unlocks the child for the next cycle.
     await client.patch(f"/api/v1/tasks/{root['id']}", headers=auth_headers, json={"status": "completed"})
     await client.patch(f"/api/v1/tasks/{child['id']}", headers=auth_headers, json={"status": "queued"})
     await client.post("/api/v1/orchestration/cycle", headers=auth_headers)
-    after = {t["id"] for t in (await client.get("/api/v1/tasks?status=in_progress")).json()}
+    after = {t["id"] for t in (await client.get("/api/v1/tasks?status=in_progress", headers=auth_headers)).json()}
     assert child["id"] in after
 
 
@@ -221,7 +221,7 @@ async def test_e2e_agent_messaging_delivery(client, auth_headers):
     assert body["delivery_status"] == "acknowledged"
     assert body["acked_at"] is not None
 
-    files = (await client.get("/api/v1/workspaces/worker-1/files")).json()["files"]
+    files = (await client.get("/api/v1/workspaces/worker-1/files", headers=auth_headers)).json()["files"]
     assert any(f["path"] == "e2e_verification.md" for f in files)
 
     # A message for an unknown recipient is a client error, not a 500.
@@ -237,7 +237,7 @@ async def test_e2e_agent_messaging_delivery(client, auth_headers):
     assert unknown.status_code == 400
 
     # The message bus records the delivery for audit.
-    messages = (await client.get("/api/v1/messages")).json()
+    messages = (await client.get("/api/v1/messages", headers=auth_headers)).json()
     assert any(m["recipient_id"] == "worker-1" for m in messages)
 
 
@@ -297,7 +297,7 @@ async def test_e2e_workspace_isolation(client, auth_headers):
         headers=auth_headers,
         json={"relative_path": "private_note.txt", "content": "worker-2 only"},
     )
-    worker1_files = [f["path"] for f in (await client.get("/api/v1/workspaces/worker-1/files")).json()["files"]]
+    worker1_files = [f["path"] for f in (await client.get("/api/v1/workspaces/worker-1/files", headers=auth_headers)).json()["files"]]
     assert "private_note.txt" not in worker1_files
 
 
@@ -342,15 +342,15 @@ async def test_e2e_smart_replacement(client, auth_headers, project_id):
     assert "e2e_wip.txt" in data["transferred_files"]
 
     # The failing employee is taken offline and the work now belongs to the replacement.
-    agents = {a["id"]: a for a in (await client.get("/api/v1/agents")).json()}
+    agents = {a["id"]: a for a in (await client.get("/api/v1/agents", headers=auth_headers)).json()}
     assert agents[employee["id"]]["status"] == "offline"
-    tasks = {t["id"]: t for t in (await client.get("/api/v1/tasks")).json()}
+    tasks = {t["id"]: t for t in (await client.get("/api/v1/tasks", headers=auth_headers)).json()}
     for task_id in data["transferred_tasks"]:
         assert tasks[task_id]["assigned_agent_id"] == data["replacement_employee"]
 
     # The handoff files are really present in the replacement workspace.
     replacement_files = [
-        f["path"] for f in (await client.get(f"/api/v1/workspaces/{data['replacement_employee']}/files")).json()["files"]
+        f["path"] for f in (await client.get(f"/api/v1/workspaces/{data['replacement_employee']}/files", headers=auth_headers)).json()["files"]
     ]
     assert any("e2e_wip.txt" in p for p in replacement_files)
 
@@ -360,6 +360,11 @@ async def test_e2e_smart_replacement(client, auth_headers, project_id):
 # --------------------------------------------------------------------------------------
 async def test_e2e_emergency_stop_global_scope_and_recovery(client, auth_headers, project_id):
     await _cancel_all_queued(client, auth_headers)
+    for stale in (await client.get("/api/v1/tasks?status=in_progress", headers=auth_headers)).json():
+        await client.patch(f"/api/v1/tasks/{stale['id']}", headers=auth_headers, json={"status": "cancelled"})
+    for agent in (await client.get("/api/v1/agents", headers=auth_headers)).json():
+        if agent["role"] == "worker" and agent["status"] != "idle":
+            await client.post(f"/api/v1/agents/{agent['id']}/restart", headers=auth_headers)
     task = (
         await client.post(
             "/api/v1/tasks",
@@ -373,7 +378,7 @@ async def test_e2e_emergency_stop_global_scope_and_recovery(client, auth_headers
         )
     ).json()
     await client.post("/api/v1/orchestration/cycle", headers=auth_headers)
-    assert task["id"] in {t["id"] for t in (await client.get("/api/v1/tasks?status=in_progress")).json()}
+    assert task["id"] in {t["id"] for t in (await client.get("/api/v1/tasks?status=in_progress", headers=auth_headers)).json()}
 
     stop = await client.post(
         "/api/v1/emergency-stop",
@@ -384,7 +389,7 @@ async def test_e2e_emergency_stop_global_scope_and_recovery(client, auth_headers
     assert stop.json()["agents"] >= 1
 
     # In-flight work is halted, not silently dropped.
-    halted = {t["id"]: t for t in (await client.get("/api/v1/tasks?status=blocked")).json()}
+    halted = {t["id"]: t for t in (await client.get("/api/v1/tasks?status=blocked", headers=auth_headers)).json()}
     assert task["id"] in halted
     assert halted[task["id"]]["error_message"].startswith(EMERGENCY_STOP_MARKER)
 
@@ -395,7 +400,7 @@ async def test_e2e_emergency_stop_global_scope_and_recovery(client, auth_headers
     assert cleared.json()["resumed_agents"] >= 1
     assert cleared.json()["resumed_tasks"] >= 1
 
-    recovered = (await client.get("/api/v1/tasks")).json()
+    recovered = (await client.get("/api/v1/tasks", headers=auth_headers)).json()
     still_blocked = [t for t in recovered if t["status"] == "blocked"]
     assert not still_blocked, f"emergency-stopped tasks must not stay orphaned: {still_blocked}"
     assert next(t for t in recovered if t["id"] == task["id"])["status"] == "queued"
@@ -434,7 +439,7 @@ async def test_e2e_emergency_stop_employee_scope_halts_own_task(client, auth_hea
     assert stop.json()["tasks"] == 1, "an employee-scoped stop must halt that employee's active task"
 
     # The task must no longer be left running with a lock owned by a halted agent.
-    still_running = [t for t in (await client.get("/api/v1/tasks?status=in_progress")).json() if t["id"] == task["id"]]
+    still_running = [t for t in (await client.get("/api/v1/tasks?status=in_progress", headers=auth_headers)).json() if t["id"] == task["id"]]
     assert not still_running, "employee-scoped emergency stop stranded an in-progress task"
 
     await client.post("/api/v1/emergency-stop/clear", headers=auth_headers)
@@ -556,7 +561,7 @@ async def test_e2e_secret_scan_flags_forbidden_committed_artifacts(client, auth_
     ],
 )
 async def test_e2e_high_risk_directives_are_gated(client, auth_headers, directive):
-    before = len((await client.get("/api/v1/approvals?status=pending")).json())
+    before = len((await client.get("/api/v1/approvals?status=pending", headers=auth_headers)).json())
     resp = await client.post(
         "/api/v1/chat",
         headers=auth_headers,
@@ -565,7 +570,7 @@ async def test_e2e_high_risk_directives_are_gated(client, auth_headers, directiv
     assert resp.status_code == 201
     actions = resp.json()["manager_reply"]["metadata"]["actions"]
     assert any("Approval Request" in a for a in actions), f"directive not gated: {directive!r}"
-    after = len((await client.get("/api/v1/approvals?status=pending")).json())
+    after = len((await client.get("/api/v1/approvals?status=pending", headers=auth_headers)).json())
     assert after > before
 
 
@@ -681,7 +686,7 @@ async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, p
         assert reserved_slot_counts == [1, 1]
 
         # 4. The server marks the task complete and records the artifact.
-        stored = next(t for t in (await client.get("/api/v1/tasks")).json() if t["id"] == task["id"])
+        stored = next(t for t in (await client.get("/api/v1/tasks", headers=auth_headers)).json() if t["id"] == task["id"])
         assert stored["status"] == "completed"
         assert stored["device_id"] == "e2e-node-01"
         assert "remote_deliverable.md" in (stored["actual_deliverables"] or [])
@@ -701,7 +706,7 @@ async def test_e2e_multi_device_worker_daemon_round_trip(client, auth_headers, p
             daemon.resolve_path("../../etc/passwd")
 
         # 7. The device registry reflects the node.
-        devices = {d["id"]: d for d in (await client.get("/api/v1/devices")).json()}
+        devices = {d["id"]: d for d in (await client.get("/api/v1/devices", headers=auth_headers)).json()}
         assert devices["e2e-node-01"]["status"] == "online"
 
 
@@ -764,7 +769,7 @@ async def test_e2e_offline_device_tasks_are_reclaimed(client, auth_headers, proj
     assert heal.status_code == 200
     assert "e2e-node-offline" in heal.json()["offline_devices"]
 
-    stored = next(t for t in (await client.get("/api/v1/tasks")).json() if t["id"] == task["id"])
+    stored = next(t for t in (await client.get("/api/v1/tasks", headers=auth_headers)).json() if t["id"] == task["id"])
     assert stored["status"] == "queued", "a task owned by a dead node must be requeued"
 
 
@@ -1790,7 +1795,7 @@ def test_e2e_round4_settings_env_and_hardened_docker_compose_worker():
 
     env_example = (ROOT_DIR / ".env.example").read_text(encoding="utf-8")
     assert "GITHUB_WEBHOOK_SECRET=" in env_example
-    assert "AATM_SANDBOX_MODE=process" in env_example
+    assert "AATM_SANDBOX_MODE=docker" in env_example
 
     compose_text = (ROOT_DIR / "docker-compose.yml").read_text(encoding="utf-8")
     assert "postgres:" in compose_text

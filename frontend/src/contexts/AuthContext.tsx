@@ -8,6 +8,7 @@ export interface UserProfile {
   role: string
   language: 'en' | 'ar' | 'fa'
   theme: 'dark' | 'light' | 'system'
+  must_change_password?: boolean
 }
 
 interface AuthContextValue {
@@ -15,6 +16,7 @@ interface AuthContextValue {
   loading: boolean
   login: (email: string, password: string) => Promise<void>
   logout: () => void
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
   syncPreferences: (prefs: Partial<Pick<UserProfile, 'language' | 'theme'>>) => Promise<void>
 }
 
@@ -53,6 +55,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null)
   }
 
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    const res = await apiFetch<{ ok: boolean; user: UserProfile }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    })
+    setUser(res.user)
+  }
+
   const syncPreferences = async (prefs: Partial<Pick<UserProfile, 'language' | 'theme'>>) => {
     if (!getToken()) return
     try {
@@ -67,7 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, syncPreferences }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, changePassword, syncPreferences }}>
       {children}
     </AuthContext.Provider>
   )

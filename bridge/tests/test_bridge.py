@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 import uvicorn
@@ -47,7 +47,7 @@ class _LiveBridgeProcess:
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
 
-    def __enter__(self) -> "_LiveBridgeProcess":
+    def __enter__(self) -> Self:
         config = uvicorn.Config(self.app, host="127.0.0.1", port=self.port, log_level="error")
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, daemon=True)
@@ -659,7 +659,7 @@ class _MockUpstreamSSEServer:
 
         return up_app
 
-    def __enter__(self) -> "_MockUpstreamSSEServer":
+    def __enter__(self) -> Self:
         config = uvicorn.Config(self._build_app(), host="127.0.0.1", port=self.port, log_level="error")
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, daemon=True)
@@ -684,7 +684,8 @@ class _MockUpstreamSSEServer:
 async def test_bridge_upstream_sse_incremental_passthrough_and_session_recording(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ARENA_BRIDGE_TOKEN", raising=False)
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-sse-test-token")
+    auth = {"Authorization": "Bearer bridge-sse-test-token"}
     up_secret = "upstream-" + "bearer-" + "test-" + "991"
 
     with _MockUpstreamSSEServer(chunks=["Delta A | ", "Delta B | ", "Delta C"]) as upstream:
@@ -695,7 +696,7 @@ async def test_bridge_upstream_sse_incremental_passthrough_and_session_recording
             adapter = ArenaLocalBridgeAdapter(
                 provider_id="arena-local-bridge",
                 endpoint_url=bridge.base_url,
-                credential_ref=None,
+                credential_ref="env:ARENA_BRIDGE_TOKEN",
                 default_model="arena-default",
             )
             chunks = [
@@ -727,7 +728,10 @@ async def test_bridge_upstream_sse_incremental_passthrough_and_session_recording
 
             # Verify session metadata recorded turn and cross-account 403 rejects BEFORE hitting upstream
             async with AsyncClient(base_url=bridge.base_url) as client:
-                sess_res = await client.get("/v1/sessions/sess-up-sse-1", headers={"X-AATM-Account-Id": "acct-up-1"})
+                sess_res = await client.get(
+                    "/v1/sessions/sess-up-sse-1",
+                    headers={**auth, "X-AATM-Account-Id": "acct-up-1"},
+                )
                 assert sess_res.status_code == 200
                 summary = sess_res.json()
                 assert summary["turn_count"] == 1
@@ -737,7 +741,7 @@ async def test_bridge_upstream_sse_incremental_passthrough_and_session_recording
 
                 forged = await client.post(
                     "/v1/chat/completions",
-                    headers={"X-AATM-Session-Id": "sess-up-sse-1", "X-AATM-Account-Id": "acct-other"},
+                    headers={**auth, "X-AATM-Session-Id": "sess-up-sse-1", "X-AATM-Account-Id": "acct-other"},
                     json={"model": "arena-default", "stream": True, "messages": [{"role": "user", "content": "hijack"}]},
                 )
                 assert forged.status_code == 403
@@ -764,7 +768,8 @@ async def test_bridge_upstream_sse_incremental_passthrough_and_session_recording
 
 @pytest.mark.asyncio
 async def test_bridge_upstream_sse_safe_error_chunk_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ARENA_BRIDGE_TOKEN", raising=False)
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-sse-test-token")
+    auth = {"Authorization": "Bearer bridge-sse-test-token"}
     up_secret = "secret-upstream-" + "never-leak-" + "774"
     monkeypatch.setenv("ARENA_BRIDGE_UPSTREAM_API_KEY", up_secret)
 
@@ -775,7 +780,7 @@ async def test_bridge_upstream_sse_safe_error_chunk_fallback(monkeypatch: pytest
             async with AsyncClient(base_url=bridge.base_url) as client:
                 raw_res = await client.post(
                     "/v1/chat/completions",
-                    headers={"X-AATM-Session-Id": "sess-up-err-1", "X-AATM-Account-Id": "acct-up-err"},
+                    headers={**auth, "X-AATM-Session-Id": "sess-up-err-1", "X-AATM-Account-Id": "acct-up-err"},
                     json={"model": "arena-default", "stream": True, "messages": [{"role": "user", "content": "test"}]},
                 )
                 assert raw_res.status_code == 200
@@ -787,7 +792,7 @@ async def test_bridge_upstream_sse_safe_error_chunk_fallback(monkeypatch: pytest
             adapter = ArenaLocalBridgeAdapter(
                 provider_id="arena-local-bridge",
                 endpoint_url=bridge.base_url,
-                credential_ref=None,
+                credential_ref="env:ARENA_BRIDGE_TOKEN",
                 default_model="arena-default",
             )
             err_chunks = [
@@ -814,7 +819,7 @@ async def test_bridge_upstream_sse_safe_error_chunk_fallback(monkeypatch: pytest
         async with AsyncClient(base_url=bridge.base_url) as client:
             raw_res = await client.post(
                 "/v1/chat/completions",
-                headers={"X-AATM-Session-Id": "sess-up-dead", "X-AATM-Account-Id": "acct-up-err"},
+                headers={**auth, "X-AATM-Session-Id": "sess-up-dead", "X-AATM-Account-Id": "acct-up-err"},
                 json={"model": "arena-default", "stream": True, "messages": [{"role": "user", "content": "test"}]},
             )
             assert raw_res.status_code == 200

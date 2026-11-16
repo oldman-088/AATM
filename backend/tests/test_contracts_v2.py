@@ -107,7 +107,7 @@ def _pattern_values(openapi: dict, component: str, field: str) -> set[str]:
     return set(pattern[2:-2].split("|"))
 
 
-async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient):
+async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient, auth_headers):
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     assert contract["version"] == "2.3.0"
     assert contract["api_prefix"] == "/api/v1"
@@ -298,7 +298,7 @@ async def test_contract_v2_matches_openapi_routes_and_enums(client: AsyncClient)
     assert set(paths["/api/v1/git/worktrees"]) == {"post"}
     assert set(paths["/api/v1/git/worktrees/{agent_id}"]) == {"delete"}
 
-    browser_engines = await client.get("/api/v1/browsers/engines")
+    browser_engines = await client.get("/api/v1/browsers/engines", headers=auth_headers)
     assert browser_engines.status_code == 200
     assert set(browser_engines.json()) == set(enums["browser_engines"])
 
@@ -336,7 +336,7 @@ async def test_provider_rejects_inline_credentials_without_echoing_secret(client
     assert response.json()["detail"] == (
         "credential_ref must reference an environment variable (env:NAME); inline credentials are not accepted."
     )
-    providers = await client.get("/api/v1/providers")
+    providers = await client.get("/api/v1/providers", headers=auth_headers)
     assert all(provider["id"] != "inline-secret-provider" for provider in providers.json())
 
 
@@ -1356,7 +1356,7 @@ def test_token_version_migration_supports_fresh_and_existing_sqlite_databases(tm
         assert row == (1,)
 
 
-async def test_provider_usage_includes_budget_headroom(client: AsyncClient):
+async def test_provider_usage_includes_budget_headroom(client: AsyncClient, auth_headers):
     provider_id = "budget-summary-v2-test"
     async with AsyncSessionLocal() as db:
         db.add(
@@ -1387,7 +1387,7 @@ async def test_provider_usage_includes_budget_headroom(client: AsyncClient):
     async with AsyncSessionLocal() as db:
         expected_budget = await provider_router.get_spend_summary(db)
 
-    response = await client.get("/api/v1/providers/usage")
+    response = await client.get("/api/v1/providers/usage", headers=auth_headers)
     assert response.status_code == 200
     assert "summary" in response.json() and "logs" in response.json()
     typed_usage = ProviderUsageResponse.model_validate(response.json())

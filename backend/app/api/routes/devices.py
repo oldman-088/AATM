@@ -222,8 +222,11 @@ async def register_worker_device(
     token_valid = device is not None and verify_device_token(
         device_id, x_aatm_device_token, device.token_version
     )
-    if not token_valid and (user is None or not user.is_active):
-        raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+    if not token_valid:
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=401, detail="Invalid or missing device token.")
+        if user.role not in {"admin", "operator"}:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     created = device is None
     if device is None:

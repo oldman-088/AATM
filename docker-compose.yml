@@ -4,10 +4,10 @@ services:
     container_name: aatm-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-aatm}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aatm_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: ${POSTGRES_DB:-aatm}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - aatm_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +18,9 @@ services:
     restart: unless-stopped
 
   worker:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
     container_name: aatm-worker
     user: "65534:65534"
     working_dir: /workspace
@@ -40,7 +42,7 @@ services:
       AATM_DEVICE_ID: ${AATM_DEVICE_ID:-docker-worker-01}
       AATM_DEVICE_TOKEN: ${AATM_DEVICE_TOKEN:-}
       AATM_WORKER_WORKSPACE: /workspace
-      AATM_SANDBOX_MODE: ${AATM_SANDBOX_MODE:-process}
+      AATM_SANDBOX_MODE: ${AATM_SANDBOX_MODE:-docker}
     volumes:
       - ./backend:/app/backend:ro
       - aatm_worker_workspaces:/workspace:rw

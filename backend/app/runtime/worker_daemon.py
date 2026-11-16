@@ -63,7 +63,9 @@ class WorkerConfig:
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
     max_iterations: int = 8
     device_type: str = "remote_server"
-    sandbox_mode: str = "process"
+    sandbox_mode: str = field(
+        default_factory=lambda: os.environ.get("AATM_SANDBOX_MODE", "docker").strip().lower() or "docker"
+    )
     sandbox_memory_mb: int = 512
     sandbox_cpu_seconds: int = 30
     sandbox_cpu_limit: float = 1.0
@@ -88,7 +90,7 @@ class WorkerConfig:
             max_iterations=int(os.environ.get("AATM_WORKER_MAX_ITERATIONS", 8)),
             command_timeout=int(os.environ.get("AATM_WORKER_COMMAND_TIMEOUT", DEFAULT_COMMAND_TIMEOUT)),
             device_type=os.environ.get("AATM_DEVICE_TYPE", "remote_server"),
-            sandbox_mode=os.environ.get("AATM_SANDBOX_MODE", "process").strip().lower() or "process",
+            sandbox_mode=os.environ.get("AATM_SANDBOX_MODE", "docker").strip().lower() or "docker",
             sandbox_memory_mb=int(os.environ.get("AATM_SANDBOX_MEMORY_MB", "512")),
             sandbox_cpu_seconds=int(os.environ.get("AATM_SANDBOX_CPU_SECONDS", "30")),
             sandbox_cpu_limit=float(os.environ.get("AATM_SANDBOX_CPU_LIMIT", "1.0")),

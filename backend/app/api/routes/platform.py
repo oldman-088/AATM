@@ -62,7 +62,8 @@ from app.schemas.common import (
     WorkspaceWriteRequest,
 )
 
-router = APIRouter(tags=["enterprise-platform"])
+router = APIRouter(tags=["enterprise-platform"], dependencies=[Depends(get_current_user)])
+public_router = APIRouter(tags=["enterprise-platform-webhooks"])
 sanitize_untrusted_text = sanitize_untrusted_content
 
 _TRACE_BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*")
@@ -131,7 +132,7 @@ async def list_role_templates():
     return ROLE_TEMPLATES
 
 
-@router.post("/employees", status_code=201)
+@router.post("/employees", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_employee_endpoint(
     body: EmployeeCreate,
     user: User = Depends(get_current_user),
@@ -177,7 +178,7 @@ async def create_employee_endpoint(
     }
 
 
-@router.post("/employees/skill-gaps")
+@router.post("/employees/skill-gaps", dependencies=[Depends(require_role("admin", "operator"))])
 async def analyze_employee_skill_gaps(
     body: EmployeeSkillGapRequest,
     user: User = Depends(get_current_user),
@@ -200,7 +201,7 @@ async def provision_employee_specialists(
     )
 
 
-@router.post("/employees/{agent_id}/replace")
+@router.post("/employees/{agent_id}/replace", dependencies=[Depends(require_role("admin", "operator"))])
 async def replace_employee_endpoint(
     agent_id: str,
     reason: str = "Unavailable or repeated failures",
@@ -232,7 +233,7 @@ async def list_provider_accounts(db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/accounts", status_code=201)
+@router.post("/accounts", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_provider_account(
     body: ProviderAccountCreate,
     user: User = Depends(get_current_user),
@@ -261,7 +262,7 @@ async def list_provider_sessions(db: AsyncSession = Depends(get_db)):
     return list(rows)
 
 
-@router.post("/sessions/{session_id}/recover")
+@router.post("/sessions/{session_id}/recover", dependencies=[Depends(require_role("admin", "operator"))])
 async def recover_provider_session(
     session_id: str,
     user: User = Depends(get_current_user),
@@ -317,7 +318,7 @@ async def list_userscripts(db: AsyncSession = Depends(get_db)):
     return [_serialize_userscript(row) for row in rows]
 
 
-@router.post("/userscripts", status_code=201)
+@router.post("/userscripts", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_userscript(
     body: UserscriptCreate,
     user: User = Depends(get_current_user),
@@ -348,7 +349,7 @@ async def create_userscript(
     return _serialize_userscript(us)
 
 
-@router.patch("/userscripts/{script_id}/toggle")
+@router.patch("/userscripts/{script_id}/toggle", dependencies=[Depends(require_role("admin", "operator"))])
 async def toggle_userscript(
     script_id: str,
     user: User = Depends(get_current_user),
@@ -369,7 +370,7 @@ async def list_agent_messages(limit: int = 50, db: AsyncSession = Depends(get_db
     return list(rows)
 
 
-@router.post("/messages", status_code=201)
+@router.post("/messages", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def send_agent_message(
     body: AgentMessageSend,
     user: User = Depends(get_current_user),
@@ -402,7 +403,7 @@ async def list_workspace_files(agent_id: str, db: AsyncSession = Depends(get_db)
     return {"agent_id": agent_id, "files": files, "artifacts": list(arts)}
 
 
-@router.post("/workspaces/{agent_id}/files", status_code=201)
+@router.post("/workspaces/{agent_id}/files", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def write_workspace_file(
     agent_id: str,
     body: WorkspaceWriteRequest,
@@ -417,7 +418,7 @@ async def write_workspace_file(
         raise HTTPException(status_code=403, detail=str(exc))
 
 
-@router.post("/workspaces/{agent_id}/exec")
+@router.post("/workspaces/{agent_id}/exec", dependencies=[Depends(require_role("admin", "operator"))])
 async def exec_workspace_command(
     agent_id: str,
     body: WorkspaceExecRequest,
@@ -432,7 +433,7 @@ async def exec_workspace_command(
         raise HTTPException(status_code=403, detail=str(exc))
 
 
-@router.post("/sdlc/execute", status_code=201)
+@router.post("/sdlc/execute", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def run_sdlc_workflow(
     body: SDLCRequest,
     user: User = Depends(get_current_user),
@@ -447,7 +448,7 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
     return list(rows)
 
 
-@router.post("/devices", status_code=201)
+@router.post("/devices", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def register_device(
     body: DeviceRegisterRequest,
     user: User = Depends(get_current_user),
@@ -512,7 +513,7 @@ async def register_device(
     }
 
 
-@router.post("/emergency-stop")
+@router.post("/emergency-stop", dependencies=[Depends(require_role("admin", "operator"))])
 async def trigger_emergency_stop(
     body: EmergencyStopRequest,
     user: User = Depends(get_current_user),
@@ -523,7 +524,7 @@ async def trigger_emergency_stop(
     )
 
 
-@router.post("/emergency-stop/clear")
+@router.post("/emergency-stop/clear", dependencies=[Depends(require_role("admin", "operator"))])
 async def clear_emergency_stop(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -531,7 +532,7 @@ async def clear_emergency_stop(
     return await replacement_service.clear_emergency_stop(db, actor=user.email)
 
 
-@router.post("/security/sanitize")
+@router.post("/security/sanitize", dependencies=[Depends(require_role("admin", "operator"))])
 async def sanitize_external_text(body: SanitizeRequest):
     return sanitize_untrusted_content(body.text, source=body.source)
 
@@ -600,7 +601,7 @@ async def remove_agent_git_worktree(
     return result
 
 
-@router.post("/github/branches", status_code=201)
+@router.post("/github/branches", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_github_branch(
     body: GitHubBranchCreateRequest,
     user: User = Depends(get_current_user),
@@ -793,7 +794,7 @@ async def get_execution_traces(
     }
 
 
-@router.post("/github/prs/{pr_number}/comments", status_code=201)
+@router.post("/github/prs/{pr_number}/comments", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def comment_on_github_pull_request(
     pr_number: int,
     body: GitHubPRCommentRequest,
@@ -853,7 +854,7 @@ async def comment_on_github_pull_request(
     return result
 
 
-@router.post("/github/webhooks", status_code=202)
+@public_router.post("/github/webhooks", status_code=202)
 async def receive_github_webhook(
     request: Request,
     x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
@@ -929,7 +930,7 @@ async def receive_github_webhook(
     return {"accepted": True, "delivery_id": safe_payload["delivery_id"], "event": safe_payload["event"]}
 
 
-@router.post("/github/prs", status_code=201)
+@router.post("/github/prs", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_github_pull_request(
     body: GitHubPRCreateRequest,
     user: User = Depends(get_current_user),
@@ -953,7 +954,7 @@ async def create_github_pull_request(
     return res
 
 
-@router.post("/github/issues", status_code=201)
+@router.post("/github/issues", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_github_issue(
     body: GitHubIssueCreateRequest,
     user: User = Depends(get_current_user),

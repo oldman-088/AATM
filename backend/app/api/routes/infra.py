@@ -25,7 +25,7 @@ from app.schemas.common import (
     validate_credential_ref as validate_credential_ref_format,
 )
 
-router = APIRouter(tags=["providers-browsers"])
+router = APIRouter(tags=["providers-browsers"], dependencies=[Depends(get_current_user)])
 
 
 def _serialize_provider(p: AIProvider) -> dict:
@@ -80,7 +80,7 @@ async def list_providers(db: AsyncSession = Depends(get_db)):
     return [_serialize_provider(p) for p in res.scalars().all()]
 
 
-@router.post("/providers", status_code=201)
+@router.post("/providers", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def upsert_provider(
     body: ProviderCreateOrUpdate,
     user: User = Depends(get_current_user),
@@ -123,7 +123,7 @@ async def upsert_provider(
     return _serialize_provider(p)
 
 
-@router.post("/providers/health-check")
+@router.post("/providers/health-check", dependencies=[Depends(require_role("admin", "operator"))])
 async def health_check_all_providers(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -141,7 +141,7 @@ async def health_check_all_providers(
     ]
 
 
-@router.post("/providers/{provider_id}/test")
+@router.post("/providers/{provider_id}/test", dependencies=[Depends(require_role("admin", "operator"))])
 async def test_provider(
     provider_id: str,
     body: ProviderTestRequest,
@@ -243,7 +243,7 @@ async def list_browsers(db: AsyncSession = Depends(get_db)):
     return [_serialize_browser(b) for b in res.scalars().all()]
 
 
-@router.post("/browsers", status_code=201)
+@router.post("/browsers", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_browser_profile(
     body: BrowserCreateRequest,
     user: User = Depends(get_current_user),
@@ -267,7 +267,7 @@ async def create_browser_profile(
     return _serialize_browser(bp)
 
 
-@router.post("/browsers/{profile_id}/launch")
+@router.post("/browsers/{profile_id}/launch", dependencies=[Depends(require_role("admin", "operator"))])
 async def launch_browser(
     profile_id: str,
     body: BrowserLaunchRequest,
@@ -284,7 +284,7 @@ async def launch_browser(
         raise HTTPException(status_code=409, detail=str(exc))
 
 
-@router.post("/browsers/{profile_id}/navigate")
+@router.post("/browsers/{profile_id}/navigate", dependencies=[Depends(require_role("admin", "operator"))])
 async def navigate_browser(
     profile_id: str,
     body: BrowserNavigateRequest,
@@ -301,7 +301,7 @@ async def navigate_browser(
     return _serialize_browser(updated)
 
 
-@router.post("/browsers/{profile_id}/workflow")
+@router.post("/browsers/{profile_id}/workflow", dependencies=[Depends(require_role("admin", "operator"))])
 async def execute_browser_workflow(
     profile_id: str,
     body: BrowserWorkflowRequest,
@@ -334,7 +334,7 @@ async def execute_browser_workflow(
     return result
 
 
-@router.post("/browsers/{profile_id}/extract-text")
+@router.post("/browsers/{profile_id}/extract-text", dependencies=[Depends(require_role("admin", "operator"))])
 async def extract_browser_text(
     profile_id: str,
     body: BrowserExtractTextRequest,
@@ -350,7 +350,7 @@ async def extract_browser_text(
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@router.post("/browsers/{profile_id}/stop")
+@router.post("/browsers/{profile_id}/stop", dependencies=[Depends(require_role("admin", "operator"))])
 async def stop_browser(
     profile_id: str,
     user: User = Depends(get_current_user),
@@ -363,7 +363,7 @@ async def stop_browser(
     return _serialize_browser(updated)
 
 
-@router.post("/browsers/{profile_id}/recover")
+@router.post("/browsers/{profile_id}/recover", dependencies=[Depends(require_role("admin", "operator"))])
 async def crash_and_recover_browser(
     profile_id: str,
     user: User = Depends(get_current_user),

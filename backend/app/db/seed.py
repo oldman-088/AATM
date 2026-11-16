@@ -39,6 +39,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 role="admin",
                 language="en",
                 theme="dark",
+                must_change_password=True,
             )
         )
 

@@ -18,6 +18,7 @@ class User(Base):
     language: Mapped[str] = mapped_column(String(10), default="en", nullable=False)
     theme: Mapped[str] = mapped_column(String(16), default="dark", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

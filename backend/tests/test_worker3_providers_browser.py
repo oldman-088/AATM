@@ -238,8 +238,10 @@ def _enable_fake_live_browser(monkeypatch, manager: BrowserManager) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_credential_ref_indirection_blocks_raw_secrets():
-    assert validate_credential_ref(None)[0] is True
+async def test_credential_ref_indirection_blocks_raw_secrets(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-env-indirection")
+    monkeypatch.setenv("ARENA_BRIDGE_TOKEN", "bridge-test-env-indirection")
+    assert validate_credential_ref(None)[0] is False
     assert validate_credential_ref("env:ANTHROPIC_API_KEY")[0] is True
     assert validate_credential_ref("env:ARENA_BRIDGE_TOKEN")[0] is True
 
@@ -276,12 +278,12 @@ async def test_arena_local_bridge_live_auth_and_offline(monkeypatch):
         assert health.status == "healthy"
         assert health.credentials_configured is True
 
-        # Dry-run never spends budget
+        # Dry-run never spends budget and never fabricates a successful completion
         dry = await adapter.generate(ProviderRequest(prompt="test", model="arena-reasoning-pro", dry_run=True))
-        assert dry.success is True
+        assert dry.success is False
         assert dry.estimated_cost_usd == 0.0
         assert dry.metadata["dry_run"] is True
-        assert dry.metadata["projected_cost_usd"] > 0.0
+        assert "Dry run" in (dry.error_message or "")
 
         # Live call reads OpenAI-compatible usage & content
         live = await adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
@@ -291,11 +293,12 @@ async def test_arena_local_bridge_live_auth_and_offline(monkeypatch):
         assert live.output_tokens == 7
         assert live.metadata["confirmed_usage"] is True
 
-        # Empty choices array handled gracefully without IndexError
+        # Empty choices array handled gracefully without IndexError and without fabricating success
         srv.empty_choices = True
         empty_resp = await adapter.generate(ProviderRequest(prompt="ping", dry_run=False))
-        assert empty_resp.success is True
+        assert empty_resp.success is False
         assert empty_resp.content == ""
+        assert empty_resp.metadata.get("empty_response") is True
 
         # Wrong token yields degraded auth error on health check
         monkeypatch.setenv("ARENA_TEST_BRIDGE_TOKEN", "wrong-token")
@@ -370,9 +373,9 @@ async def test_anthropic_safe_diagnostic_and_live_confirmed_usage(db_session, mo
     assert h.credentials_configured is False
 
     diag = await adapter.generate(ProviderRequest(prompt="Analyze architecture", dry_run=False))
-    assert diag.success is True
+    assert diag.success is False
     assert diag.estimated_cost_usd == 0.0
-    assert diag.metadata["dry_run"] is True
+    assert diag.metadata["credential_not_configured"] is True
 
     # With API key + loopback mock Anthropic endpoint -> live confirmed usage logged
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
@@ -395,7 +398,10 @@ async def test_anthropic_safe_diagnostic_and_live_confirmed_usage(db_session, mo
 
         logs = (await db_session.execute(select(ProviderUsageLog).where(ProviderUsageLog.provider_id == "anthropic-claude"))).scalars().all()
         assert len(logs) == 1
-        assert logs[0].confirmed_cost_usd == resp.estimated_cost_usd
+        assert logs[0].estimated_cost_usd == resp.estimated_cost_usd
+        assert logs[0].confirmed_cost_usd is None
+        assert logs[0].input_tokens == 20
+        assert logs[0].input_tokens_estimated is False
 
 
 async def test_router_daily_monthly_spend_caps_and_failover(db_session, monkeypatch):
@@ -2049,10 +2055,10 @@ async def test_dynamic_team_skill_gap_analyzer_and_specialist_provisioning(
     settings = get_settings()
     monkeypatch.setattr(settings, "WORKSPACES_DIR", tmp_path / "workspaces")
 
-    required = ["postgresql", "alembic", "playwright", "quantum_ml"]
+    required = ["indexing", "migrations", "browser_use", "quantum_ml"]
     gap_before = await analyze_team_skill_gaps(db_session, required, divisions=["D02", "D06"])
     assert gap_before["active_employee_count"] >= 1
-    for skill in ("postgresql", "alembic", "playwright", "quantum_ml"):
+    for skill in ("indexing", "migrations", "browser_use", "quantum_ml"):
         assert skill in gap_before["missing_skills"]
 
     rec_ids = [r["template_id"] for r in gap_before["recommended_templates"]]
@@ -2443,7 +2449,7 @@ async def test_sandbox_docker_hardening_flags_and_fail_closed_when_cli_missing(
     assert docker_cmd[v_idx + 1] == f"{ws}:/workspace:rw"
     w_idx = docker_cmd.index("-w")
     assert docker_cmd[w_idx + 1] == "/workspace"
-    assert "python:3.11-slim" in docker_cmd
+    assert "aatm-sandbox:latest" in docker_cmd
     assert docker_cmd[-3:] == ["pytest", "-q", "test_app.py"]
 
     # Disallowed binary and unsupported sandbox mode both fail closed

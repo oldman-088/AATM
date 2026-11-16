@@ -26,9 +26,16 @@ function navButton(label: string) {
   return buttons[0]
 }
 
+async function renderWorkspace() {
+  const view = render(<App />)
+  await screen.findByText('AATM')
+  return view
+}
+
 describe('AATM Frontend & Multilingual RTL System', () => {
   beforeEach(() => {
     localStorage.clear()
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
     installWebSocketMock()
   })
 
@@ -39,9 +46,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('renders navigation and switches cleanly between EN (LTR), AR (RTL), and FA (RTL)', async () => {
     installFetchMock()
-    render(<App />)
-
-    expect(screen.getByText('AATM')).toBeInTheDocument()
+    await renderWorkspace()
     expect(document.documentElement.dir).toBe('ltr')
     expect(document.documentElement.lang).toBe('en')
 
@@ -66,8 +71,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('renders all 12 navigation tabs and keeps labels localized in each locale', async () => {
     installFetchMock()
-    render(<App />)
-
+    await renderWorkspace()
     // EN: every tab label is present in the sidebar
     for (const label of EN_NAV) {
       expect(navButton(label)).toBeInTheDocument()
@@ -90,7 +94,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('mounts every one of the 12 tabs without crashing', async () => {
     const { calls } = installFetchMock()
-    render(<App />)
+    await renderWorkspace()
 
     for (const label of EN_NAV) {
       fireEvent.click(navButton(label))
@@ -110,7 +114,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('switches tab content between English and Arabic renderings', async () => {
     installFetchMock()
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('Executive Dashboard'))
     await screen.findByText('Executive Command Center', { selector: 'h2' })
@@ -124,7 +128,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
   it('sends a Global Emergency Stop through apiFetch and then clears it', async () => {
     const { calls } = installFetchMock()
     localStorage.setItem('aatm_jwt_token', 'test-jwt')
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(screen.getByRole('button', { name: /Emergency Stop/ }))
 
@@ -164,7 +168,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('creates an AI employee with isolated workspace from the Agents tab', async () => {
     const { calls } = installFetchMock()
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('AI Employees & Org'))
     const nameInput = await screen.findByPlaceholderText('Employee Name (e.g., API Specialist)')
@@ -188,7 +192,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('localizes the AI employee creation form into Arabic (RTL)', async () => {
     installFetchMock()
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(screen.getByText('AR'))
     fireEvent.click(navButton('الموظفون'))
@@ -201,7 +205,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('launches an SDLC build from the Projects tab', async () => {
     const { calls } = installFetchMock()
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('Projects, SDLC & Memory'))
     fireEvent.change(await screen.findByPlaceholderText('Project Name'), { target: { value: 'AATM v2.1' } })
@@ -237,7 +241,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     ]
     const { calls } = installFetchMock({ '/api/v1/devices': devices })
     localStorage.setItem('aatm_jwt_token', 'test-jwt')
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('Monitoring, QA & Devices'))
     fireEvent.change(await screen.findByPlaceholderText('Node Name'), { target: { value: 'Edge Node' } })
@@ -260,7 +264,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
 
   it('never renders a localhost or 127.0.0.1 URL in the UI', async () => {
     installFetchMock()
-    const { container } = render(<App />)
+    const { container } = await renderWorkspace()
     for (const label of EN_NAV) {
       fireEvent.click(navButton(label))
       expect(container.innerHTML).not.toMatch(/localhost|127\.0\.0\.1/)
@@ -286,7 +290,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         ? { id: 'appr-1', status: 'pending' }
         : [{ id: 'appr-1', status: 'approved' }],
     })
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('GitHub Integration'))
 
@@ -338,7 +342,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         ? { id: 'appr-1', status: 'pending' }
         : [{ id: 'appr-1', status: 'approved' }],
     })
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.click(await screen.findByRole('button', { name: /^Issue$/ }))
@@ -375,7 +379,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
 
   it('shows pending and blocks submission until approval', async () => {
     installFetchMock()
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.change(await screen.findByPlaceholderText('Pull request title'), { target: { value: 'Pending PR' } })
     fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
@@ -389,7 +393,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         ? { id: 'branch-approval', status: 'pending' }
         : [{ id: 'branch-approval', status: 'approved', action_type: 'branch' }],
     })
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
     expect(screen.getByLabelText('From branch')).toHaveValue('main')
@@ -413,7 +417,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     mock.mock.mockImplementation(async (input: any, init: RequestInit = {}) => String(input) === '/api/v1/github/branches'
       ? { ok: false, status: 403, json: async () => ({ detail: 'Approval does not match the requested branch write' }) }
       : original(input, init))
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
     fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/rejected' } })
@@ -424,7 +428,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
 
   it('blocks branch submission while its approval is pending', async () => {
     const { calls } = installFetchMock()
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
     fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/a' } })
@@ -436,7 +440,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
 
   it('blocks GitHub writes until an approval id is present', async () => {
     const { calls } = installFetchMock()
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.change(await screen.findByPlaceholderText('Pull request title'), {
@@ -479,7 +483,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         logs,
       },
     })
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('Arena & AI Providers'))
 
@@ -508,7 +512,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         },
       },
     })
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('Arena & AI Providers'))
     expect(await screen.findByText('$8.00 / $50.00')).toBeInTheDocument()
     expect(screen.getByText('$42.00')).toBeInTheDocument()
@@ -521,7 +525,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       summary: { total_input_tokens: 0, total_output_tokens: 0, total_estimated_cost_usd: 0 }, logs: [],
       budget_summary: { daily_limit_usd: 0, monthly_limit_usd: 0, global_daily_spend_usd: 0, global_monthly_spend_usd: 0, daily_remaining_usd: 0, monthly_remaining_usd: 0 },
     } })
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('Arena & AI Providers'))
     expect(await screen.findAllByText('$0.00 / $0.00')).toHaveLength(2)
     expect(screen.getAllByText('$0.00').length).toBeGreaterThanOrEqual(2)
@@ -533,7 +537,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       '/api/v1/sessions': [{ id: 'session-1' }],
       '/api/v1/providers/p1/test': { provider_id: 'p1', model: 'model', content: 'ok' },
     })
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('Arena & AI Providers'))
     await screen.findByRole('option', { name: 'session-1' })
     fireEvent.change(screen.getByLabelText('Optional agent'), { target: { value: 'worker-1' } })
@@ -552,7 +556,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         { id: 'p2', name: 'P2', provider_type: 'anthropic', default_model: 'claude', credential_status: 'set', health_status: 'healthy', daily_limit_usd: 10 },
       ],
     })
-    render(<App />)
+    await renderWorkspace()
 
     fireEvent.click(navButton('Arena & AI Providers'))
     expect(await screen.findByText(/\$0\.02 \/ \$30\.00/)).toBeInTheDocument()
@@ -569,7 +573,7 @@ describe('Round 4 workflow and Git controls', () => {
 
   it('edits, reorders and submits a structured browser workflow with safe text output', async () => {
     const { calls } = installFetchMock({ '/api/v1/browsers': [{ id: 'profile-1', name: 'Profile One', status: 'stopped', mode: 'background', current_url: 'about:blank' }] })
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('Browsers & Userscripts'))
     fireEvent.change(await screen.findByLabelText('Browser profile'), { target: { value: 'profile-1' } })
     fireEvent.change(screen.getByLabelText('Engine'), { target: { value: 'automa' } })
@@ -590,7 +594,7 @@ describe('Round 4 workflow and Git controls', () => {
 
   it('creates and confirms removal of an agent worktree with authenticated requests', async () => {
     const { calls } = installFetchMock()
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.change(await screen.findByLabelText('Agent'), { target: { value: 'worker-1' } })
     fireEvent.change(screen.getByLabelText('Worktree branch'), { target: { value: 'worker-1/task' } })
@@ -605,7 +609,7 @@ describe('Round 4 workflow and Git controls', () => {
   it('requests approval and posts a PR comment', async () => {
     const { calls } = installFetchMock({ '/api/v1/approvals': (_path: string, init: RequestInit) => (init.method || 'GET') === 'POST'
       ? { id: 'comment-approval', status: 'pending' } : [{ id: 'comment-approval', status: 'approved' }] })
-    render(<App />)
+    await renderWorkspace()
     fireEvent.click(navButton('GitHub Integration'))
     fireEvent.click(await screen.findByRole('button', { name: 'PR Comment / Review' }))
     fireEvent.change(screen.getByLabelText('PR number'), { target: { value: '12' } })
@@ -616,5 +620,82 @@ describe('Round 4 workflow and Git controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit Comment' }))
     await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/github/prs/12/comments')?.body).toEqual({ approval_id: 'comment-approval', repo: 'oldman-088/AATM', event: 'COMMENT', body: 'Looks good.' }))
     expect(await screen.findByRole('link', { name: /issuecomment-1/ })).toBeInTheDocument()
+  })
+})
+
+describe('Phase 1 Frontend Security & Auth Gates', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    installWebSocketMock()
+  })
+
+  afterEach(async () => {
+    await settle()
+  })
+
+  it('renders an empty login form with no pre-filled credentials and blocks data/WS calls until authenticated', async () => {
+    const { calls } = installFetchMock()
+    const wsMock = installWebSocketMock()
+    render(<App />)
+
+    const emailInput = await screen.findByLabelText('Email') as HTMLInputElement
+    const passwordInput = screen.getByLabelText('Password') as HTMLInputElement
+    expect(emailInput.value).toBe('')
+    expect(passwordInput.value).toBe('')
+    expect(screen.queryByRole('button', { name: /Demo Director Login/i })).not.toBeInTheDocument()
+    expect(calls.some((c) => c.path.includes('/dashboard/overview'))).toBe(false)
+    expect(wsMock.instances.length).toBe(0)
+
+    fireEvent.change(emailInput, { target: { value: 'director@aatm.ai' } })
+    fireEvent.change(passwordInput, { target: { value: 'super-secure-password-2026' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+
+    await waitFor(() => expect(calls.some((c) => c.path === '/api/v1/dashboard/overview')).toBe(true))
+    expect(wsMock.instances.length).toBe(1)
+    wsMock.instances[0].onopen?.({})
+    expect(wsMock.instances[0].sent[0]).toBe(JSON.stringify({ token: 'test-jwt-token' }))
+  })
+
+  it('forces password change when must_change_password is true before revealing workspace', async () => {
+    localStorage.setItem('aatm_jwt_token', 'first-login-jwt')
+    const { calls } = installFetchMock({
+      '/api/v1/auth/me': {
+        id: 'admin-1',
+        email: 'admin@aatm.local',
+        full_name: 'Chief Engineering Director',
+        role: 'admin',
+        language: 'en',
+        theme: 'dark',
+        must_change_password: true,
+      },
+    })
+    render(<App />)
+
+    expect(await screen.findByText('Password Change Required')).toBeInTheDocument()
+    expect(calls.some((c) => c.path === '/api/v1/dashboard/overview')).toBe(false)
+
+    fireEvent.change(screen.getByLabelText('Current Password'), { target: { value: 'initial-pw-123' } })
+    fireEvent.change(screen.getByLabelText('New Password'), { target: { value: 'short' } })
+    fireEvent.change(screen.getByLabelText('Confirm New Password'), { target: { value: 'short' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Update Password' }))
+    expect(await screen.findByText('New password must be at least 12 characters')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('New Password'), { target: { value: 'NewStrongPassword!2026' } })
+    fireEvent.change(screen.getByLabelText('Confirm New Password'), { target: { value: 'DifferentPassword!2026' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Update Password' }))
+    expect(await screen.findByText('New passwords do not match')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Confirm New Password'), { target: { value: 'NewStrongPassword!2026' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Update Password' }))
+
+    await waitFor(() => {
+      const changeCall = calls.find((c) => c.path === '/api/v1/auth/change-password')
+      expect(changeCall?.authorization).toBe('Bearer first-login-jwt')
+      expect(changeCall?.body).toEqual({
+        current_password: 'initial-pw-123',
+        new_password: 'NewStrongPassword!2026',
+      })
+    })
+    await waitFor(() => expect(screen.getAllByText('Executive Dashboard').length).toBeGreaterThan(0))
   })
 })
