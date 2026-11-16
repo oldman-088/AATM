@@ -2,6 +2,14 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.0.0] - 2026-11-16 — Phase 8: Packaging, Installers, Docs & Release Verification
+
+### Changed
+- **Release `v3.0.0` Version Parity**: Updated `APP_VERSION` in `backend/app/core/config.py` and `frontend/package.json` to `3.0.0`.
+- **Single-Head Migration Gate**: Updated `scripts/ubuntu/verify.sh` and `scripts/windows/verify.ps1` to verify `alembic heads` resolves to a single head alongside `alembic upgrade head`.
+- **Documentation & Packaging**: Updated `README.md` and `docs/DEPLOYMENT.md` for `v3.0.0` installer-generated admin credentials, security posture, live PNG browser snapshots, hardened sandbox, and cross-platform verification gates.
+- **Phase 8 Test Suite**: Added `backend/tests/test_phase8_packaging_docs.py` verifying `3.0.0` version parity, `/api/health`, single Alembic head, `bash -n` syntax on all Ubuntu scripts, Windows PowerShell parity, Dockerfiles, CI workflow, and README credential hygiene.
+
 ## [2.6.0-phase7] - 2026-11-16 — Phase 7: Frontend UX, RTL/LTR & Real Live Status
 
 ### Added

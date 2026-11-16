@@ -53,7 +53,8 @@ if (-not (Test-Path $Py)) {
 Step "2/6 Database migrations"
 Push-Location backend
 & ..\.venv\Scripts\alembic.exe upgrade head
-if ($LASTEXITCODE -ne 0) { Fail "alembic upgrade head" } else { Ok "alembic upgrade head" }
+$AlembicHeads = (& ..\.venv\Scripts\alembic.exe heads)
+if ($LASTEXITCODE -ne 0 -or @($AlembicHeads).Count -ne 1) { Fail "alembic upgrade head" } else { Ok "alembic upgrade head (single head)" }
 Pop-Location
 
 Step "3/6 Backend & Bridge lint"
