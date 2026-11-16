@@ -407,4 +407,26 @@ export interface Translations {
     queue: string
     coordination: string
   }
+  arena: {
+    title: string
+    waiting: string
+    mockMode: string
+    approved: string
+    profiles: string
+    connector: string
+    generate: string
+    rotate: string
+    resume: string
+    review: string
+    tokenOnce: string
+    copy: string
+    copied: string
+    needsHuman: string
+    noProfiles: string
+    runUserscriptDisabled: string
+    statusReady: string
+    statusBusy: string
+    statusOffline: string
+    statusNeedsHuman: string
+  }
 }

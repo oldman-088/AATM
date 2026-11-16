@@ -428,13 +428,18 @@ class AgentLoop:
                     response: ProviderResponse = await self.provider_router.route_and_execute(
                         db,
                         request,
-                        preferred_provider_id=agent.provider_id,
+                        preferred_provider_id=await self._preferred_provider_id(db, agent),
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     raise RuntimeError(f"Provider routing failed: {type(exc).__name__}: {exc}") from exc
                 if not response.success:
+                    if (response.metadata or {}).get("code") == "needs_human":
+                        raise NeedsHumanError(
+                            str(response.metadata.get("browser_profile_id") or agent.browser_profile_id or ""),
+                            response.error_message or "Browser profile needs a human.",
+                        )
                     raise RuntimeError(response.error_message or "Provider routing returned no successful response.")
 
                 if await self._is_emergency_stopped(db, message, task, agent):
@@ -1306,6 +1311,22 @@ class AgentLoop:
         )
         await db.commit()
 
+    async def _block_for_human(self, db: AsyncSession, message: AgentMessage, task: Task, agent: Agent, exc: "NeedsHumanError") -> None:
+        await _block_for_human_impl(db, message, task, agent, exc)
+
+    @staticmethod
+    async def _preferred_provider_id(db: AsyncSession, agent: Agent) -> str | None:
+        """Phase 6: when the Arena connector is enabled (approved real Arena or the local mock),
+        workers with their own browser profile default to ``arena_browser``; their configured
+        API/local provider stays available as the router's alternative."""
+        from app.browser.arena_connector import arena_gate, ensure_arena_browser_provider
+
+        if agent.role == "worker" and agent.browser_profile_id and arena_gate()["enabled"]:
+            provider = await ensure_arena_browser_provider(db)
+            if provider.is_enabled:
+                return provider.id
+        return agent.provider_id
+
     async def _fail_unhandled(self, message_id: str, exc: Exception) -> None:
         async with self.session_factory() as db:
             await db.rollback()
@@ -1322,11 +1343,66 @@ class AgentLoop:
             if agent.is_emergency_stopped or task.status in {"blocked", "cancelled"}:
                 await self._pause_for_stop(db, message, task, agent, "Emergency stop took precedence over execution failure.")
                 return
+            if isinstance(exc, NeedsHumanError):
+                await self._block_for_human(db, message, task, agent, exc)
+                return
             error = f"{type(exc).__name__}: {_safe_excerpt(str(exc), 1_000)}"
             message.execution_status = "failed"
             message.response_payload = {**(message.response_payload or {}), "error": error}
             await task_scheduler.fail_and_retry_or_escalate(db, task, error)
             await self._store_outcome_memory(db, task, agent, "failed", error)
+
+
+class NeedsHumanError(RuntimeError):
+    """The employee's Arena browser profile hit a human check; nothing may continue automatically."""
+
+    def __init__(self, profile_id: str, message: str) -> None:
+        super().__init__(message)
+        self.profile_id = profile_id
+
+
+async def _block_for_human_impl(db: AsyncSession, message: AgentMessage, task: Task, agent: Agent, exc: NeedsHumanError) -> None:
+    from app.models import BrowserProfile, Notification
+
+    reason = _safe_excerpt(str(exc), 200)
+    message.execution_status = "paused"
+    message.claimed_by = None
+    message.claimed_at = None
+    message.response_payload = {**(message.response_payload or {}), "needs_human": True, "browser_profile_id": exc.profile_id}
+    task.status = "blocked"
+    task.lock_owner = None
+    task.locked_at = None
+    task.checkpoints = list(task.checkpoints or []) + [
+        {"ts": utcnow().isoformat(), "event": "needs_human", "browser_profile_id": exc.profile_id, "reason": reason}
+    ]
+    if agent.current_task_id == task.id:
+        agent.current_task_id = None
+    agent.status = "needs_human"
+    profile = await db.get(BrowserProfile, exc.profile_id) if exc.profile_id else None
+    if profile is not None:
+        profile.connector_status = "needs_human"
+        profile.needs_human_reason = reason
+    db.add(
+        Notification(
+            category="arena",
+            severity="critical",
+            title=f"{agent.name}: browser profile needs you",
+            message=f"Profile {exc.profile_id} stopped ({reason}). Resolve it in the browser, then press Resume in the Browser Wall.",
+            link="/browsers",
+        )
+    )
+    db.add(
+        AuditLog(
+            actor=agent.id,
+            action="arena.needs_human",
+            resource_type="browser_profile",
+            resource_id=exc.profile_id or None,
+            details={"task_id": task.id, "reason": reason},
+            severity="warning",
+        )
+    )
+    await db.commit()
+    await event_bus.emit("arena.needs_human", {"agent_id": agent.id, "profile_id": exc.profile_id, "task_id": task.id, "reason": reason})
 
 
 def _make_loop() -> AgentLoop:

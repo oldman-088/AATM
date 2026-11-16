@@ -706,6 +706,9 @@ class BrowserUseEngineAdapter(BaseBrowserEngineAdapter):
             "supported_steps": sorted(EXECUTABLE_WORKFLOW_STEPS),
             "delegates_to": "playwright",
             "status": "ready" if caps["chromium_installed"] else "not_implemented",
+            # Phase 6: NOT the browser-use runtime - an alias for AATM's own Playwright step executor.
+            "label": "Playwright alias (browser-use name only)",
+            "native_engine": False,
         }
 
     async def execute_workflow(
@@ -742,6 +745,9 @@ class OpenBrowserEngineAdapter(BaseBrowserEngineAdapter):
             "supported_steps": sorted(EXECUTABLE_WORKFLOW_STEPS),
             "delegates_to": "playwright",
             "status": "ready" if caps["chromium_installed"] else "not_implemented",
+            # Phase 6: NOT the OpenBrowser runtime - an alias for AATM's own Playwright step executor.
+            "label": "Playwright alias (OpenBrowser name only)",
+            "native_engine": False,
         }
 
     async def execute_workflow(

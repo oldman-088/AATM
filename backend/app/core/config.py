@@ -131,6 +131,19 @@ class Settings(BaseSettings):
 
     # Supports 20+ concurrent AI employees subject to host capacity
     MAX_CONCURRENT_WORKERS: int = 25
+    # Phase 6 - Arena browser connector (Tampermonkey userscript <-> local bridge).
+    # Real Arena is contacted ONLY when both flags are true AND an approval reference is recorded.
+    ARENA_CONNECTOR_ENABLED: bool = False
+    ARENA_AUTOMATION_APPROVED: bool = False
+    ARENA_APPROVAL_REFERENCE: str = ""
+    ARENA_DOMAINS: str = "arena.ai"
+    # Local mock Arena page for end-to-end testing at any time (e.g. http://127.0.0.1:4100/mock-arena/).
+    ARENA_MOCK_URL: str = ""
+    ARENA_MIN_REQUEST_INTERVAL_SECONDS: float = Field(default=20.0, ge=0)
+    ARENA_DAILY_CAP_PER_PROFILE: int = Field(default=100, ge=1)
+    ARENA_REPLY_TIMEOUT_SECONDS: float = Field(default=600.0, gt=0)
+    # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
+    ARENA_DOM_SELECTORS: str = ""
     # Phase 5 - True parallelism / autoscaling
     DEFAULT_ACTIVE_WORKERS: int = Field(default=4, ge=1)
     AUTO_SCALE_MODE: str = Field(default="approval", pattern="^(approval|automatic|off)$")

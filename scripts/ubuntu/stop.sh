@@ -55,6 +55,7 @@ stop_service() {
 
 stop_service backend "uvicorn"
 stop_service frontend "vite"
+stop_service bridge "bridge.server"
 
 # Remote worker daemons started via start-worker.sh.
 for pid_file in "$ROOT_DIR"/logs/worker-*.pid; do

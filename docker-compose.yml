@@ -76,6 +76,10 @@ services:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (32+ chars)}
       DEFAULT_ACTIVE_WORKERS: ${DEFAULT_ACTIVE_WORKERS:-4}
       AUTO_SCALE_MODE: ${AUTO_SCALE_MODE:-approval}
+      ARENA_CONNECTOR_ENABLED: ${ARENA_CONNECTOR_ENABLED:-false}
+      ARENA_AUTOMATION_APPROVED: ${ARENA_AUTOMATION_APPROVED:-false}
+      ARENA_APPROVAL_REFERENCE: ${ARENA_APPROVAL_REFERENCE:-}
+      ARENA_MOCK_URL: ${ARENA_MOCK_URL:-}
       AATM_SANDBOX_MODE: process
       AATM_ALLOW_PROCESS_SANDBOX: "true"
     ports:
@@ -108,7 +112,10 @@ services:
       # Listens on all interfaces *inside* the compose network only; published on localhost.
       ARENA_BRIDGE_HOST: 0.0.0.0
       ARENA_BRIDGE_TOKEN: ${ARENA_BRIDGE_TOKEN:-}
-      ARENA_AUTOMATION_APPROVED: "false"
+      # Real Arena stays off unless the owner records the approval (all three are required).
+      ARENA_CONNECTOR_ENABLED: ${ARENA_CONNECTOR_ENABLED:-false}
+      ARENA_AUTOMATION_APPROVED: ${ARENA_AUTOMATION_APPROVED:-false}
+      ARENA_APPROVAL_REFERENCE: ${ARENA_APPROVAL_REFERENCE:-}
     ports:
       - "127.0.0.1:${ARENA_BRIDGE_PORT:-4100}:4100"
     restart: unless-stopped

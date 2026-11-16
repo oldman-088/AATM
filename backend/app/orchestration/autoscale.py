@@ -199,8 +199,8 @@ class AutoscaleService:
                         id=profile_id,
                         name=f"Extra worker {n} profile",
                         agent_id=agent_id,
-                        profile_dir=str(settings.BROWSER_PROFILES_DIR / profile_id),
-                        mode="background",
+                        profile_dir=str(settings.BROWSER_PROFILES_DIR / agent_id),
+                        mode="visible",
                         status="ready",
                     )
                 )
@@ -238,6 +238,21 @@ class AutoscaleService:
             await event_bus.emit("scaling.workers_added", {"agents": [a.id for a in created], "reason": reason})
         return created
 
+    @staticmethod
+    async def _close_profile(db: AsyncSession, agent: Agent) -> None:
+        """Scale-down closes the extra worker's browser profile (kept on disk for re-use)."""
+        if not agent.browser_profile_id:
+            return
+        profile = await db.get(BrowserProfile, agent.browser_profile_id)
+        if profile is None or profile.status not in ("running", "launching"):
+            return
+        from app.browser.manager import browser_manager
+
+        try:
+            await browser_manager.stop_profile(db, profile, actor="autoscaler")
+        except Exception as exc:  # noqa: BLE001 - best effort; the worker is already disabled
+            logger.warning("Could not close profile %s on scale-down: %s", profile.id, type(exc).__name__)
+
     async def _last_activity(self, db: AsyncSession, agent: Agent):
         last_task = (
             await db.execute(select(func.max(Task.updated_at)).where(Task.assigned_agent_id == agent.id))
@@ -258,6 +273,7 @@ class AutoscaleService:
                 agent.is_enabled = False
                 agent.status = "offline"
                 retired.append(agent.id)
+                await self._close_profile(db, agent)
         if retired:
             db.add(
                 AuditLog(

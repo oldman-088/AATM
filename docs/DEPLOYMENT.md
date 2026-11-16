@@ -37,6 +37,13 @@ The `worker`, `backend` and `bridge` containers are non-root, `read_only`, `cap_
 `MAX_CONCURRENT_WORKERS=25`, `SCALE_DOWN_IDLE_MINUTES=30`, `PROVIDER_CONCURRENCY_LIMITS=id=N,...`.
 Load test: `.venv/bin/python scripts/load_test.py --tasks 20` (scripted model, no provider spend).
 
+### Arena browser connector (Phase 6)
+Real Arena stays **off** until the owner records Arena's approval. Until then every real-Arena path returns `not_enabled`.
+1. **Test any time with the mock page:** set `ARENA_MOCK_URL=http://127.0.0.1:4100/mock-arena/` and `ARENA_BRIDGE_TOKEN` in `.env`, then run `scripts/ubuntu/start.sh` (it also starts the loopback bridge). In **Browsers → Arena browser connector**, generate an employee's userscript, review it, install it in Tampermonkey in that employee's own Chrome profile, and open the mock URL.
+2. **Real Arena (owner's decision, after approval):** set `ARENA_CONNECTOR_ENABLED=true`, `ARENA_AUTOMATION_APPROVED=true` and `ARENA_APPROVAL_REFERENCE=<your approval reference>` for **both** the backend and the bridge. Set `ARENA_DOMAINS` and, if needed, `ARENA_DOM_SELECTORS` (JSON with `input`, `send`, `assistant_message`, `user_message`, `busy`) to match the real chat page. Regenerate the userscripts (the new `@match` includes the approved domain), use **Open for sign-in** and sign in to Arena yourself in each profile.
+3. If a profile shows **Needs human**, resolve it yourself in that browser window, then click **Resume**. AATM never solves verification checks, never reads cookies or tokens and never rotates accounts.
+4. Limits: `ARENA_MIN_REQUEST_INTERVAL_SECONDS` (default 20), `ARENA_DAILY_CAP_PER_PROFILE` (default 100), `ARENA_REPLY_TIMEOUT_SECONDS` (default 600).
+
 ## 3. Ubuntu Installation & Run
 ```bash
 chmod +x scripts/ubuntu/*.sh

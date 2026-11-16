@@ -138,8 +138,10 @@ async def create_dynamic_employee(
                 id=bp_id,
                 name=f"{name} Browser",
                 agent_id=emp_id,
-                profile_dir=str(settings.BROWSER_PROFILES_DIR / bp_id),
-                mode="background",
+                # Phase 6: one persistent profile per employee under BROWSER_PROFILES_DIR/<agent_id>,
+                # visible so the human signs in to Arena manually (AATM never handles credentials).
+                profile_dir=str(settings.BROWSER_PROFILES_DIR / emp_id),
+                mode="visible",
                 status="ready",
             )
         )

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Planted FAKE credentials: tests assert these never leave the page (logs, DB, answers). -->
+<meta name="csrf-token" content="MOCK-PLANTED-CSRF-9d41c2">
+<title>Mock Arena (local test page)</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  #log { min-height: 200px; border: 1px solid #334155; border-radius: 8px; padding: 8px; margin-block: 12px; }
+  [data-role] { padding: 6px; margin-block: 4px; border-radius: 6px; white-space: pre-wrap; }
+  [data-role="user"] { background: #1e293b; }
+  [data-role="assistant"] { background: #064e3b; }
+  textarea { width: 100%; min-height: 80px; box-sizing: border-box; }
+  .banner { background: #7c2d12; padding: 8px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mock Arena</h1>
+  <p>Local stand-in for the Arena chat page. It is NOT Arena and never contacts the internet.</p>
+  <div id="log" data-generating="false"></div>
+  <form id="composer">
+    <textarea id="prompt" aria-label="Message" placeholder="Message"></textarea>
+    <button type="submit" id="send">Send</button>
+  </form>
+</main>
+<script>
+(function () {
+  // Planted FAKE secrets (cookie + storage). A compliant userscript never reads them.
+  document.cookie = "arena_session=MOCK-PLANTED-COOKIE-5be7aa; path=/";
+  try { window.localStorage.setItem("auth_token", "MOCK-PLANTED-STORAGE-1c08ef"); } catch (e) {}
+
+  var params = new URLSearchParams(location.search);
+  var replies = [];
+  try {
+    var raw = params.get("replies");
+    if (raw) {
+      var b64 = raw.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      replies = JSON.parse(decodeURIComponent(escape(atob(b64))));
+    }
+  } catch (e) { replies = []; }
+  var delayMs = parseInt(params.get("delay_ms") || "300", 10);
+  var checkAfter = parseInt(params.get("human_check_after") || "-1", 10);
+  var sent = 0;
+  var log = document.getElementById("log");
+
+  function add(role, text) {
+    var div = document.createElement("div");
+    div.setAttribute("data-role", role);
+    div.textContent = text;
+    log.appendChild(div);
+    return div;
+  }
+
+  function showHumanCheck() {
+    var box = document.createElement("div");
+    box.className = "banner";
+    box.setAttribute("data-aatm-human-check", "true");
+    box.textContent = "Please verify you are human to continue.";
+    document.querySelector("main").prepend(box);
+  }
+
+  document.getElementById("composer").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var input = document.getElementById("prompt");
+    var text = input.value;
+    if (!text) return;
+    input.value = "";
+    add("user", text);
+    sent += 1;
+    if (checkAfter >= 0 && sent > checkAfter) { showHumanCheck(); return; }
+    log.setAttribute("data-generating", "true");
+    var reply = replies.length ? replies[Math.min(sent - 1, replies.length - 1)] : ("Mock answer #" + sent);
+    var bubble = add("assistant", "");
+    var half = Math.floor(reply.length / 2);
+    // Stream in two halves so a userscript must wait for the *complete* answer.
+    setTimeout(function () { bubble.textContent = reply.slice(0, half); }, Math.floor(delayMs / 2));
+    setTimeout(function () { bubble.textContent = reply; log.setAttribute("data-generating", "false"); }, delayMs);
+  });
+})();
+</script>
+</body>
+</html>

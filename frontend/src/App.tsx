@@ -24,6 +24,7 @@ import { I18nProvider, useI18n } from './i18n/I18nContext'
 import type { Language } from './i18n/types'
 import { apiFetch, getToken } from './lib/api'
 import { AgentsView, DashboardView, ManagerChatView, TasksView } from './views/CoreViews'
+import { ArenaConnectorPanel } from './views/ArenaViews'
 import {
   AgentMessagingPanel,
   ArenaAccountsSessionsPanel,
@@ -565,6 +566,7 @@ function AATMWorkspace() {
           {tab === 'workspaces' && <WorkspacesView agents={agents} />}
           {tab === 'browsers' && (
             <div className="space-y-6">
+              <ArenaConnectorPanel />
               <UserscriptsEnginesPanel engines={browserEngines} userscripts={userscripts} onReload={() => loadAll()} />
               <BrowserWallView browsers={browsers} capabilities={browserCaps} onReload={() => loadAll()} />
             </div>

@@ -36,7 +36,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 BRIDGE_VERSION = "2.4.0"
@@ -539,6 +539,18 @@ def create_app(
     )
     bridge_app.state.session_store = store
 
+    from bridge.connector import ConnectorError, ConnectorHub, register_connector_routes
+
+    hub = ConnectorHub()
+    bridge_app.state.connector_hub = hub
+    register_connector_routes(bridge_app, hub)
+    mock_page = Path(__file__).resolve().parent / "mock_arena" / "index.html"
+
+    @bridge_app.get("/mock-arena/", response_class=HTMLResponse, include_in_schema=False)
+    async def mock_arena_page() -> HTMLResponse:
+        """Local mock Arena page for end-to-end tests (ARENA_MOCK_URL). Not Arena; no network."""
+        return HTMLResponse(mock_page.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
     @bridge_app.get("/health", dependencies=[Depends(_verify_bearer_auth)])
     async def health() -> dict[str, Any]:
         token_configured = bool(os.environ.get("ARENA_BRIDGE_TOKEN", "").strip())
@@ -555,6 +567,7 @@ def create_app(
             "session_ttl_seconds": store.session_ttl_seconds,
             "models": list(DEFAULT_MODELS),
             "active_sessions": await store.count(),
+            "connector_profiles": len(hub.profiles),
             "uptime_seconds": round(time.monotonic() - started_at, 2),
         }
 
@@ -565,8 +578,41 @@ def create_app(
         x_aatm_account_id: str | None = Header(default=None),
         x_aatm_agent_id: str | None = Header(default=None),
         x_aatm_conversation_id: str | None = Header(default=None),
+        x_aatm_profile_id: str | None = Header(default=None),
     ) -> dict[str, Any] | StreamingResponse:
         meta = dict(body.metadata or {})
+        if body.model == "arena_browser":
+            profile_id = (x_aatm_profile_id or "").strip() or str(meta.get("browser_profile_id") or "").strip()
+            if not profile_id:
+                raise HTTPException(status_code=422, detail={"code": "profile_required", "message": "X-AATM-Profile-Id is required for arena_browser."})
+            prompt = "\n\n".join(m.content for m in body.messages if m.content)
+            timeout = float(os.environ.get("ARENA_REPLY_TIMEOUT_SECONDS", "600") or 600)
+            try:
+                answer = await hub.dispatch(profile_id, prompt, timeout=timeout)
+            except ConnectorError as exc:
+                raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message}) from exc
+            completion = {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "arena_browser",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": _estimate_tokens(prompt),
+                    "completion_tokens": _estimate_tokens(answer),
+                    "total_tokens": _estimate_tokens(prompt) + _estimate_tokens(answer),
+                },
+                "metadata": {"provider_mode": "arena_browser", "profile_id": profile_id, "agent_id": x_aatm_agent_id},
+            }
+            if body.stream:
+                async def one_shot() -> AsyncIterator[str]:
+                    chunk = {**completion, "object": "chat.completion.chunk",
+                             "choices": [{"index": 0, "delta": {"role": "assistant", "content": answer}, "finish_reason": "stop"}]}
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(one_shot(), media_type="text/event-stream")
+            return completion
         session_id = (
             (x_aatm_session_id or "").strip()
             or (body.session_id or "").strip()
@@ -880,6 +926,7 @@ def create_app(
             "account_scope": account_filter,
             "metrics": metrics,
             "sessions": sessions,
+            "connector": {"profiles": hub.summaries()},
         }
 
     @bridge_app.get("/v1/sessions/{session_id}", dependencies=[Depends(_verify_bearer_auth)])

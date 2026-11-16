@@ -41,6 +41,11 @@ _ENV_REF_PATTERN = re.compile(r"^env:([A-Z_][A-Z0-9_]*)$")
 _PROVIDER_KEYS_IN_SANDBOX_DENYLIST = frozenset({"ANTHROPIC_API_KEY"})
 
 BOUND_CREDENTIAL_ENVS: dict[str, str] = {"ARENA_BRIDGE_TOKEN": "arena_local_bridge"}
+# Provider types that may carry a bound credential (Phase 6: the Arena browser connector also
+# talks only to the same local bridge).
+BOUND_CREDENTIAL_PROVIDER_TYPES: dict[str, frozenset[str]] = {
+    "ARENA_BRIDGE_TOKEN": frozenset({"arena_local_bridge", "arena_browser"}),
+}
 
 SERVER_SECRET_ENV_DENYLIST: frozenset[str] = frozenset(
     (set(SENSITIVE_ENV_EXACT) - _PROVIDER_KEYS_IN_SANDBOX_DENYLIST - set(BOUND_CREDENTIAL_ENVS))
@@ -138,7 +143,8 @@ def _bound_credential_allowed(env_name: str, provider_type: str | None, endpoint
     required_type = BOUND_CREDENTIAL_ENVS.get(env_name)
     if required_type is None:
         return False
-    if provider_type is not None and provider_type != required_type:
+    allowed_types = BOUND_CREDENTIAL_PROVIDER_TYPES.get(env_name, frozenset({required_type}))
+    if provider_type is not None and provider_type not in allowed_types:
         return False
     settings = get_settings()
     target = _origin(endpoint_url or settings.ARENA_BRIDGE_URL)

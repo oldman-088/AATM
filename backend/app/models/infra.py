@@ -66,6 +66,11 @@ class BrowserProfile(Base):
     memory_mb: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     engine_mode: Mapped[str] = mapped_column(String(32), default="playwright", nullable=False)
     last_snapshot_svg: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 6 Arena connector: only the SHA-256 of the per-profile userscript token is stored.
+    connector_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    connector_token_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    connector_status: Mapped[str] = mapped_column(String(24), default="offline", server_default="offline", nullable=False)
+    needs_human_reason: Mapped[str | None] = mapped_column(String(240), nullable=True)
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
