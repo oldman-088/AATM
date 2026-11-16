@@ -42,9 +42,93 @@ Load test: `.venv/bin/python scripts/load_test.py --tasks 20` (scripted model, n
 ### Arena browser connector (Phase 6)
 Real Arena stays **off** until the owner sets `ARENA_CONNECTOR_ENABLED=true`. Until then every real-Arena path returns `not_enabled`.
 1. **Test any time with the mock page:** set `ARENA_MOCK_URL=http://127.0.0.1:4100/mock-arena/` and `ARENA_BRIDGE_TOKEN` in `.env`, then run `scripts/ubuntu/start.sh` (it also starts the loopback bridge). In **Browsers → Arena browser connector**, generate an employee's userscript, review it, install it in Tampermonkey in that employee's own Chrome profile, and open the mock URL.
-2. **Real Arena (owner's decision):** set `ARENA_CONNECTOR_ENABLED=true` for **both** the backend and the bridge. Set `ARENA_ALLOWED_ORIGINS` and, if needed, `ARENA_DOM_SELECTORS` (JSON with `input`, `send`, `assistant_message`, `user_message`, `busy`) to match the real chat page. Regenerate the userscripts (the new `@match` includes each allowed origin), use **Open for sign-in** and sign in to Arena yourself in each profile.
+2. **Real Arena (owner's decision):** set `ARENA_CONNECTOR_ENABLED=true` for **both** the backend and the bridge. Set `ARENA_ALLOWED_ORIGINS` and, if needed, `ARENA_DOM_SELECTORS` (JSON with `input`, `send`, `assistant_message`, `user_message`, `busy`, `agent_input`, `agent_reply`) to match the real page. Regenerate the userscripts (the new `@match` includes each allowed origin), use **Open for sign-in** and sign in to Arena yourself in each profile.
 3. If a profile shows **Needs human**, resolve it yourself in that browser window, then click **Resume**. AATM never solves verification checks, never reads cookies or tokens and never rotates accounts.
 4. Timeout: `ARENA_REPLY_TIMEOUT_SECONDS` (default 600). There are no request intervals, daily caps or profile-count limits.
+5. Arena Agent mode (one Arena Agent session per employee, GitHub PR workflow): see **وضع وكيل Arena (التشغيل الكامل)** below.
+
+## وضع وكيل Arena (التشغيل الكامل)
+
+في هذا الوضع يعمل كل موظف من خلال **جلسة Arena Agent خاصة به** داخل **ملف Chrome مستقل** عبر سكربت Tampermonkey يتصل بالجسر المحلي (`bridge/`). وكيل Arena ينشئ فرعه `arena/*` على GitHub ويودِع ويدفع ويفتح طلب الدمج بنفسه؛ أما AATM فيكتب برومبت المهمة، ويراقب الجلسة، ويكتشف طلب الدمج عبر GitHub API، ويمرّر التقرير إلى المراجِع، ويرسل التصحيحات إلى **الجلسة نفسها**، ولا يدمج إلا بعد موافقة المالك في مركز الموافقات.
+
+```
+مهمة → برومبت كامل ([AATM-<task_id>]) → new_session → submit → مراقبة → Keep working … → خامل
+     → GitHub API: طلب دمج عنوانه يبدأ بـ [AATM-<task_id>] على فرع arena/* → ربطه بالمهمة (pr_open)
+     → read_last_reply = تقرير الوكيل → المراجِع يقارن التقرير بالـ diff الحقيقي والاختبارات
+     → تصحيحات إلى الجلسة نفسها → تقرير جديد → مراجعة → موافقة المالك → gh pr merge --squash
+     → المهمة التالية لهذا الموظف تبدأ دائماً بـ new_session
+```
+
+### 1. ملفات Chrome المستقلة لكل موظف
+- أنشئ ملف Chrome منفصلاً لكل موظف (Chrome → صورة الملف الشخصي → **إضافة**). لا يوجد حد لعدد الملفات: كل موظف عامل لديه ملف متصفح يمكن تفعيله، والموظفون الذين يضيفهم المُوسِّع التلقائي يرثون الوضع.
+- في **كل** ملف، يدوياً:
+  1. سجّل الدخول إلى Arena بنفسك.
+  2. اربط حساب GitHub المناسب من داخل Arena بنفسك.
+  3. تأكد أن هذا الحساب يصل إلى المستودع المستهدف (يرى المستودع ويستطيع إنشاء فرع وطلب دمج).
+- لا يقرأ AATM ملفات تعريف الارتباط أو الرموز أو كلمات المرور، ولا ينقل بيانات اعتماد GitHub عبر السكربت.
+
+### 2. إعدادات Chrome (موفّر الذاكرة والتبويبات الخلفية)
+- يعلّق Chrome التبويبات غير النشطة أو يبطئها لتوفير الذاكرة (**Memory Saver**)، ويقلّل مؤقتات التبويبات الخلفية.
+- لملفات Arena: افتح `chrome://settings/performance` وأوقف **Memory Saver**، أو أضف نطاق Arena إلى قائمة «المواقع التي تبقى نشطة دائماً».
+- أبقِ نافذة Arena لكل موظف **مفتوحة ونشطة** (يُفضَّل نافذة مستقلة لا تبويباً مخفياً). السكربت يبلّغ عن حدث `tab_slept` إذا توقّف التبويب أكثر من 90 ثانية، ويعيد الإبلاغ عن حالته عند عودته.
+
+### 3. Tampermonkey والسكربت الخاص بكل موظف
+1. ثبّت إضافة **Tampermonkey** من متجر Chrome في كل ملف موظف.
+2. في AATM: **المتصفحات → وكيل Arena — التشغيل الكامل** → بطاقة الموظف → **إنشاء السكربت**. السكربت مخصّص لهذا الملف وحده ويحمل رمزاً لا يظهر إلا مرة واحدة (يُخزَّن تجزئته SHA-256 فقط).
+3. راجع السكربت، ثم Tampermonkey → **Create a new script** → الصق → احفظ، داخل ملف Chrome الخاص بهذا الموظف فقط.
+4. أعد تحميل صفحة Arena؛ تصبح بطاقة الموظف «متصل».
+5. **التحديث أو التدوير:** زر **تدوير السكربت** يصدر رمزاً جديداً ويُبطل القديم؛ استبدل السكربت في Tampermonkey. افعل ذلك بعد كل تحديث لـ AATM يغيّر نسخة السكربت أو عند الشك في تسرّب الرمز.
+6. حوّل الموظف إلى **وكيل Arena** (زر «التحويل إلى وكيل Arena»، أو «كل الموظفين ← وكيل Arena»).
+
+### 4. متغيرات البيئة (`.env`)
+مطلوبة:
+```
+ARENA_CONNECTOR_ENABLED=true          # للخادم وللجسر معاً
+ARENA_ALLOWED_ORIGINS=https://arena.ai
+ARENA_BRIDGE_TOKEN=<openssl rand -hex 24>   # لا تضعه في Git
+ARENA_BRIDGE_URL=http://127.0.0.1:4100
+```
+اختيارية:
+```
+ARENA_AGENT_NEW_SESSION_URL=          # فارغ = الضغط على زر New في الصفحة؛ أو رابط صفحة جلسة جديدة على نطاق مسموح
+ARENA_AGENT_MAX_KEEP_WORKING=0        # 0 = متابعة غير محدودة
+ARENA_REPLY_TIMEOUT_SECONDS=600
+ARENA_DOM_SELECTORS=                  # JSON فقط إذا اختلفت الصفحة الحقيقية (مفاتيح: input, send, assistant_message, user_message, busy, agent_input, agent_reply)
+ARENA_MOCK_URL=                       # للاختبار المحلي فقط: http://127.0.0.1:4100/mock-arena/
+```
+- يحتاج الخادم إلى `gh` مسجّل الدخول (`gh auth login`) بحساب يقرأ المستودع ويستطيع الدمج: AATM يكتشف طلبات الدمج والفروع والفروقات عبر GitHub API، ويدمج بـ `gh pr merge --squash` بعد الموافقة فقط.
+- `MAX_CONCURRENT_WORKERS` حدّ لقدرة الجهاز وليس حصة Arena (`0` = بلا حد).
+- لا توجد إعدادات حصص أو فترات بين الطلبات أو حد يومي أو حد لعدد الملفات.
+
+### 5. اختبار المحددات (Selector Test)
+- من بطاقة الموظف: **اختبار المحددات**. الاختبار للقراءة فقط: لا يكتب ولا يضغط ولا يرسل شيئاً.
+- التقرير يبيّن: صندوق الكتابة (composer)، زر الإرسال، زر الإيقاف، زر Keep working، زر Yes، زر New، آخر رد، وجود تحقق بشري، حالة الاتصال، ونسخة السكربت، مع `ok`.
+- إذا ظهر `ok: false` أو اختلفت الصفحة الحقيقية عن الافتراضات: **توقّف واطلب من المالك فحص صفحة Arena الحقيقية**. لا تخمّن المحددات؛ ضع المحددات المؤكَّدة في `ARENA_DOM_SELECTORS` ثم أعد إنشاء السكربت وأعد الاختبار.
+
+### 6. التشغيل التدريجي
+1. ابدأ **بملف واحد ومهمة صغيرة واحدة**: «إرسال مهمة» من بطاقة الموظف، ثم راقب: جلسة جديدة → إرسال → Keep working → طلب دمج `[AATM-…]` → تقرير → مراجعة → موافقة → دمج.
+2. بعد نجاحها فعّل بقية الملفات تدريجياً. هذه خطوة تحقق موصى بها، **وليست قيداً دائماً** على عدد الملفات.
+
+### 7. التدخل البشري والاستئناف
+- عند ظهور تحقق بشري (CAPTCHA/تحقق)، أو جدار تسجيل الدخول، أو **عدم حدوث أي تغيير ذي معنى لمدة 20 دقيقة**: تتوقف جلسة هذا الموظف وحده، وتصبح المهمة `blocked`، ويظهر تنبيه «مطلوب تدخل بشري».
+- عالج المشكلة بنفسك في نافذة Chrome الخاصة بالموظف، ثم اضغط **استئناف الجلسة**. يعيد AATM المهمة إلى الطابور ويستأنف مراقبة **الجلسة نفسها** دون إعادة إرسال البرومبت.
+- AATM لا يتجاوز أي تحقق بشري ولا يتهرب من أنظمة الحماية.
+
+### 8. استكشاف الأخطاء
+| المشكلة | ما يحدث | ماذا تفعل |
+|---|---|---|
+| انقطاع المتصفح | الحالة `offline`؛ المراقبة تتعافى تلقائياً عند عودة الاتصال (حدث `recovered`) | أبقِ النافذة مفتوحة؛ إن استمر 20 دقيقة تصبح `needs_human` |
+| فشل اتصال السكربت بالجسر | البطاقة «غير متصل» | تأكد أن الجسر يعمل على `127.0.0.1:4100`، وأن `ARENA_CONNECTOR_ENABLED=true` للجسر أيضاً، وأعد تدوير السكربت |
+| محددات مفقودة | `composer_not_found` أو اختبار محددات `ok: false` | توقّف واطلب فحص الصفحة الحقيقية (القسم 5) |
+| استعادة الجلسة | إعادة تحميل الصفحة أو إعادة تشغيل الخادم | الحالة محفوظة في `arena_sessions`؛ المراقبة تُستأنف تلقائياً |
+| فشل الإرسال | `send_failed`/`busy`؛ بعد 3 محاولات فاشلة تصبح `needs_human` | افحص الصفحة ثم «استئناف الجلسة» |
+| مشاكل مصادقة GitHub | لا يُكتشف طلب الدمج أو يفشل الدمج | `gh auth status` على الخادم؛ وتحقق من ربط GitHub داخل Arena لهذا الملف |
+| عدم اكتشاف طلب الدمج | بعد تذكيرين للوكيل تُصعَّد المهمة إلى المالك (لا يُعلَن إنجاز زائف) | تأكد أن عنوان طلب الدمج يبدأ بـ `[AATM-<task_id>]` وأن `project.repo_url` يشير إلى GitHub |
+| جلسة متوقفة | لا تغيير ذا معنى 20 دقيقة → `needs_human` + إشعار | افحص النافذة ثم «استئناف الجلسة» |
+| دمج خارج AATM | يُسجَّل `arena.pr_merged_without_approval` وتُصعَّد الجلسة | راجع سجل التدقيق |
+
+### 9. البث المباشر للكود
+كل إيداع جديد على فرع `arena/*` الخاص بالمهمة يُقرأ عبر GitHub compare API ويُبث كحدث `agent.code` (منقّح من الأسرار، محدود الحجم، مرة كل 10 ثوانٍ على الأكثر لكل جلسة، مرتبط بالموظف والمهمة والفرع). زر **عرض التغييرات المباشرة** يعرض الملفات والإيداعات والأسطر المضافة والمحذوفة ورابط المقارنة على GitHub. الفروع لا تُربط بالمهمة قبل اكتشاف طلب الدمج الخاص بها.
 
 ## 3. Ubuntu Installation & Run
 ```bash
@@ -164,7 +248,7 @@ scripts/demo_e2e.sh --repo you/aatm-demo-x    # or use an existing throwaway rep
 - **Language:** the UI opens in Arabic (RTL) by default. Switch between العربية, فارسی and English in the header; your choice is remembered. Set `VITE_DEFAULT_LANGUAGE` at build time to change the first-visit default.
 - **Dashboard (mission control):** the architecture strip, live counters, the 8-step workflow timeline of the active project, the live agent log, the errors & recovery panel, and the colored employee cards with Pause / Emergency stop / Replace.
 - **Manager chat:** write a directive (Arabic or English). The manager splits it into tasks. High-risk directives go to the Approval Center.
-- **Browsers:** the Arena connector panel (approval status, per-employee userscript generation and rotation, Resume after `needs_human`) and the Browser Wall.
+- **Browsers:** the Arena Agent dashboard (per-employee sessions, controls and live diff), the Arena connector panel (connector status, per-employee userscript generation and rotation, Resume after `needs_human`) and the Browser Wall.
 - **Git:** pull requests with diffs and reviewer results, **Request merge approval**, and **Merge** after a human approves in **Approvals**.
 - **Agents:** team scaling (approval-gated extra workers), employee creation and provider assignment.
 
@@ -174,11 +258,11 @@ This guide connects providers using environment configuration and the existing A
 
 #### How AATM stores provider settings
 
-AATM accepts these provider types: `arena_local_bridge`, `anthropic_claude`, and `openai_compatible` (plus the legacy `arena_agent` stub). OpenRouter and Ollama use the generic `openai_compatible` adapter; there are no separate OpenRouter or Ollama adapter types.
+AATM accepts these provider types: `arena_local_bridge`, `anthropic_claude`, and `openai_compatible` (plus `arena_agent`, which drives each employee's own Arena Agent session through the connector). OpenRouter and Ollama use the generic `openai_compatible` adapter; there are no separate OpenRouter or Ollama adapter types.
 
 Provider credentials are **environment-variable references**, never inline values. For example, store `env:OPENROUTER_API_KEY` in the provider record and make `OPENROUTER_API_KEY` available to the backend process. The API rejects inline credential values. Keep `.env` out of Git, restrict its permissions (`chmod 600 .env`), and use a secret manager for deployments.
 
-The seeded provider rows are `arena-local-bridge` and `anthropic-claude`. The `arena-agent` runtime is not implemented. Provider records can be created or updated through authenticated `POST /api/v1/providers`; the current Providers view has health-check and test controls but no create/edit form.
+The seeded provider rows are `arena-local-bridge` and `anthropic-claude`. The `arena-agent` provider is the Arena Agent engine: it needs `ARENA_CONNECTOR_ENABLED=true` (or `ARENA_MOCK_URL`) and connected agent-mode profiles. Provider records can be created or updated through authenticated `POST /api/v1/providers`; the current Providers view has health-check and test controls but no create/edit form.
 
 For local API examples, set `BASE` to the AATM backend URL and obtain an access token using an account configured in AATM. Do not use example/default credentials in a deployed system:
 
@@ -333,10 +417,10 @@ curl -fsS -X POST "$BASE/api/v1/providers/PROVIDER_ID/test" \
 
 #### Important limits
 
-A valid provider row and a green bridge `/health` do not prove that model generation is configured. The bundled bridge has no `/ready` endpoint: when no upstream is configured, it returns a deterministic local reference response rather than calling a model. The default `arena_agent` row reports that its runtime is not implemented. Real manager planning and employee execution require an enabled provider that can return a valid response for AATM's prompts. No provider key or model availability is bundled with this repository.
+A valid provider row and a green bridge `/health` do not prove that model generation is configured. The bundled bridge has no `/ready` endpoint: when no upstream is configured, it returns a deterministic local reference response rather than calling a model. The `arena_agent` row reports `not_enabled` until the connector is on and reports how many Arena Agent profiles are connected. Real manager planning and employee execution require an enabled provider that can return a valid response for AATM's prompts. No provider key or model availability is bundled with this repository.
 
 ## 11. Known Limitations
-- Real Arena use has not been exercised: it stays off until the owner records Arena's approval, and the real chat page's DOM selectors must then be set with `ARENA_DOM_SELECTORS`. The connector is tested end to end against the local mock page.
+- Real Arena use has not been exercised: it stays off until the owner sets `ARENA_CONNECTOR_ENABLED=true`, and the real page's selectors must be confirmed with the Selector Test (and set with `ARENA_DOM_SELECTORS` if they differ). The connector and the full Arena Agent workflow are tested end to end against the local mock pages.
 - Memory search uses Postgres full-text search (`simple` configuration, no stemming). Embedding/vector search (pgvector) is not implemented. SQLite deployments use the bounded keyword fallback.
 - Windows 11 `.ps1` scripts were written to match the Ubuntu scripts but are not executed by the Linux verification gate.
 - The secret scanner is regex based: an unrecognised credential format will not be detected.
