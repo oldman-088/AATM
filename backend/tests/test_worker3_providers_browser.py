@@ -2372,7 +2372,7 @@ async def test_sandbox_docker_hardening_flags_and_fail_closed_when_cli_missing(
     assert docker_cmd[v_idx + 1] == f"{ws}:/workspace:rw"
     w_idx = docker_cmd.index("-w")
     assert docker_cmd[w_idx + 1] == "/workspace"
-    assert "python:3.11-slim" in docker_cmd
+    assert "aatm-sandbox:latest" in docker_cmd
     assert docker_cmd[-3:] == ["pytest", "-q", "test_app.py"]
 
     # Disallowed binary and unsupported sandbox mode both fail closed

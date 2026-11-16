@@ -33,12 +33,15 @@ async def auth_headers(client: AsyncClient):
     return {"Authorization": f"Bearer {token}"}
 
 
-async def test_health_and_dashboard_overview(client: AsyncClient):
+async def test_health_and_dashboard_overview(client: AsyncClient, auth_headers):
     h = await client.get("/api/health")
     assert h.status_code == 200
     assert h.json()["status"] == "ok"
 
-    ov = await client.get("/api/v1/dashboard/overview")
+    unauth_ov = await client.get("/api/v1/dashboard/overview")
+    assert unauth_ov.status_code == 401
+
+    ov = await client.get("/api/v1/dashboard/overview", headers=auth_headers)
     assert ov.status_code == 200
     data = ov.json()
     assert data["kpis"]["total_agents"] == 5
@@ -58,7 +61,7 @@ async def test_multilingual_preferences_and_auth_guard(client: AsyncClient, auth
 
 
 async def test_task_dag_idempotency_and_orchestration(client: AsyncClient, auth_headers):
-    projects = (await client.get("/api/v1/projects")).json()
+    projects = (await client.get("/api/v1/projects", headers=auth_headers)).json()
     project_id = projects[0]["id"]
 
     # Create parent task with idempotency key
@@ -107,7 +110,7 @@ async def test_task_dag_idempotency_and_orchestration(client: AsyncClient, auth_
     # Run orchestration cycle — parent dispatched, child still queued due to dependency
     cyc1 = await client.post("/api/v1/orchestration/cycle", headers=auth_headers)
     assert cyc1.status_code == 200
-    child_state = [t for t in (await client.get("/api/v1/tasks")).json() if t["id"] == child_id][0]
+    child_state = [t for t in (await client.get("/api/v1/tasks", headers=auth_headers)).json() if t["id"] == child_id][0]
     assert child_state["status"] == "queued"
 
     # Complete parent -> child becomes dispatchable
@@ -121,7 +124,7 @@ async def test_task_dag_idempotency_and_orchestration(client: AsyncClient, auth_
 
     cyc2 = await client.post("/api/v1/orchestration/cycle", headers=auth_headers)
     assert cyc2.status_code == 200
-    child_state_2 = [t for t in (await client.get("/api/v1/tasks")).json() if t["id"] == child_id][0]
+    child_state_2 = [t for t in (await client.get("/api/v1/tasks", headers=auth_headers)).json() if t["id"] == child_id][0]
     assert child_state_2["status"] == "in_progress"
 
     # Complete child so worker returns to idle
@@ -141,7 +144,7 @@ async def test_providers_and_browser_profiles_lifecycle(client: AsyncClient, aut
     assert dry.status_code == 200
     assert dry.json()["success"] is True
 
-    usage = await client.get("/api/v1/providers/usage")
+    usage = await client.get("/api/v1/providers/usage", headers=auth_headers)
     assert usage.status_code == 200
     assert len(usage.json()["logs"]) >= 1
 
@@ -173,11 +176,11 @@ async def test_providers_and_browser_profiles_lifecycle(client: AsyncClient, aut
 
 
 async def test_memory_git_protected_branch_approval_and_qa(client: AsyncClient, auth_headers):
-    mem = await client.get("/api/v1/memory?q=protected")
+    mem = await client.get("/api/v1/memory?q=protected", headers=auth_headers)
     assert mem.status_code == 200
     assert len(mem.json()) >= 1
 
-    git_info = await client.get("/api/v1/git/status")
+    git_info = await client.get("/api/v1/git/status", headers=auth_headers)
     assert git_info.status_code == 200
     workflows = git_info.json()["workflows"]
     assert len(workflows) >= 1
@@ -189,7 +192,7 @@ async def test_memory_git_protected_branch_approval_and_qa(client: AsyncClient, 
     assert blocked.json()["allowed"] is False
 
     # Approve via Approval Center
-    approvals = (await client.get("/api/v1/approvals?status=pending")).json()
+    approvals = (await client.get("/api/v1/approvals?status=pending", headers=auth_headers)).json()
     assert len(approvals) >= 1
     dec = await client.post(
         f"/api/v1/approvals/{approvals[0]['id']}/decide",
@@ -204,7 +207,7 @@ async def test_memory_git_protected_branch_approval_and_qa(client: AsyncClient, 
     assert allowed.json()["allowed"] is True
 
     # QA & Self-Healing
-    qa = await client.get("/api/v1/qa/summary")
+    qa = await client.get("/api/v1/qa/summary", headers=auth_headers)
     assert qa.status_code == 200
     assert qa.json()["security_scan"]["status"] == "passed"
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.db.session import get_db
@@ -10,7 +10,7 @@ from app.models import Agent, AuditLog, ChatMessage, Task, User
 from app.orchestration.scheduler import task_scheduler
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
 
-router = APIRouter(tags=["agents-tasks-orchestration"])
+router = APIRouter(tags=["agents-tasks-orchestration"], dependencies=[Depends(get_current_user)])
 
 
 def _serialize_agent(a: Agent) -> dict:
@@ -83,7 +83,7 @@ async def list_agents(db: AsyncSession = Depends(get_db)):
     return [_serialize_agent(a) for a in res.scalars().all()]
 
 
-@router.patch("/agents/{agent_id}")
+@router.patch("/agents/{agent_id}", dependencies=[Depends(require_role("admin", "operator"))])
 async def update_agent(
     agent_id: str,
     body: AgentUpdate,
@@ -110,7 +110,7 @@ async def update_agent(
     return _serialize_agent(agent)
 
 
-@router.post("/agents/{agent_id}/restart")
+@router.post("/agents/{agent_id}/restart", dependencies=[Depends(require_role("admin", "operator"))])
 async def restart_agent(
     agent_id: str,
     user: User = Depends(get_current_user),
@@ -147,7 +147,7 @@ async def list_tasks(
     return [_serialize_task(t) for t in res.scalars().all()]
 
 
-@router.post("/tasks", status_code=201)
+@router.post("/tasks", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_task(
     body: TaskCreate,
     user: User = Depends(get_current_user),
@@ -187,7 +187,7 @@ async def create_task(
     return _serialize_task(task)
 
 
-@router.patch("/tasks/{task_id}")
+@router.patch("/tasks/{task_id}", dependencies=[Depends(require_role("admin", "operator"))])
 async def update_task(
     task_id: str,
     body: TaskUpdate,
@@ -217,7 +217,7 @@ async def update_task(
     return _serialize_task(task)
 
 
-@router.post("/orchestration/cycle")
+@router.post("/orchestration/cycle", dependencies=[Depends(require_role("admin", "operator"))])
 async def trigger_orchestration(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -246,7 +246,7 @@ async def list_chat(project_id: str | None = None, db: AsyncSession = Depends(ge
     ]
 
 
-@router.post("/chat", status_code=201)
+@router.post("/chat", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def send_chat(
     body: ChatSendRequest,
     user: User = Depends(get_current_user),

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.db.session import get_db
@@ -20,7 +20,7 @@ from app.models import (
 from app.qa.engine import qa_engine
 from app.schemas.common import ApprovalCreate, ApprovalDecision, SettingUpdate
 
-router = APIRouter(tags=["governance-qa-dashboard"])
+router = APIRouter(tags=["governance-qa-dashboard"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/dashboard/overview")
@@ -78,7 +78,7 @@ async def list_approvals(status: str | None = None, db: AsyncSession = Depends(g
     return list(res.scalars().all())
 
 
-@router.post("/approvals", status_code=201)
+@router.post("/approvals", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
 async def create_approval(
     body: ApprovalCreate,
     user: User = Depends(get_current_user),
@@ -101,7 +101,7 @@ async def create_approval(
     return app
 
 
-@router.post("/approvals/{approval_id}/decide")
+@router.post("/approvals/{approval_id}/decide", dependencies=[Depends(require_role("admin", "operator"))])
 async def decide_approval(
     approval_id: str,
     body: ApprovalDecision,
@@ -141,7 +141,7 @@ async def list_notifications(db: AsyncSession = Depends(get_db)):
     return list(res.scalars().all())
 
 
-@router.post("/notifications/{notif_id}/read")
+@router.post("/notifications/{notif_id}/read", dependencies=[Depends(require_role("admin", "operator"))])
 async def mark_notification_read(
     notif_id: str,
     user: User = Depends(get_current_user),
@@ -163,7 +163,7 @@ async def qa_summary(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/qa/self-heal")
+@router.post("/qa/self-heal", dependencies=[Depends(require_role("admin", "operator"))])
 async def trigger_self_healing(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -177,7 +177,7 @@ async def list_settings(db: AsyncSession = Depends(get_db)):
     return {s.key: {"value": s.value, "description": s.description, "updated_at": s.updated_at} for s in res.scalars().all()}
 
 
-@router.put("/settings/{key}")
+@router.put("/settings/{key}", dependencies=[Depends(require_role("admin", "operator"))])
 async def update_setting(
     key: str,
     body: SettingUpdate,

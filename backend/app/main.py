@@ -1,24 +1,33 @@
+import asyncio
+import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import jwt
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 
 import app.models  # noqa: F401
 from app.api.routes import auth, devices, governance, infra, orchestration, platform, projects
 from app.browser.manager import browser_manager
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_runtime_security
 from app.core.events import event_bus
+from app.core.security import decode_access_token
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
+from app.models import User
+
+WS_AUTH_TIMEOUT_SECONDS = 5.0
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_runtime_security(get_settings())
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
@@ -38,7 +47,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,6 +58,7 @@ app.add_middleware(
 async def http_exception_handler(_: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
+        headers=exc.headers,
         content={
             "detail": exc.detail,
             "error": {
@@ -77,12 +87,58 @@ app.include_router(orchestration.router, prefix=API_PREFIX)
 app.include_router(infra.router, prefix=API_PREFIX)
 app.include_router(governance.router, prefix=API_PREFIX)
 app.include_router(platform.router, prefix=API_PREFIX)
+app.include_router(platform.public_router, prefix=API_PREFIX)
 app.include_router(devices.router, prefix=API_PREFIX)
+
+
+async def _authenticate_websocket(websocket: WebSocket) -> User | None:
+    token = (websocket.query_params.get("token") or "").strip()
+    if not token:
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SECONDS)
+        except (asyncio.TimeoutError, WebSocketDisconnect):
+            return None
+        stripped = raw.strip()
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    token = str(parsed.get("token") or "").strip()
+            except json.JSONDecodeError:
+                token = ""
+        else:
+            token = stripped
+
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+    except jwt.PyJWTError:
+        return None
+    if not payload or not payload.get("sub"):
+        return None
+
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(User).where(User.email == str(payload["sub"])))
+        user = res.scalar_one_or_none()
+        if not user or not user.is_active:
+            return None
+        return user
 
 
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
-    await event_bus.connect(websocket)
+    await websocket.accept()
+    user = await _authenticate_websocket(websocket)
+    if user is None:
+        try:
+            await websocket.close(code=4401, reason="Unauthorized")
+        except Exception:
+            pass
+        return
+
+    await event_bus.connect(websocket, accept=False)
+    await websocket.send_text(json.dumps({"type": "auth.ok", "actor": user.email}))
     try:
         while True:
             await websocket.receive_text()

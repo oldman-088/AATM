@@ -22,9 +22,34 @@ echo "[AATM Ubuntu Install] Running database migrations..."
 (cd backend && ../.venv/bin/alembic upgrade head)
 
 if [[ ! -f .env ]]; then
-  echo "[AATM Ubuntu Install] Creating .env from .env.example (review it before production use)."
-  cp .env.example .env
+  echo "[AATM Ubuntu Install] Generating .env with cryptographically random secrets..."
+  GENERATED_ADMIN_PW="$(
+    .venv/bin/python - <<'PY'
+import secrets
+from pathlib import Path
+
+secret_key = secrets.token_hex(32)
+admin_pw = secrets.token_urlsafe(18)
+bridge_tok = secrets.token_hex(24)
+pg_pw = secrets.token_hex(20)
+
+content = Path(".env.example").read_text(encoding="utf-8")
+replacements = {
+    "SECRET_KEY=change-this-to-a-secure-random-32-plus-char-secret": f"SECRET_KEY={secret_key}",
+    "DEFAULT_ADMIN_PASSWORD=change-me-immediately": f"DEFAULT_ADMIN_PASSWORD={admin_pw}",
+    "ARENA_BRIDGE_TOKEN=": f"ARENA_BRIDGE_TOKEN={bridge_tok}",
+    "POSTGRES_PASSWORD=": f"POSTGRES_PASSWORD={pg_pw}",
+}
+for old, new in replacements.items():
+    content = content.replace(old, new)
+
+Path(".env").write_text(content, encoding="utf-8")
+print(admin_pw)
+PY
+  )"
   chmod 600 .env
+  echo "[AATM Ubuntu Install] Initial admin account: admin@aatm.local"
+  echo "[AATM Ubuntu Install] Generated admin password (shown once — save it now): ${GENERATED_ADMIN_PW}"
 fi
 
 if command -v npm >/dev/null 2>&1; then

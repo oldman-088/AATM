@@ -31,6 +31,11 @@ class UserPreferencesUpdate(BaseModel):
     theme: str | None = Field(default=None, pattern="^(light|dark|system)$")
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=2, max_length=140)
     description: str = ""

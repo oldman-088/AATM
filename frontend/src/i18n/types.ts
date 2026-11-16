@@ -25,6 +25,15 @@ export interface Translations {
     quickAdmin: string
     signedInAs: string
     authRequiredHint: string
+    changePasswordTitle: string
+    changePasswordSubtitle: string
+    currentPassword: string
+    newPassword: string
+    confirmPassword: string
+    updatePassword: string
+    passwordMismatch: string
+    passwordTooShort: string
+    passwordChangeFailed: string
   }
   common: {
     refresh: string

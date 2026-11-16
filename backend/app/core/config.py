@@ -68,8 +68,9 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = 8000
+    CORS_ORIGINS: str = "http://localhost:5173"
 
     DATABASE_URL: str = f"sqlite+aiosqlite:///{ROOT_DIR / 'data' / 'aatm.db'}"
     SYNC_DATABASE_URL: str = f"sqlite:///{ROOT_DIR / 'data' / 'aatm.db'}"
@@ -96,18 +97,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GITHUB_WEBHOOK_SECRET", "AATM_GITHUB_WEBHOOK_SECRET"),
     )
     AATM_SANDBOX_MODE: str = Field(
-        default="process",
+        default="docker",
         validation_alias=AliasChoices("AATM_SANDBOX_MODE", "SANDBOX_MODE"),
     )
+    AATM_ALLOW_PROCESS_SANDBOX: bool = False
     SANDBOX_MEMORY_MB: int = 512
     SANDBOX_CPU_SECONDS: int = 30
     SANDBOX_MAX_PROCS: int = 64
-    SANDBOX_DOCKER_IMAGE: str = "python:3.11-slim"
+    SANDBOX_DOCKER_IMAGE: str = "aatm-sandbox:latest"
 
     # Supports 20+ concurrent AI employees subject to host capacity
     MAX_CONCURRENT_WORKERS: int = 25
     MAX_CONCURRENT_BROWSERS: int = 10
     STALLED_TASK_MINUTES: int = 15
+
+    def get_cors_origins(self) -> list[str]:
+        origins = [o.strip() for o in (self.CORS_ORIGINS or "").split(",") if o.strip()]
+        return origins or ["http://localhost:5173"]
 
     @property
     def AATM_GITHUB_WEBHOOK_SECRET(self) -> str:
@@ -124,6 +130,48 @@ class Settings(BaseSettings):
         if self.DATABASE_URL.startswith(_PG_PREFIXES):
             return normalize_sync_database_url(self.DATABASE_URL)
         return normalize_sync_database_url(self.SYNC_DATABASE_URL)
+
+
+_PLACEHOLDER_SECRETS = frozenset(
+    {
+        "aatm-dev-secret-change-in-production-32bytes-minimum",
+        "change-this-to-a-secure-random-32-plus-char-secret",
+        "changeme",
+        "secret",
+    }
+)
+_PLACEHOLDER_PASSWORDS = frozenset(
+    {
+        "aatm-admin-2026",
+        "change-me-immediately",
+        "admin",
+        "password",
+    }
+)
+
+
+def validate_runtime_security(settings: Settings) -> None:
+    """Fail closed at startup if `ENVIRONMENT=production` uses weak/default settings."""
+    if (settings.ENVIRONMENT or "").strip().lower() != "production":
+        return
+
+    secret = (settings.SECRET_KEY or "").strip()
+    if len(secret) < 32 or secret in _PLACEHOLDER_SECRETS or secret.lower().startswith("change-"):
+        raise RuntimeError(
+            "Refusing to start in production with a default, placeholder, or short (<32 chars) SECRET_KEY."
+        )
+
+    admin_pw = (settings.DEFAULT_ADMIN_PASSWORD or "").strip()
+    if len(admin_pw) < 12 or admin_pw in _PLACEHOLDER_PASSWORDS or admin_pw.lower().startswith("change-"):
+        raise RuntimeError(
+            "Refusing to start in production with a default or weak (<12 chars) DEFAULT_ADMIN_PASSWORD."
+        )
+
+    sandbox_mode = (settings.AATM_SANDBOX_MODE or "docker").strip().lower()
+    if sandbox_mode == "process" and not settings.AATM_ALLOW_PROCESS_SANDBOX:
+        raise RuntimeError(
+            "Refusing to run with AATM_SANDBOX_MODE=process in production unless AATM_ALLOW_PROCESS_SANDBOX=true is explicitly set."
+        )
 
 
 @lru_cache
