@@ -85,6 +85,20 @@ DEFAULT_STOP_PHRASES = [
     "prove you are human",
     "complete the captcha",
     "complete the check",
+    # Login wall: the human must sign in to Arena (and connect GitHub) in this profile.
+    "sign in to continue",
+    "log in to continue",
+]
+# A disconnected Arena session is reported as ``offline`` (not a human check): the page usually
+# recovers by itself, and the backend restores monitoring when it does.
+DEFAULT_OFFLINE_SELECTORS = ["[data-aatm-offline]"]
+DEFAULT_OFFLINE_PHRASES = [
+    "connection lost",
+    "lost connection",
+    "you are offline",
+    "session disconnected",
+    "session expired",
+    "reconnecting",
 ]
 DEFAULT_DOM = {
     "input": "textarea",
@@ -156,6 +170,7 @@ class ProfileState:
     connection_id: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
+    command_ids: set = field(default_factory=set)  # pending ids that are Arena Agent commands
     # Arena Agent session state, as reported by the userscript's page monitor.
     agent_state: str = "offline"
     agent_state_since: float | None = None  # wall clock (time.time) of the last state change
@@ -293,6 +308,9 @@ class ConnectorHub:
         if state.agent_state == "needs_human":
             state.set_agent_state("ready" if state.ws is not None else "offline", "resumed by a human")
         state.record("resumed", "needs_human cleared by a human")
+        if state.ws is not None:
+            # The page stopped itself when it saw the check; tell it to monitor again.
+            asyncio.ensure_future(self._send_quiet(state, {"type": "resumed"}))
         logger.info("connector profile reset by human profile=%s status=%s", profile_id, state.status)
         return state
 
@@ -340,6 +358,8 @@ class ConnectorHub:
                 "status": state.status,
                 "mode": state.mode,
                 "commands": list(AGENT_COMMANDS),
+                "offline_selectors": DEFAULT_OFFLINE_SELECTORS,
+                "offline_phrases": DEFAULT_OFFLINE_PHRASES,
             }))
             logger.info("connector connected profile=%s", state.profile_id)
             while True:
@@ -436,13 +456,25 @@ class ConnectorHub:
         state.needs_human_reason = reason[:200]
         state.set_agent_state("needs_human", state.needs_human_reason)
         logger.warning("connector needs_human profile=%s", state.profile_id)
-        self._fail_pending(state, ConnectorError("needs_human", f"Profile needs a human: {state.needs_human_reason}", 409))
+        # A chat prompt in flight is abandoned; an Agent command keeps waiting for the page's own
+        # result (e.g. a submit that was sent just before the check appeared really was sent).
+        self._fail_pending(state, ConnectorError("needs_human", f"Profile needs a human: {state.needs_human_reason}", 409),
+                           include_commands=False)
 
     @staticmethod
-    def _fail_pending(state: ProfileState, error: ConnectorError) -> None:
-        for future in list(state.pending.values()):
+    def _fail_pending(state: ProfileState, error: ConnectorError, *, include_commands: bool = True) -> None:
+        for request_id, future in list(state.pending.items()):
+            if not include_commands and request_id in state.command_ids:
+                continue
             if not future.done():
                 future.set_exception(error)
+
+    @staticmethod
+    async def _send_quiet(state: ProfileState, payload: dict[str, Any]) -> None:
+        ws = state.ws
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.send_text(json.dumps(payload))
 
     @staticmethod
     async def _close(state: ProfileState, code: int, reason: str) -> None:
@@ -528,6 +560,7 @@ class ConnectorHub:
             request_id = uuid.uuid4().hex
             future: asyncio.Future = asyncio.get_running_loop().create_future()
             state.pending[request_id] = future
+            state.command_ids.add(request_id)
             state.commands_total += 1
             started = time.monotonic()
             state.record(f"command:{command}")
@@ -539,10 +572,9 @@ class ConnectorHub:
                 raise ConnectorError("timeout", f"The Arena page did not finish '{command}' in time.", 504) from exc
             finally:
                 state.pending.pop(request_id, None)
+                state.command_ids.discard(request_id)
             if command == "selector_test":
                 state.selector_report = {k: v for k, v in result.items() if k != "request_id"}
-            if command == "keep_working" and result.get("clicked"):
-                state.keep_working_clicks += 1
             logger.info("connector command profile=%s command=%s ok seconds=%.1f", profile_id, command, time.monotonic() - started)
             return result
 

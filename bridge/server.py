@@ -551,6 +551,14 @@ def create_app(
         """Local mock Arena page for end-to-end tests (ARENA_MOCK_URL). Not Arena; no network."""
         return HTMLResponse(mock_page.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
 
+    mock_agent_page = mock_page.parent / "agent.html"
+
+    @bridge_app.get("/mock-arena/agent/", response_class=HTMLResponse, include_in_schema=False)
+    async def mock_arena_agent_page() -> HTMLResponse:
+        """Local mock Arena *Agent* page (composer, Send/Stop, Keep working, New, human-check,
+        login-wall and disconnected variants). Not Arena; no network."""
+        return HTMLResponse(mock_agent_page.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+
     @bridge_app.get("/health", dependencies=[Depends(_verify_bearer_auth)])
     async def health() -> dict[str, Any]:
         token_configured = bool(os.environ.get("ARENA_BRIDGE_TOKEN", "").strip())

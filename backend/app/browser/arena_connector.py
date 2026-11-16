@@ -31,7 +31,7 @@ from app.models import Agent, AIProvider, BrowserProfile
 SCRIPT_VERSION = "2.0.0"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
-DOM_KEYS = ("input", "send", "assistant_message", "user_message", "busy")
+DOM_KEYS = ("input", "send", "assistant_message", "user_message", "busy", "agent_input", "agent_reply")
 NOT_ENABLED_MESSAGE = (
     "Arena connector is not enabled: set ARENA_CONNECTOR_ENABLED=true (with ARENA_ALLOWED_ORIGINS), "
     "or set ARENA_MOCK_URL to test against the local mock page."
@@ -160,7 +160,8 @@ def build_userscript(profile: BrowserProfile, agent: Agent | None, token: str) -
             f"// @name         AATM Arena Connector - {profile.id}",
             "// @namespace    aatm.arena.connector",
             f"// @version      {SCRIPT_VERSION}",
-            f"// @description  Sends one AATM prompt at a time to this page for {agent.name if agent else profile.id} and returns the complete answer. Stops on any human check.",
+            f"// @description  Connects this Arena tab to the local AATM bridge for {agent.name if agent else profile.id}: runs one prompt or Arena Agent command at a time, reports the session state, and stops on any human check.",
+            "// @author       AATM (page automation adapted from arena-auto-continue by Anurag Kumar Nishad, MIT)",
             *[f"// @match        {p}" for p in patterns],
             "// @grant        none",
             "// @run-at       document-idle",
@@ -177,44 +178,489 @@ def build_userscript(profile: BrowserProfile, agent: Agent | None, token: str) -
     return header + "\n\n" + USERSCRIPT_BODY.replace("__AATM_CONFIG__", json.dumps(config))
 
 
-# The body only: reads the page's chat DOM (selectors come from the bridge config), types the
-# prompt, waits for the answer to be complete and stable, and reports. It never touches cookies,
-# storage, credentials or network APIs other than the one local WebSocket.
+# The body only. Chat mode: types one prompt, waits for the complete answer and reports it.
+# Agent mode: monitors the Arena Agent page (MutationObserver + 1 s tick) and runs the bridge's
+# commands (new_session, submit, keep_working, read_last_reply, selector_test). Human-check and
+# offline detection rules arrive from the bridge as data. It never touches cookies, storage,
+# credentials or network APIs other than the one local WebSocket.
 USERSCRIPT_BODY = r"""(function () {
   "use strict";
+  // AATM Arena connector userscript (generated per employee profile).
+  //
+  // Page automation adapted from "Arena Auto Continue" by Anurag Kumar Nishad
+  // (https://github.com/anuragkumarnishad/arena-auto-continue), MIT License,
+  // Copyright (c) 2026 Anurag Kumar Nishad. See THIRD_PARTY_NOTICES.md in the AATM repository.
+  // Adapted parts: element visibility check, composer detection, React-safe text insertion,
+  // send-button scoring with form-submit / Enter fallbacks and send verification, stop-button and
+  // "Keep working" detection, feedback-widget dismissal, composer cleanup after a failed send,
+  // idle double-check, sleeping-tab detection and single-instance cleanup.
+  //
+  // Differences on purpose: AATM decides every action through the local bridge (no timers that
+  // send messages on their own), the human-verification guard only stops and reports, and the
+  // script talks to nothing but the one local WebSocket. It never reads site data or
+  // credentials and has no randomised "human-like" timing.
   var CFG = __AATM_CONFIG__;
+  if (window.self !== window.top) return;  // main frame only
+  if (window.__aatmConnectorCleanup) { try { window.__aatmConnectorCleanup(); } catch (e) {} }
+
   var socket = null;
   var settings = null;
-  var busy = false;
-  var stopped = false;
+  var busy = false;      // chat mode: one prompt in flight
+  var stopped = false;   // a human check was seen: nothing runs until the bridge resumes us
   var retryMs = 2000;
+  var closed = false;
+  var timers = [];
+  var observer = null;
+  var IDLE_MS = 5000;    // "idle" = no Stop button for five seconds after generating
+  var mon = { state: null, reason: null, busyVisible: false, lastBusyAt: 0, submittedAt: 0, prevTick: 0, dirty: false, newSessionAt: 0 };
 
+  /* ---------------------------------------------------------------- DOM helpers */
   function q(sel) { try { return sel ? document.querySelector(sel) : null; } catch (e) { return null; } }
   function qa(sel) { try { return sel ? Array.prototype.slice.call(document.querySelectorAll(sel)) : []; } catch (e) { return []; } }
   function send(obj) { if (socket && socket.readyState === 1) socket.send(JSON.stringify(obj)); }
   function status(s, reason) { send({ type: "status", status: s, reason: reason || null }); }
+  function notify(kind, detail) { send({ type: "event", kind: kind, detail: detail ? String(detail).slice(0, 200) : null }); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function textOf(el) { return ((el && (el.innerText || el.textContent)) || "").trim(); }
+  function labelOf(el) {
+    return ((el.getAttribute("aria-label") || "") + " " + (el.title || "") + " " + (el.getAttribute("data-testid") || "")).toLowerCase();
+  }
+
+  function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) return false;
+    var cs = window.getComputedStyle(el);
+    return cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) > 0.05;
+  }
+
+  function buttons() { return qa("button, [role='button']"); }
+
+  function findInput() {
+    var custom = settings && settings.dom && settings.dom.agent_input;
+    if (custom) { var c = qa(custom).filter(isVisible); if (c.length) return c[c.length - 1]; }
+    var selectors = ["textarea", "div[contenteditable='true']", "[role='textbox']"];
+    var candidates = [];
+    for (var i = 0; i < selectors.length; i++) {
+      var els = qa(selectors[i]);
+      for (var j = 0; j < els.length; j++) {
+        var rect = els[j].getBoundingClientRect();
+        if (rect.width > 50 && rect.height > 10 && rect.bottom > 0 && rect.top < window.innerHeight && isVisible(els[j])) {
+          candidates.push({ el: els[j], top: rect.top });
+        }
+      }
+    }
+    if (!candidates.length) return null;
+    candidates.sort(function (a, b) { return b.top - a.top; });  // the composer is the lowest box
+    return candidates[0].el;
+  }
+
+  function findKeepWorking() {
+    var els = buttons();
+    for (var i = 0; i < els.length; i++) {
+      if (/keep\s*working/i.test(els[i].textContent || "") && isVisible(els[i])) return els[i];
+    }
+    return null;
+  }
+
+  function findYesButton() {  // closes the "Was this task successful?" widget
+    var els = buttons();
+    for (var i = 0; i < els.length; i++) {
+      if (/^yes$/i.test(textOf(els[i])) && isVisible(els[i])) return els[i];
+    }
+    return null;
+  }
+
+  function hasStopButton() {
+    var busySel = settings && settings.dom && settings.dom.busy;
+    if (busySel && q(busySel)) return true;
+    var els = qa("button");
+    for (var i = 0; i < els.length; i++) {
+      var label = labelOf(els[i]);
+      var text = textOf(els[i]).toLowerCase();
+      if ((/stop|abort/.test(label) || /^stop( generating| response)?$/.test(text)) && isVisible(els[i])) return true;
+    }
+    return false;
+  }
+
+  function findNewButton() {
+    var els = qa("a, button, [role='button']");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (!isVisible(el)) continue;
+      var text = textOf(el);
+      var label = labelOf(el);
+      if (/^\+?\s*new(\s+(chat|session|task|agent|conversation))?$/i.test(text) ||
+          /\bnew (chat|session|task|agent|conversation)\b/.test(label)) return el;
+    }
+    return null;
+  }
+
+  function findSendButton(inputEl, includeDisabled) {
+    var form = inputEl.closest && inputEl.closest("form");
+    var container = inputEl.closest && inputEl.closest("[class*='composer'], [class*='chat'], [class*='prompt']");
+    var scopes = [];
+    if (form) scopes.push(form);
+    if (container && container !== form) scopes.push(container);
+    scopes.push(document);
+    function score(btn, inForm) {
+      if ((btn.disabled && !includeDisabled) || !isVisible(btn)) return -1;
+      var label = (labelOf(btn) + " " + btn.textContent).toLowerCase();
+      if (/stop|abort/.test(label)) return -1;
+      var s = 0;
+      if (/send|submit/.test(label)) s += 6;
+      if (btn.type === "submit") s += 4;
+      if (btn.querySelector("svg")) s += 1;
+      if (inForm) s += 1;
+      return s;
+    }
+    for (var i = 0; i < scopes.length; i++) {
+      var scope = scopes[i];
+      var best = null, bestScore = 0;
+      var list = scope.querySelectorAll("button");
+      for (var j = 0; j < list.length; j++) {
+        var sc = score(list[j], scope === form);
+        if (sc > bestScore) { best = list[j]; bestScore = sc; }
+      }
+      if (best && bestScore >= (scope === document ? 6 : 4)) return best;
+    }
+    if (form) {
+      var fb = form.querySelectorAll("button");
+      for (var k = 0; k < fb.length; k++) { if ((includeDisabled || !fb[k].disabled) && isVisible(fb[k])) return fb[k]; }
+    }
+    return null;
+  }
+
+  function inputText(el) { return el.tagName === "TEXTAREA" || el.tagName === "INPUT" ? el.value : el.textContent; }
+
+  // React-controlled inputs ignore a plain `.value =`: insertText (or the native setter plus an
+  // input event) goes through the framework's own change tracking.
+  function setInputText(el, text) {
+    el.focus();
+    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+      if (el.select) el.select();
+    } else if (el.isContentEditable) {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    var ok = false;
+    try { ok = text ? document.execCommand("insertText", false, text) : document.execCommand("delete", false); } catch (e) { ok = false; }
+    if (!ok || inputText(el) !== text) {
+      if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+        var proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (el.isContentEditable) {
+        el.textContent = text;
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+      }
+    }
+  }
+
+  function pressEnter(el) {
+    ["keydown", "keypress", "keyup"].forEach(function (type) {
+      el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    });
+  }
+
+  function composerScope(input) {
+    var scope = input;
+    for (var i = 0; scope && scope.parentElement && i < 6; i++) {
+      var p = scope.parentElement;
+      if ((p.textContent || "").length > 3000) break;
+      scope = p;
+    }
+    return scope || document;
+  }
+
+  function cleanComposer(input) {  // after a failed send: remove chips and clear the draft
+    try {
+      var list = composerScope(input).querySelectorAll("button, [role='button']");
+      for (var i = 0; i < list.length; i++) {
+        var lab = labelOf(list[i]);
+        var txt = textOf(list[i]);
+        if (/remove|delete/.test(lab) || ((txt === "×" || txt === "✕") && lab.length < 60)) { try { list[i].click(); } catch (e) {} }
+      }
+      setInputText(input, "");
+    } catch (e) {}
+  }
+
+  // Send button -> form.requestSubmit -> Enter, then verify the composer emptied (Enter retry).
+  function attemptSend(input) {
+    return new Promise(function (resolve) {
+      var how;
+      var btn = findSendButton(input);
+      var form = input.closest && input.closest("form");
+      if (btn && !btn.disabled) { btn.click(); how = "send_button"; }
+      else if (form && form.requestSubmit) { try { form.requestSubmit(); how = "form_submit"; } catch (e) { pressEnter(input); how = "enter"; } }
+      else { pressEnter(input); how = "enter"; }
+      setTimeout(function () {
+        if (!input.isConnected || inputText(input).trim() === "") { resolve({ ok: true, how: how }); return; }
+        pressEnter(input);
+        setTimeout(function () {
+          var gone = !input.isConnected || inputText(input).trim() === "";
+          resolve({ ok: gone, how: gone ? "enter_retry" : how });
+        }, 700);
+      }, 700);
+    });
+  }
+
+  /* ---------------------------------------------------------------- page checks (data from the bridge) */
+  function transcriptText() {
+    if (!settings) return [];
+    return qa(settings.dom.assistant_message).concat(qa(settings.dom.user_message)).concat(replyCandidates());
+  }
+
+  function pageTextWithoutTranscript() {
+    var text = (document.body && document.body.innerText) || "";
+    var transcript = transcriptText();
+    for (var j = 0; j < transcript.length; j++) { var t = transcript[j].innerText || ""; if (t) text = text.split(t).join(" "); }
+    var input = findInput();
+    if (input) { var v = inputText(input) || ""; if (v) text = text.split(v).join(" "); }
+    return text.toLowerCase();
+  }
 
   function humanCheckReason() {
     if (!settings) return null;
     for (var i = 0; i < settings.stop_selectors.length; i++) {
-      if (q(settings.stop_selectors[i])) return "human check element on page";
+      var hit = qa(settings.stop_selectors[i]).filter(isVisible);
+      if (hit.length) return "human check element on page";
     }
-    var text = (document.body && document.body.innerText || "");
-    var transcript = qa(settings.dom.assistant_message).concat(qa(settings.dom.user_message));
-    for (var j = 0; j < transcript.length; j++) { text = text.split(transcript[j].innerText || "").join(" "); }
-    text = text.toLowerCase();
+    var text = pageTextWithoutTranscript();
     for (var k = 0; k < settings.stop_phrases.length; k++) {
       if (text.indexOf(settings.stop_phrases[k]) !== -1) return "page shows: " + settings.stop_phrases[k];
     }
     return null;
   }
 
-  function stopForHuman(reason, requestId) {
-    stopped = true;
-    busy = false;
-    send({ type: "needs_human", reason: reason, request_id: requestId || null });
+  function offlineReason() {
+    if (navigator.onLine === false) return "browser is offline";
+    if (!settings) return null;
+    var sels = settings.offline_selectors || [];
+    for (var i = 0; i < sels.length; i++) { if (qa(sels[i]).filter(isVisible).length) return "disconnected banner on page"; }
+    var phrases = settings.offline_phrases || [];
+    var text = phrases.length ? pageTextWithoutTranscript() : "";
+    for (var k = 0; k < phrases.length; k++) { if (text.indexOf(phrases[k]) !== -1) return "page shows: " + phrases[k]; }
+    return null;
   }
 
+  function replySelectors() {
+    var list = [];
+    if (settings && settings.dom && settings.dom.agent_reply) list.push(settings.dom.agent_reply);
+    if (settings && settings.dom && settings.dom.assistant_message) list.push(settings.dom.assistant_message);
+    return list.concat(["[data-message-author-role='assistant']", "[data-testid*='assistant' i]", "[class*='assistant-message' i]",
+      "[class*='agent-message' i]", "[class*='prose' i]", "[class*='markdown' i]"]);
+  }
+
+  function replyCandidates() {
+    var sels = replySelectors();
+    for (var i = 0; i < sels.length; i++) {
+      var els = qa(sels[i]).filter(function (el) { return textOf(el) && !(el.closest && el.closest("form")); });
+      if (els.length) { els.selector = sels[i]; return els; }
+    }
+    return [];
+  }
+
+  function latestReply() {
+    var els = replyCandidates();
+    if (!els.length) return { found: false, text: "", selector: null, count: 0 };
+    var last = els[els.length - 1];
+    return { found: true, text: textOf(last).slice(0, 200000), selector: els.selector, count: els.length };
+  }
+
+  /* ---------------------------------------------------------------- state monitor */
+  function computeState() {
+    var human = humanCheckReason();
+    if (human) return { state: "needs_human", reason: human };
+    var off = offlineReason();
+    if (off) return { state: "offline", reason: off };
+    if (findKeepWorking()) return { state: "keep_working_visible", reason: null };
+    var now = Date.now();
+    if (hasStopButton()) { mon.busyVisible = true; mon.lastBusyAt = now; return { state: "generating", reason: null }; }
+    if (mon.busyVisible) { mon.busyVisible = false; mon.lastBusyAt = now; }  // the Stop button just went away
+    // After a submit (the Stop button may not be rendered yet) or a generation, the page is only
+    // "idle" once no Stop button was seen for five seconds (idle double-check).
+    var lastActive = Math.max(mon.lastBusyAt, mon.submittedAt);
+    if (lastActive && lastActive >= mon.newSessionAt) {
+      return now - lastActive >= IDLE_MS ? { state: "idle", reason: null } : { state: "generating", reason: "settling" };
+    }
+    if (findInput()) return { state: "ready", reason: null };
+    return { state: mon.state || "offline", reason: "composer not found" };
+  }
+
+  function evaluate(force) {
+    if (!settings || closed) return;
+    var now = Date.now();
+    if (mon.prevTick && now - mon.prevTick > 90000) {
+      notify("tab_slept", Math.round((now - mon.prevTick) / 60000) + " min without timers (keep the window visible, Memory Saver off)");
+    }
+    mon.prevTick = now;
+    var s = computeState();
+    if (s.state === "needs_human") {
+      if (!stopped) { stopped = true; busy = false; send({ type: "needs_human", reason: s.reason }); }
+      mon.state = "needs_human";
+      return;
+    }
+    if (stopped) return;  // wait for the bridge to resume us after a human resolved it
+    if (force || s.state !== mon.state) {
+      mon.state = s.state;
+      mon.reason = s.reason;
+      send({ type: "state", state: s.state, reason: s.reason });
+    }
+  }
+
+  function startMonitor() {
+    if (observer || !window.MutationObserver) return;
+    var pending = null;
+    observer = new MutationObserver(function () {
+      if (pending) return;
+      pending = setTimeout(function () { pending = null; evaluate(false); }, 150);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    timers.push(setInterval(function () { evaluate(false); }, 1000));
+    timers.push(setInterval(function () { send({ type: "ping" }); }, 30000));
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", onNetwork);
+    window.addEventListener("offline", onNetwork);
+  }
+  function onVisibility() { notify(document.visibilityState === "hidden" ? "tab_hidden" : "tab_visible"); }
+  function onNetwork() { evaluate(true); }
+
+  function waitFor(fn, timeoutMs, stepMs) {
+    var started = Date.now();
+    return new Promise(function (resolve) {
+      (function check() {
+        var v = null;
+        try { v = fn(); } catch (e) { v = null; }
+        if (v) { resolve(v); return; }
+        if (Date.now() - started > timeoutMs) { resolve(null); return; }
+        setTimeout(check, stepMs || 200);
+      })();
+    });
+  }
+
+  /* ---------------------------------------------------------------- Arena Agent commands */
+  function fail(code, message) { var e = new Error(message); e.code = code; return e; }
+
+  async function cmdNewSession(args) {
+    if (args.url) {
+      var target = new URL(args.url, location.href);
+      if (target.origin !== location.origin) throw fail("invalid_new_session_url", "new session URL must stay on this Arena origin");
+      mon.newSessionAt = Date.now(); mon.lastBusyAt = 0; mon.submittedAt = 0; mon.busyVisible = false;
+      setTimeout(function () { location.assign(target.href); }, 150);
+      return { started: true, method: "url", navigating: true };
+    }
+    var btn = findNewButton();
+    if (!btn) throw fail("new_button_not_found", "no New session button found on the page");
+    var navigating = btn.tagName === "A" && btn.href && btn.target !== "_blank";
+    mon.newSessionAt = Date.now(); mon.lastBusyAt = 0; mon.submittedAt = 0; mon.busyVisible = false;
+    btn.click();
+    if (navigating) return { started: true, method: "button", navigating: true };
+    await sleep(800);
+    var input = await waitFor(function () { var i = findInput(); return i && !hasStopButton() && inputText(i).trim() === "" ? i : null; }, 20000);
+    if (!input) throw fail("composer_not_found", "the new session did not show a composer");
+    evaluate(true);
+    return { started: true, method: "button", navigating: false, ready: true };
+  }
+
+  async function cmdSubmit(args) {
+    var text = String(args.text || "");
+    if (!text.trim()) throw fail("text_required", "nothing to submit");
+    var reason = humanCheckReason();
+    if (reason) { evaluate(true); throw fail("needs_human", reason); }
+    if (hasStopButton()) throw fail("busy", "the agent is still generating");
+    var input = findInput();
+    if (!input && findKeepWorking()) {
+      var yes = findYesButton();  // the feedback widget hides the composer
+      if (yes) { yes.click(); notify("feedback_dismissed"); input = await waitFor(findInput, 5000); }
+    }
+    if (!input) throw fail("composer_not_found", "message composer not found (signed out or page changed)");
+    if (input.disabled || input.readOnly) throw fail("composer_busy", "the composer is disabled");
+    setInputText(input, text);
+    await sleep(300);
+    if (inputText(input).trim() === "") throw fail("insert_failed", "the page did not accept the text");
+    var res = await attemptSend(input);
+    if (!res.ok) {
+      cleanComposer(input);
+      notify("send_failed", "text typed but not sent");
+      throw fail("send_failed", "text was typed but the page did not send it");
+    }
+    mon.submittedAt = Date.now();
+    evaluate(true);
+    return { sent: true, how: res.how, chars: text.length };
+  }
+
+  async function cmdKeepWorking() {
+    var btn = findKeepWorking();
+    if (!btn) return { clicked: false, reason: "Keep working is not visible" };
+    btn.click();
+    mon.submittedAt = Date.now();
+    notify("keep_working_clicked");
+    await sleep(300);
+    evaluate(true);
+    return { clicked: true };
+  }
+
+  function cmdReadLastReply() { return latestReply(); }
+
+  function cmdSelectorTest() {  // read-only: never clicks, types or sends
+    var input = findInput();
+    var sendBtn = input ? findSendButton(input, true) : null;  // disabled while the composer is empty
+    var kw = findKeepWorking();
+    var yes = findYesButton();
+    var nb = findNewButton();
+    var reply = latestReply();
+    var human = humanCheckReason();
+    var off = offlineReason();
+    function describe(el) {
+      if (!el) return { found: false };
+      return { found: true, tag: el.tagName.toLowerCase(), label: (labelOf(el).trim() || textOf(el)).slice(0, 60), disabled: !!el.disabled };
+    }
+    var report = {
+      composer: input ? { found: true, tag: input.tagName.toLowerCase(), editable: !!(input.isContentEditable || input.tagName === "TEXTAREA" || input.tagName === "INPUT"),
+                          disabled: !!(input.disabled || input.readOnly), has_text: inputText(input).trim() !== "" } : { found: false },
+      send: describe(sendBtn),
+      stop: { found: hasStopButton() },
+      keep_working: describe(kw),
+      feedback_yes: describe(yes),
+      new_session: describe(nb),
+      latest_reply: { found: reply.found, selector: reply.selector, count: reply.count, chars: reply.text.length },
+      human_check: { found: !!human, reason: human },
+      offline: { found: !!off, reason: off },
+      page: { origin: location.origin, path: location.pathname, title: document.title.slice(0, 120),
+              visibility: document.visibilityState, online: navigator.onLine !== false },
+      state: computeState().state,
+      script_version: CFG.version
+    };
+    report.ok = !!(report.composer.found && (report.send.found || report.state !== "ready") && !report.human_check.found);
+    return report;
+  }
+
+  var COMMANDS = { new_session: cmdNewSession, submit: cmdSubmit, keep_working: cmdKeepWorking,
+                   read_last_reply: cmdReadLastReply, selector_test: cmdSelectorTest };
+  var READ_ONLY = { read_last_reply: true, selector_test: true };
+
+  async function handleCommand(msg) {
+    var fn = COMMANDS[msg.command];
+    if (!fn) { send({ type: "result", request_id: msg.request_id, ok: false, code: "unknown_command", message: "unsupported command" }); return; }
+    if (stopped && !READ_ONLY[msg.command]) {
+      send({ type: "result", request_id: msg.request_id, ok: false, code: "needs_human", message: "stopped for a human" });
+      return;
+    }
+    try {
+      var data = await fn(msg.args || {});
+      send({ type: "result", request_id: msg.request_id, ok: true, data: data || {} });
+    } catch (err) {
+      send({ type: "result", request_id: msg.request_id, ok: false, code: err.code || "command_failed", message: String(err.message || err).slice(0, 200) });
+      if (err.code !== "needs_human") notify("error", (err.code || "command_failed") + ": " + String(err.message || err));
+    }
+  }
+
+  /* ---------------------------------------------------------------- chat mode (one prompt -> one answer) */
   function typeInto(el, text) {
     el.focus();
     var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -226,6 +672,12 @@ USERSCRIPT_BODY = r"""(function () {
   function lastAnswer() {
     var all = qa(settings.dom.assistant_message);
     return { count: all.length, text: all.length ? (all[all.length - 1].innerText || "") : "" };
+  }
+
+  function stopForHuman(reason, requestId) {
+    stopped = true;
+    busy = false;
+    send({ type: "needs_human", reason: reason, request_id: requestId || null });
   }
 
   function handlePrompt(msg) {
@@ -267,7 +719,9 @@ USERSCRIPT_BODY = r"""(function () {
     }, 250);
   }
 
+  /* ---------------------------------------------------------------- bridge connection */
   function connect() {
+    if (closed) return;
     socket = new WebSocket(CFG.bridge);
     socket.onopen = function () {
       retryMs = 2000;
@@ -281,19 +735,37 @@ USERSCRIPT_BODY = r"""(function () {
         stopped = msg.status === "needs_human";
         var reason = humanCheckReason();
         if (reason) { stopForHuman(reason); } else if (!stopped) { status("ready"); }
+        if (msg.mode === "agent") { startMonitor(); mon.state = null; evaluate(true); }
       } else if (msg.type === "prompt") {
         handlePrompt(msg);
+      } else if (msg.type === "command") {
+        handleCommand(msg);
+      } else if (msg.type === "resumed") {
+        stopped = false;
+        mon.state = null;
+        evaluate(true);
       }
     };
     socket.onclose = function (ev) {
       socket = null;
-      if (ev.code === 4401 || ev.code === 4410) return;  // bad token / unregistered: wait for a new script
+      if (closed || ev.code === 4401 || ev.code === 4410) return;  // bad token / unregistered: wait for a new script
       setTimeout(connect, retryMs);
-      retryMs = Math.min(retryMs * 2, 60000);
+      retryMs = Math.min(retryMs * 2, 30000);
     };
   }
 
-  connect();
+  window.__aatmConnectorCleanup = function () {
+    closed = true;
+    timers.forEach(function (t) { clearInterval(t); });
+    if (observer) observer.disconnect();
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("online", onNetwork);
+    window.removeEventListener("offline", onNetwork);
+    if (socket) { try { socket.close(); } catch (e) {} }
+  };
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", connect);
+  else connect();
 })();
 """
 

@@ -8,6 +8,7 @@
 * each employee owns its session; a merged task's session is never reused.
 """
 
+# ruff: noqa: F811 - pytest fixtures are re-exported from test_d_arena_connector
 from __future__ import annotations
 
 import asyncio
