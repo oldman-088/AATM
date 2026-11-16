@@ -18,6 +18,18 @@ fi
 
 mkdir -p logs
 
+if [[ "${AATM_SANDBOX_MODE:-docker}" == "docker" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    if ! docker image inspect aatm-sandbox:latest >/dev/null 2>&1; then
+      echo "[AATM] Building sandbox image aatm-sandbox:latest from docker/sandbox.Dockerfile..."
+      docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile . || \
+        echo "[AATM] WARNING: sandbox image build failed (SANDBOX_UNAVAILABLE; not falling back to process mode)." >&2
+    fi
+  else
+    echo "[AATM] WARNING: docker not found while AATM_SANDBOX_MODE=docker (SANDBOX_UNAVAILABLE)." >&2
+  fi
+fi
+
 if [[ -f logs/backend.pid ]] && kill -0 "$(cat logs/backend.pid)" 2>/dev/null; then
   echo "[AATM] Backend already running (PID $(cat logs/backend.pid))."
 else

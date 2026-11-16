@@ -88,6 +88,11 @@ export const en: Translations = {
     systemResources: 'Host Resources (CPU / RAM / Disk)',
     intelligence: 'Team Intelligence Recommendations',
     liveFeed: 'Live WebSocket Event Stream',
+    sandboxStatus: 'Execution Sandbox',
+    sandboxUnavailable: 'SANDBOX_UNAVAILABLE',
+    sandboxReady: 'Sandbox Ready',
+    sandboxModeLabel: 'Mode',
+    sandboxBuildHint: 'Build with: docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile .',
   },
   chat: {
     title: 'Chief AI Engineering Manager Chat',

@@ -19,6 +19,22 @@ if (-not (Test-Path $Uvicorn)) {
     exit 1
 }
 
+$SandboxMode = if ($env:AATM_SANDBOX_MODE) { $env:AATM_SANDBOX_MODE.ToLower() } else { "docker" }
+if ($SandboxMode -eq "docker") {
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        docker image inspect aatm-sandbox:latest *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[AATM] Building sandbox image aatm-sandbox:latest from docker/sandbox.Dockerfile..."
+            docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile .
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Sandbox image build failed (SANDBOX_UNAVAILABLE; not falling back to process mode)."
+            }
+        }
+    } else {
+        Write-Warning "docker not found while AATM_SANDBOX_MODE=docker (SANDBOX_UNAVAILABLE)."
+    }
+}
+
 $backendPidFile = "$RootDir\logs\backend.pid"
 $alreadyRunning = (Test-Path $backendPidFile) -and (Get-Process -Id ([int](Get-Content $backendPidFile)) -ErrorAction SilentlyContinue)
 if ($alreadyRunning) {

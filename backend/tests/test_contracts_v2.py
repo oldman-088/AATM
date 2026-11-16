@@ -82,7 +82,20 @@ async def auth_headers(client: AsyncClient):
         json={"email": settings.DEFAULT_ADMIN_EMAIL, "password": settings.DEFAULT_ADMIN_PASSWORD},
     )
     assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+    data = response.json()
+    token = data["access_token"]
+    if data["user"].get("must_change_password"):
+        rot = await client.post(
+            "/api/v1/auth/change-password",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "current_password": settings.DEFAULT_ADMIN_PASSWORD,
+                "new_password": "TestSuiteRotatedPassword!2026",
+            },
+        )
+        assert rot.status_code == 200
+        token = rot.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 async def _headers_for_role(role: str, scope: str = "device-revoke") -> dict[str, str]:

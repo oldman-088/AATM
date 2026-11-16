@@ -28,7 +28,7 @@ export function DashboardView({
 }) {
   const { t, formatNumber, formatDate } = useI18n()
   if (!overview) return <div className="text-slate-400">{t.common.loading}</div>
-  const { kpis, divisions, resources, recommendations, recent_events } = overview
+  const { kpis, divisions, resources, recommendations, recent_events, sandbox } = overview
 
   return (
     <div className="space-y-6">
@@ -49,6 +49,42 @@ export function DashboardView({
           </Button>
         </div>
       </div>
+
+      {sandbox && (
+        <Card
+          className={
+            sandbox.status === 'SANDBOX_UNAVAILABLE'
+              ? 'border-rose-500/40 bg-rose-950/30'
+              : 'border-emerald-500/30 bg-emerald-950/20'
+          }
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-100">
+              {sandbox.status === 'SANDBOX_UNAVAILABLE' ? (
+                <ShieldAlert className="h-4 w-4 text-rose-400" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+              )}
+              <span>{t.dashboard.sandboxStatus}:</span>
+              <Badge variant={sandbox.status === 'SANDBOX_UNAVAILABLE' ? 'danger' : 'success'}>
+                {sandbox.status === 'SANDBOX_UNAVAILABLE' ? t.dashboard.sandboxUnavailable : t.dashboard.sandboxReady}
+              </Badge>
+              <span className="text-xs text-slate-400">
+                ({t.dashboard.sandboxModeLabel}: {sandbox.mode}
+                {sandbox.image ? ` · ${sandbox.image}` : ''})
+              </span>
+            </div>
+            {sandbox.status === 'SANDBOX_UNAVAILABLE' && (
+              <div className="text-xs text-rose-200">
+                {sandbox.reason || t.dashboard.sandboxBuildHint}
+              </div>
+            )}
+          </div>
+          {sandbox.status === 'SANDBOX_UNAVAILABLE' && (
+            <div className="mt-1 font-mono text-[11px] text-rose-300/90">{t.dashboard.sandboxBuildHint}</div>
+          )}
+        </Card>
+      )}
 
       {/* KPI Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">

@@ -57,6 +57,16 @@ print(admin_pw)
     Write-Host "[AATM Windows 11 Install] Generated admin password (shown once - save it now): $GeneratedAdminPw" -ForegroundColor Yellow
 }
 
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+    Write-Host "[AATM Windows 11 Install] Building sandbox image aatm-sandbox:latest..."
+    docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile .
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Docker sandbox image build failed (sandbox will report SANDBOX_UNAVAILABLE until built)."
+    }
+} else {
+    Write-Warning "docker not found - sandbox image aatm-sandbox:latest was not built (SANDBOX_UNAVAILABLE in docker mode)."
+}
+
 if (Get-Command npm -ErrorAction SilentlyContinue) {
     Write-Host "[AATM Windows 11 Install] Installing & building Frontend..."
     Push-Location frontend

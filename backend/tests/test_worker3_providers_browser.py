@@ -2439,7 +2439,8 @@ async def test_sandbox_docker_hardening_flags_and_fail_closed_when_cli_missing(
         pids_limit=32,
         docker_bin="/usr/bin/docker",
     )
-    assert docker_cmd[:5] == ["/usr/bin/docker", "run", "--rm", "--network=none", "--read-only"]
+    assert docker_cmd[:6] == ["/usr/bin/docker", "run", "--rm", "--pull=never", "--network=none", "--read-only"]
+    assert "--pull=never" in docker_cmd
     assert "--cap-drop=ALL" in docker_cmd
     assert "--security-opt=no-new-privileges" in docker_cmd
     assert "--pids-limit=32" in docker_cmd

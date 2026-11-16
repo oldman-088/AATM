@@ -36,6 +36,19 @@ if [[ ! -x "$PY" ]]; then
 fi
 
 mkdir -p logs
+
+if [[ "${AATM_SANDBOX_MODE:-docker}" == "docker" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    if ! docker image inspect aatm-sandbox:latest >/dev/null 2>&1; then
+      echo "[AATM Worker] Building sandbox image aatm-sandbox:latest from docker/sandbox.Dockerfile..."
+      docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile . || \
+        echo "[AATM Worker] WARNING: sandbox image build failed (SANDBOX_UNAVAILABLE; not falling back to process mode)." >&2
+    fi
+  else
+    echo "[AATM Worker] WARNING: docker not found while AATM_SANDBOX_MODE=docker (SANDBOX_UNAVAILABLE)." >&2
+  fi
+fi
+
 WORKSPACE_ROOT="${AATM_WORKER_WORKSPACE:-$ROOT_DIR/data/remote_workspaces}"
 LOG_FILE="$ROOT_DIR/logs/worker-${AATM_DEVICE_ID}.log"
 PID_FILE="$ROOT_DIR/logs/worker-${AATM_DEVICE_ID}.pid"

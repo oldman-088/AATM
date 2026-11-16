@@ -42,7 +42,12 @@ services:
       AATM_DEVICE_ID: ${AATM_DEVICE_ID:-docker-worker-01}
       AATM_DEVICE_TOKEN: ${AATM_DEVICE_TOKEN:-}
       AATM_WORKER_WORKSPACE: /workspace
-      AATM_SANDBOX_MODE: ${AATM_SANDBOX_MODE:-docker}
+      # Treat this hardened container (non-root 65534:65534, read_only, cap_drop=ALL,
+      # no-new-privileges, pids/mem/cpu limits) as the sandbox boundary itself.
+      # Docker CLI and the host Docker socket are intentionally omitted so Docker-in-Docker
+      # cannot be used to escape to the host; child tools run in process mode inside it.
+      AATM_SANDBOX_MODE: process
+      AATM_ALLOW_PROCESS_SANDBOX: "true"
     volumes:
       - ./backend:/app/backend:ro
       - aatm_worker_workspaces:/workspace:rw

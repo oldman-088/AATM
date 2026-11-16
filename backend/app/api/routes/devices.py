@@ -69,6 +69,15 @@ async def require_device_token(device_id: str, token: str | None, db: AsyncSessi
     return device
 
 
+async def require_device_token_dep(
+    device_id: str,
+    x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    db: AsyncSession = Depends(get_db),
+) -> ExecutionDevice:
+    """FastAPI dependency so auth runs before request body validation."""
+    return await require_device_token(device_id, x_aatm_device_token, db)
+
+
 def _validate_remote_path(path: str, *, allow_workspace_root: bool = False) -> str:
     """Validate a device-reported POSIX relative path without trusting its host OS."""
     if allow_workspace_root and path == ".":
@@ -368,11 +377,10 @@ async def worker_heartbeat(
 async def claim_task_for_device(
     device_id: str,
     body: dict,
-    x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    device: ExecutionDevice = Depends(require_device_token_dep),
     db: AsyncSession = Depends(get_db),
 ):
     """Claim the next eligible task for a remote device."""
-    device = await require_device_token(device_id, x_aatm_device_token, db)
 
     worker_id = body.get("worker_id") or f"{device_id}-worker"
 
@@ -527,11 +535,10 @@ async def remote_agent_model_turn(
     device_id: str,
     task_id: str,
     body: DeviceAgentModelRequest,
-    x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    _device: ExecutionDevice = Depends(require_device_token_dep),
     db: AsyncSession = Depends(get_db),
 ):
     """Route a remote AgentLoop model turn through the central provider router."""
-    await require_device_token(device_id, x_aatm_device_token, db)
     task, agent = await _require_claimed_task(db, device_id, task_id, body.worker_id)
 
     tree_paths: set[str] = set()
@@ -671,11 +678,10 @@ async def report_task_progress(
     device_id: str,
     task_id: str,
     body: DeviceTaskProgressRequest,
-    x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    device: ExecutionDevice = Depends(require_device_token_dep),
     db: AsyncSession = Depends(get_db),
 ):
     """Persist one remote AgentLoop progress event and any action artifact."""
-    device = await require_device_token(device_id, x_aatm_device_token, db)
     task, agent = await _require_claimed_task(db, device_id, task_id, body.worker_id)
     if not re.fullmatch(r"[a-z0-9_]{1,64}", body.event):
         raise HTTPException(status_code=422, detail="Progress event must be a lowercase identifier.")
@@ -708,11 +714,10 @@ async def report_task_result(
     device_id: str,
     task_id: str,
     body: DeviceTaskReportRequest,
-    x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    device: ExecutionDevice = Depends(require_device_token_dep),
     db: AsyncSession = Depends(get_db),
 ):
     """Report the outcome of a task executed by a remote worker daemon."""
-    device = await require_device_token(device_id, x_aatm_device_token, db)
     task, agent = await _require_claimed_task(db, device_id, task_id, body.worker_id)
     success = body.success
     summary = safe_excerpt(body.summary, 4_000)
@@ -810,11 +815,10 @@ async def report_task_result(
 @router.get("/devices/{device_id}/status")
 async def device_status(
     device_id: str,
-    x_aatm_device_token: str | None = Header(default=None, alias="X-AATM-Device-Token"),
+    device: ExecutionDevice = Depends(require_device_token_dep),
     db: AsyncSession = Depends(get_db),
 ):
     """Return the device record and the tasks it currently owns."""
-    device = await require_device_token(device_id, x_aatm_device_token, db)
     tasks = list(
         (
             await db.execute(

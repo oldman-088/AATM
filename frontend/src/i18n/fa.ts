@@ -88,6 +88,11 @@ export const fa: Translations = {
     systemResources: 'منابع سیستم (پردازنده / رم / دیسک)',
     intelligence: 'توصیه‌های هوش تیمی',
     liveFeed: 'جریان زنده رویدادهای وب‌سوکت',
+    sandboxStatus: 'محیط ایزوله‌سازی اجرا',
+    sandboxUnavailable: 'SANDBOX_UNAVAILABLE',
+    sandboxReady: 'سندباکس آماده است',
+    sandboxModeLabel: 'حالت',
+    sandboxBuildHint: 'ساخت تصویر: docker build -t aatm-sandbox:latest -f docker/sandbox.Dockerfile .',
   },
   chat: {
     title: 'گفتگو با مدیر ارشد مهندسی هوش مصنوعی',

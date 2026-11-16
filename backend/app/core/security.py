@@ -37,12 +37,18 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
-def create_access_token(subject: str, role: str, extra: dict[str, Any] | None = None) -> str:
+def create_access_token(
+    subject: str,
+    role: str,
+    token_version: int = 1,
+    extra: dict[str, Any] | None = None,
+) -> str:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     payload: dict[str, Any] = {
         "sub": subject,
         "role": role,
+        "token_version": int(token_version),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp()),
     }
