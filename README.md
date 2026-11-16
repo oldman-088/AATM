@@ -16,6 +16,8 @@ parallel**, each in its own git worktree and browser profile, and open draft PRs
 ```bash
 ./scripts/ubuntu/install.sh      # Postgres + RabbitMQ + Redis via Docker (use --sqlite to skip), venv, npm, Chromium
 ./scripts/ubuntu/start.sh        # backend :8000, local Arena bridge 127.0.0.1:4100, UI :5173
+./scripts/ubuntu/restart.sh      # after changing .env / pulling (health-checked restart)
+./scripts/ubuntu/reset-admin-password.sh   # lost the admin password? rotate it, printed once
 ./scripts/ubuntu/verify.sh       # all release gates (lint, migrations, backend/bridge/frontend tests, secret scan, build)
 ./scripts/demo_e2e.sh --check    # end-to-end demo prerequisites (see docs/OPERATIONS.md)
 ```

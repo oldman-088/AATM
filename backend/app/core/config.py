@@ -15,6 +15,32 @@ _PG_PREFIXES = (
 )
 
 
+def resolve_sqlite_url_path(url: str) -> str:
+    """Make the file path inside a SQLite URL absolute and create its directory.
+
+    A relative SQLite URL such as ``sqlite+aiosqlite:///./data/aatm.db`` is resolved by SQLite
+    against the *current working directory*. The backend is started from the repository root but
+    Alembic runs from ``backend/``, so the same ``.env`` produced ``backend/data/aatm.db`` (missing
+    directory → "unable to open database file"). Resolving relative paths against the repository
+    root, and creating ``data/`` up front, makes migrations and the API agree on one file.
+    """
+    raw = (url or "").strip()
+    if not raw.startswith("sqlite"):
+        return url
+    scheme, separator, rest = raw.partition(":///")
+    if not separator:
+        return url
+    if not rest or rest == ":memory:" or rest.startswith("file:") or rest.startswith(":memory:?"):
+        return url
+    path = Path(rest)
+    if not path.is_absolute():
+        path = (ROOT_DIR / path).resolve()
+    else:
+        path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return f"{scheme}:///{path.as_posix()}"
+
+
 def normalize_async_database_url(url: str) -> str:
     """Normalize a database URL for SQLAlchemy's async engine (`create_async_engine`).
 
@@ -28,8 +54,8 @@ def normalize_async_database_url(url: str) -> str:
         if raw.startswith(prefix):
             return "postgresql+psycopg://" + raw[len(prefix) :]
     if raw.startswith("sqlite:///"):
-        return "sqlite+aiosqlite:///" + raw[len("sqlite:///") :]
-    return raw
+        return resolve_sqlite_url_path("sqlite+aiosqlite:///" + raw[len("sqlite:///") :])
+    return resolve_sqlite_url_path(raw)
 
 
 def normalize_sync_database_url(url: str) -> str:
@@ -44,8 +70,8 @@ def normalize_sync_database_url(url: str) -> str:
         if raw.startswith(prefix):
             return "postgresql+psycopg://" + raw[len(prefix) :]
     if raw.startswith("sqlite+aiosqlite:///"):
-        return "sqlite:///" + raw[len("sqlite+aiosqlite:///") :]
-    return raw
+        return resolve_sqlite_url_path("sqlite:///" + raw[len("sqlite+aiosqlite:///") :])
+    return resolve_sqlite_url_path(raw)
 
 
 def normalize_database_url(url: str, *, async_driver: bool = True) -> str:

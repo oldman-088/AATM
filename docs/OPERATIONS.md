@@ -124,7 +124,9 @@ result back. `scripts/*/stop.sh` stops the daemon along with the backend and fro
 | Script | Purpose |
 |---|---|
 | `scripts/ubuntu/install.sh` | Dependencies, Playwright Chromium, migrations, `.env` bootstrap, verification. |
-| `scripts/ubuntu/start.sh` | Starts the API + UI and waits for the health endpoint. |
+| `scripts/ubuntu/start.sh` | Starts the API + UI and waits for the health endpoint. A healthy backend is reused; a stale PID is replaced instead of printing "already running". |
+| `scripts/ubuntu/restart.sh` | `stop.sh` + `start.sh` with the same health gate — restart after changing `.env` or `git pull`. |
+| `scripts/ubuntu/reset-admin-password.sh` | Rotates the admin password (PBKDF2 hash, `must_change_password=true`, `token_version += 1`, audit entry) and prints it once. No password reset by hand-editing the database. |
 | `scripts/ubuntu/stop.sh` | PID-validated shutdown of the API, UI and worker daemons. |
 | `scripts/ubuntu/update.sh` | Update dependencies, migrate, re-verify. |
 | `scripts/ubuntu/backup.sh` | Verified, permission-restricted archive of `data/` and `.env`. |
