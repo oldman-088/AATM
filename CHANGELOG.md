@@ -2,6 +2,14 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.6.0-phase5] - 2026-11-16 — Phase 5: Real Browser Engine & Live PNG Snapshots
+
+### Added
+- **Live Playwright PNG Snapshots & Streaming**: `BrowserManager` caches real Playwright PNG screenshots (`capture_snapshot` and live navigation actions) and exposes `POST /api/v1/browsers/{profile_id}/snapshot` and `GET /api/v1/browsers/{profile_id}/snapshot` (`image/png`), returning HTTP `501` when no live Playwright context exists.
+- **Real Chromium RSS Memory Telemetry**: `BrowserManager._measure_profile_memory_mb` measures actual RSS MB of Chromium processes bound to each profile directory via `psutil` (`memory_status: "measured"` when running, `"not_measured"` otherwise).
+- **Browser Wall UI**: `BrowserWallView` displays live PNG screenshots, includes a Snapshot capture trigger, and shows honest `role="alert"` error banners when Chromium is unavailable (`501`).
+- **Phase 5 Test Suite**: Added `backend/tests/test_phase5_real_browser_engine.py`.
+
 ## [2.6.0-phase4] - 2026-11-16 — Phase 4: Worker Sandbox & Hardening
 
 ### Added

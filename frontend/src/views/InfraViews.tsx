@@ -94,13 +94,32 @@ export function BrowserWallView({
 }) {
   const { t } = useI18n()
   const [navUrl, setNavUrl] = useState<Record<string, string>>({})
+  const [pngFrames, setPngFrames] = useState<Record<string, string>>({})
+  const [browserError, setBrowserError] = useState<string | null>(null)
 
   const action = async (id: string, endpoint: string, body?: any) => {
-    await apiFetch(`/browsers/${id}/${endpoint}`, {
-      method: 'POST',
-      body: body ? JSON.stringify(body) : undefined,
-    })
-    onReload()
+    setBrowserError(null)
+    try {
+      const res = await apiFetch<any>(`/browsers/${id}/${endpoint}`, {
+        method: 'POST',
+        body: body ? JSON.stringify(body) : undefined,
+      })
+      if (endpoint === 'snapshot' && res?.screenshot_base64) {
+        setPngFrames((prev) => ({
+          ...prev,
+          [id]: `data:image/png;base64,${res.screenshot_base64}`,
+        }))
+      } else if (endpoint === 'stop') {
+        setPngFrames((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+      }
+      onReload()
+    } catch (err: any) {
+      setBrowserError(err?.message || t.enterprise.operationFailed)
+    }
   }
 
   return (
@@ -116,6 +135,12 @@ export function BrowserWallView({
           </Badge>
         )}
       </div>
+
+      {browserError && (
+        <div role="alert" className="rounded-lg border border-rose-500/40 bg-rose-950/30 px-3 py-2 text-xs text-rose-200">
+          {browserError}
+        </div>
+      )}
 
       <VisualWorkflowBuilder browsers={browsers} />
       <div className="grid gap-4 lg:grid-cols-2">
@@ -133,7 +158,13 @@ export function BrowserWallView({
               </Badge>
             </div>
 
-            {bp.last_snapshot_svg ? (
+            {pngFrames[bp.id] ? (
+              <img
+                src={pngFrames[bp.id]}
+                alt={`${bp.name} live snapshot`}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 object-contain"
+              />
+            ) : bp.last_snapshot_svg ? (
               <div
                 className="overflow-hidden rounded-lg border border-slate-800 bg-slate-950"
                 dangerouslySetInnerHTML={{ __html: bp.last_snapshot_svg }}
@@ -155,6 +186,10 @@ export function BrowserWallView({
                 onClick={() => action(bp.id, 'launch', { mode: 'background', owner: bp.agent_id || 'manager-0' })}
               >
                 {t.browsers.launchBackground}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => action(bp.id, 'snapshot')}>
+                <RefreshCw className="h-3.5 w-3.5 text-cyan-400" />
+                {t.enterprise.snapshotStep}
               </Button>
               <Button size="sm" variant="secondary" onClick={() => action(bp.id, 'recover')}>
                 <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />

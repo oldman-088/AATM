@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +57,8 @@ def _serialize_browser(b: BrowserProfile) -> dict:
     live_context = browser_manager.has_live_context(b.id)
     status = "unavailable" if b.status == "running" and not live_context else b.status
     engine_mode = b.engine_mode if live_context or b.status != "running" else "unavailable"
+    measured_mb = round(float(b.memory_mb), 1) if (live_context and b.memory_mb and b.memory_mb > 0) else None
+    has_png = browser_manager.has_png_snapshot(b.id)
     return {
         "id": b.id,
         "name": b.name,
@@ -70,9 +73,11 @@ def _serialize_browser(b: BrowserProfile) -> dict:
         "viewport_width": b.viewport_width,
         "viewport_height": b.viewport_height,
         "crash_count": b.crash_count,
-        "memory_mb": None,
-        "memory_status": "not_measured",
+        "memory_mb": measured_mb,
+        "memory_status": "measured" if measured_mb is not None else "not_measured",
         "engine_mode": engine_mode,
+        "has_png_snapshot": has_png,
+        "snapshot_url": f"/api/v1/browsers/{b.id}/snapshot" if has_png else None,
         "last_snapshot_svg": b.last_snapshot_svg,
         "last_heartbeat": b.last_heartbeat,
     }
@@ -571,6 +576,36 @@ async def execute_browser_workflow(
     if result.get("status") == "rejected":
         raise HTTPException(status_code=400, detail=result.get("reason") or "Workflow rejected by browser policy")
     return result
+
+
+@router.post("/browsers/{profile_id}/snapshot", dependencies=[Depends(require_role("admin", "operator"))])
+async def capture_browser_snapshot(
+    profile_id: str,
+    full_page: bool = False,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    profile = await db.get(BrowserProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Browser profile not found")
+    try:
+        return await browser_manager.capture_snapshot(db, profile, actor=user.email, full_page=full_page)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.get("/browsers/{profile_id}/snapshot")
+async def get_browser_snapshot_png(profile_id: str, db: AsyncSession = Depends(get_db)):
+    profile = await db.get(BrowserProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Browser profile not found")
+    png = browser_manager.get_last_png_snapshot(profile_id)
+    if not png:
+        raise HTTPException(
+            status_code=501,
+            detail="No live Playwright PNG snapshot is available without a live browser context.",
+        )
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @router.post("/browsers/{profile_id}/extract-text", dependencies=[Depends(require_role("admin", "operator"))])
