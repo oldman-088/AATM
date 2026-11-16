@@ -25,6 +25,7 @@ import type { Language } from './i18n/types'
 import { apiFetch, getToken } from './lib/api'
 import { AgentsView, DashboardView, ManagerChatView, TasksView } from './views/CoreViews'
 import { ArenaConnectorPanel } from './views/ArenaViews'
+import { LIVE_EVENT, MissionControl, PullRequestsView } from './views/DashboardViews'
 import {
   AgentMessagingPanel,
   ArenaAccountsSessionsPanel,
@@ -193,6 +194,11 @@ function AATMWorkspace() {
           if (parsed?.type === 'auth.ok') {
             setWsStatus('live')
             return
+          }
+          window.dispatchEvent(new CustomEvent(LIVE_EVENT, { detail: parsed }))
+          if (parsed?.type === 'agent.iteration') {
+            setWsStatus('live')
+            return // streamed into the live log; no full reload per iteration
           }
         } catch {
           // non-JSON event triggers reload
@@ -538,6 +544,7 @@ function AATMWorkspace() {
             </div>
           )}
 
+          {tab === 'dashboard' && <MissionControl projectId={activeProjectId} />}
           {tab === 'dashboard' && (
             <DashboardView
               overview={overview}
@@ -589,7 +596,12 @@ function AATMWorkspace() {
               />
             </div>
           )}
-          {tab === 'git' && <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} onReload={() => loadAll()} />}
+          {tab === 'git' && (
+            <div className="space-y-6">
+              <PullRequestsView projectId={activeProjectId} />
+              <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} onReload={() => loadAll()} />
+            </div>
+          )}
           {tab === 'qa' && (
             <div className="space-y-6">
               <QAView qaData={qaData} securityPosture={securityPosture} onReload={() => loadAll()} />

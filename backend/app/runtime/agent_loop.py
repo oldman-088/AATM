@@ -1158,6 +1158,18 @@ class AgentLoop:
             "task.updated",
             {"task_id": task.id, "status": task.status, "progress_percent": task.progress_percent, "iteration": iteration},
         )
+        # Live agent log (Phase 7): the same redacted excerpt that is persisted, never raw output.
+        await event_bus.emit(
+            "agent.iteration",
+            {
+                "agent_id": agent.id,
+                "task_id": task.id,
+                "iteration": iteration,
+                "action": action,
+                "result": safe_result[:500],
+                "failed": bool(correction),
+            },
+        )
         await event_bus.emit("agent.heartbeat", {"agent_id": agent.id, "status": agent.status, "task_id": task.id})
         return entry
 

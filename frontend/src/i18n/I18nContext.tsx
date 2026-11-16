@@ -19,12 +19,21 @@ interface I18nContextValue {
 
 const I18nContext = createContext<I18nContextValue | null>(null)
 
+function isLanguage(value: unknown): value is Language {
+  return value === 'en' || value === 'ar' || value === 'fa'
+}
+
+/** Arabic (RTL) first: a saved choice wins, then VITE_DEFAULT_LANGUAGE, then Arabic. */
+export function resolveInitialLanguage(saved: string | null, configuredDefault?: string | null): Language {
+  if (isLanguage(saved)) return saved
+  if (isLanguage(configuredDefault)) return configuredDefault
+  return 'ar'
+}
+
 export function I18nProvider({ children }: { children: React.ReactNode }) {
-  const [language, setLanguageState] = useState<Language>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved === 'en' || saved === 'ar' || saved === 'fa') return saved
-    return 'en'
-  })
+  const [language, setLanguageState] = useState<Language>(() =>
+    resolveInitialLanguage(localStorage.getItem(STORAGE_KEY), import.meta.env.VITE_DEFAULT_LANGUAGE),
+  )
 
   const isRtl = RTL_LANGS.has(language)
 

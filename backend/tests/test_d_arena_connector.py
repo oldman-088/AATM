@@ -446,9 +446,7 @@ async def test_four_default_profiles_process_four_tasks_in_parallel_to_draft_prs
                         break
                     await asyncio.sleep(0.2)
             finally:
-                await loop.stop()
-                runner.cancel()
-                await asyncio.gather(runner, return_exceptions=True)
+                await _stop_loop(loop, runner)
         finally:
             await browser.close()
 
@@ -470,6 +468,17 @@ async def test_four_default_profiles_process_four_tasks_in_parallel_to_draft_prs
         used = {(await db.get(Agent, w.id)).id: w.browser_profile_id for w in workers}
         assert len(set(used.values())) == 4  # no account pooling: each employee used its own profile
         await _assert_no_planted_tokens(db, caplog.text)
+
+
+async def _stop_loop(loop: AgentLoop, runner: asyncio.Task) -> None:
+    """Graceful stop: let the loop finish its current claim/commit instead of cancelling it mid-
+    transaction (a cancelled SQLite write can keep the database locked until GC)."""
+    await loop.stop()
+    try:
+        await asyncio.wait_for(asyncio.shield(runner), timeout=15)
+    except TimeoutError:
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
 
 
 async def _assert_no_planted_tokens(db, log_text: str) -> None:
@@ -514,9 +523,7 @@ async def test_human_check_stops_that_profile_with_needs_human_and_resume_requeu
                         break
                     await asyncio.sleep(0.1)
             finally:
-                await loop.stop()
-                runner.cancel()
-                await asyncio.gather(runner, return_exceptions=True)
+                await _stop_loop(loop, runner)
         finally:
             await browser.close()
 

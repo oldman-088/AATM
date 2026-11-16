@@ -14,7 +14,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.models  # noqa: F401
-from app.api.routes import arena, auth, devices, governance, infra, orchestration, platform, projects, reviews, scaling
+from app.api.routes import (
+    arena,
+    auth,
+    dashboard,
+    devices,
+    governance,
+    infra,
+    orchestration,
+    platform,
+    projects,
+    reviews,
+    scaling,
+)
 from app.browser.manager import browser_manager
 from app.core.config import get_settings, validate_runtime_security
 from app.core.events import event_bus
@@ -173,6 +185,7 @@ app.include_router(devices.router, prefix=API_PREFIX)
 app.include_router(reviews.router, prefix=API_PREFIX)
 app.include_router(scaling.router, prefix=API_PREFIX)
 app.include_router(arena.router, prefix=API_PREFIX)
+app.include_router(dashboard.router, prefix=API_PREFIX)
 
 
 async def _authenticate_websocket(websocket: WebSocket) -> tuple[User | None, int, str]:

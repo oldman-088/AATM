@@ -23,5 +23,7 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test/setup.ts',
+    // The app defaults to Arabic (RTL first); component tests pin English unless they pick a language.
+    env: { VITE_DEFAULT_LANGUAGE: 'en' },
   },
 })

@@ -429,4 +429,60 @@ export interface Translations {
     statusOffline: string
     statusNeedsHuman: string
   }
+  home: {
+    title: string
+    architecture: string
+    archDashboard: string
+    archOrchestrator: string
+    archProfiles: string
+    archResults: string
+    activeEmployees: string
+    openPrs: string
+    costToday: string
+    needsHuman: string
+    tasksByStatus: string
+    timeline: string
+    noProject: string
+    stepRequest: string
+    stepAnalyze: string
+    stepDistribute: string
+    stepExecute: string
+    stepCollect: string
+    stepPr: string
+    stepReview: string
+    stepCompleted: string
+    stateDone: string
+    stateActive: string
+    statePending: string
+    employees: string
+    model: string
+    profile: string
+    currentTask: string
+    lastAction: string
+    cost: string
+    pause: string
+    unpause: string
+    emergencyStop: string
+    replace: string
+    none: string
+    agentLog: string
+    logEmpty: string
+    logLive: string
+    pullRequests: string
+    noPrs: string
+    viewDiff: string
+    diffUnavailable: string
+    requestMerge: string
+    merge: string
+    mergeApprovalPending: string
+    reviews: string
+    openOnGithub: string
+    recovery: string
+    failedTasks: string
+    retriedTasks: string
+    blockedTasks: string
+    replacements: string
+    nothingToRecover: string
+    retries: string
+  }
 }
