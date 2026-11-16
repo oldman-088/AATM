@@ -12,6 +12,7 @@ from app.providers.adapters import build_adapter
 from app.providers.base import ProviderRequest
 from app.providers.base import validate_credential_ref as validate_provider_credential_ref
 from app.providers.router import get_model_configuration_status, provider_router
+from app.runtime.sandbox import ALLOWED_WORKSPACE_BINARIES, SandboxExecutionPolicy, get_sandbox_status
 from app.schemas.common import (
     BrowserCreateRequest,
     BrowserExtractTextRequest,
@@ -74,6 +75,23 @@ def _serialize_browser(b: BrowserProfile) -> dict:
         "engine_mode": engine_mode,
         "last_snapshot_svg": b.last_snapshot_svg,
         "last_heartbeat": b.last_heartbeat,
+    }
+
+
+@router.get("/sandbox/status")
+async def sandbox_status():
+    policy = SandboxExecutionPolicy.from_env()
+    return {
+        **get_sandbox_status(),
+        "policy": {
+            "memory_mb": policy.memory_mb,
+            "cpu_seconds": policy.cpu_seconds,
+            "cpu_limit": policy.cpu_limit,
+            "pids_limit": policy.max_procs,
+            "timeout_seconds": policy.timeout_seconds,
+            "docker_image": policy.docker_image,
+            "allowed_binaries": sorted(ALLOWED_WORKSPACE_BINARIES),
+        },
     }
 
 

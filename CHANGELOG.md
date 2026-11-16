@@ -2,6 +2,14 @@
 
 All notable changes to AATM are documented in this file.
 
+## [2.6.0-phase4] - 2026-11-16 — Phase 4: Worker Sandbox & Hardening
+
+### Added
+- **Docker Non-Root & Fail-Closed Enforcement**: `build_isolated_command` adds explicit `--user 10001:10001`, `--env HOME=/tmp`, and `--env PYTHONDONTWRITEBYTECODE=1` alongside `--pull=never`, `--network=none`, `--read-only`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and resource limits; blocks `process` mode at runtime in `production` unless `AATM_ALLOW_PROCESS_SANDBOX=true`.
+- **Non-Blocking Async Sandbox Subprocesses**: `AgentRuntimeExecutor.run_workspace_command` uses `asyncio.create_subprocess_exec` with `asyncio.wait_for` timeout kill and bounded stdout/stderr capture so concurrent worker tasks never block the event loop.
+- **Sandbox Policy Endpoint**: Added `GET /api/v1/sandbox/status` exposing live sandbox availability (`READY` vs `SANDBOX_UNAVAILABLE`) and active `SandboxExecutionPolicy` resource bounds.
+- **Phase 4 Test Suite**: Added `backend/tests/test_phase4_sandbox_hardening.py`.
+
 ## [2.6.0-phase3] - 2026-11-16 — Phase 3: Isolated Task Worktrees, Auto-Commit, Draft PRs & Webhook Lifecycle
 
 ### Added

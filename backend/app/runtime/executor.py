@@ -1,4 +1,4 @@
-import subprocess
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -128,22 +128,30 @@ class AgentRuntimeExecutor:
 
         t0 = time.perf_counter()
         try:
-            proc = subprocess.run(
-                isolated_cmd,
+            proc = await asyncio.create_subprocess_exec(
+                *isolated_cmd,
                 cwd=str(ws),
                 env=sanitized_env,
                 preexec_fn=preexec,
-                capture_output=True,
-                text=True,
-                timeout=eff_policy.timeout_seconds,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            exit_code = proc.returncode
-            stdout = proc.stdout
-            stderr = proc.stderr
-        except subprocess.TimeoutExpired:
-            exit_code = 124
-            stdout = ""
-            stderr = f"Command timed out after {eff_policy.timeout_seconds}s."
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=eff_policy.timeout_seconds,
+                )
+                exit_code = int(proc.returncode or 0)
+                stdout = stdout_b.decode("utf-8", errors="replace")[-16000:]
+                stderr = stderr_b.decode("utf-8", errors="replace")[-8000:]
+            except TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                exit_code = 124
+                stdout = ""
+                stderr = f"Command timed out after {eff_policy.timeout_seconds}s."
+        except FileNotFoundError as exc:
+            raise WorkspaceSandboxError(f"Sandbox executable not available: {exc}") from exc
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
         art = WorkspaceArtifact(
