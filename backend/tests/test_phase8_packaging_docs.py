@@ -73,7 +73,7 @@ def test_phase8_ubuntu_and_windows_scripts_and_dockerfiles_present():
         "docker-compose.yml",
         ".github/workflows/ci.yml",
         "README.md",
-        "docs/DEPLOYMENT.md",
+        "docs/OPERATIONS.md",
         "CHANGELOG.md",
     ]:
         assert (REPO_ROOT / rel).is_file(), f"Missing {rel}"

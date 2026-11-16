@@ -454,7 +454,8 @@ def test_github_write_schemas_require_approval_and_validate_payloads():
 
 
 async def test_reports_to_update_serialization_and_employee_default(client: AsyncClient, auth_headers, monkeypatch):
-    from app.api.routes import platform as platform_routes
+    # Employee handlers live in platform_employees since the Phase 8 split.
+    from app.api.routes import platform_employees as platform_routes
 
     agent_id = "round3-reports-to-patch-agent"
     async with AsyncSessionLocal() as db:
@@ -632,7 +633,8 @@ async def test_git_worktree_endpoints_require_operator_and_map_errors(
 async def test_skill_gap_provisioning_and_session_recovery_routes_enforce_roles(
     client: AsyncClient, auth_headers, monkeypatch
 ):
-    from app.api.routes import platform as platform_routes
+    # Employee handlers live in platform_employees since the Phase 8 split.
+    from app.api.routes import platform_employees as platform_routes
 
     calls: dict[str, Any] = {}
 

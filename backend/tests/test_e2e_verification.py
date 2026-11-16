@@ -1057,7 +1057,7 @@ async def test_e2e_github_ci_templates_and_security_policy_scan_clean():
     ci_workflow = root / ".github" / "workflows" / "ci.yml"
     pr_template = root / ".github" / "PULL_REQUEST_TEMPLATE.md"
     issue_template = root / ".github" / "ISSUE_TEMPLATE" / "task.md"
-    security_policy = root / "docs" / "SECURITY_POLICY.md"
+    security_policy = root / "docs" / "SECURITY.md"
 
     for artifact in (ci_workflow, pr_template, issue_template, security_policy):
         assert artifact.is_file(), f"Required governance artifact missing: {artifact}"
@@ -1093,7 +1093,7 @@ async def test_e2e_github_ci_templates_and_security_policy_scan_clean():
         "token_version",
         "Emergency Stop",
     ):
-        assert topic in sec_text, f"SECURITY_POLICY.md missing section/topic: {topic}"
+        assert topic in sec_text, f"SECURITY.md missing section/topic: {topic}"
 
     scan = qa_engine.run_security_scan()
     assert scan["status"] == "passed", f"Secret scanner reported findings: {scan['findings']}"

@@ -15,6 +15,17 @@ All notable changes to AATM are documented in this file.
 - **Project completion**: when all implementation tasks are done, the manager posts a factual summary (what was built, merged PRs, cost from `provider_usage_logs`, elapsed time) to the project chat and marks the project `completed`.
 - API: `GET /reviews/pull-requests`, `GET /reviews/tasks/{id}/diff`, `POST /reviews/tasks/{id}/request-merge`, `POST /reviews/tasks/{id}/merge`, `GET /projects/{id}/completion`. Migration `f5a6b7c8d9e0` (task_type, parent_task_id, review_round, project completed_at/completion_summary).
 
+### Changed — Phase 8: Memory, Docs and Code Health (F)
+- **Memory search on Postgres uses full-text search**: a GIN expression index (migration `b7c8d9e0f1a2`, `to_tsvector('simple', …)`, which keeps Arabic words intact), prefix matching, `ts_rank` ordering and unchanged scope/visibility rules. SQLite keeps the bounded keyword fallback. Embeddings (pgvector) are **not implemented**: `memory_engine.search_backend()` reports `embeddings: not_implemented`.
+- **Large files split without changing behavior or the API (122 operations identical)**:
+  - `providers/adapters.py` → `providers/adapters/` (one module per adapter plus `common.py`, with every old name re-exported);
+  - `runtime/agent_loop.py` → `AgentLoop` + mixins in `runtime/loop/` (`claim`, `context`, `actions`, `approvals`, `common`);
+  - `browser/manager.py` helpers → `browser/safety.py`, `capabilities.py` and `wall.py`;
+  - `api/routes/platform.py` → `platform_{employees,accounts,browsers,workspaces,ops,github}.py`, aggregated by `platform.py`.
+- **Docs consolidated** into `README.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY.md` (was `SECURITY_POLICY.md`, now with the security assessment and risk register) and `docs/OPERATIONS.md` (was `DEPLOYMENT.md`, now with the user guide, provider setup and known limitations).
+  - Removed after moving still-true content: `STATUS.txt`, `PROGRESS_LOG.txt`, `NEXT_ACTIONS.txt`, `BLOCKERS.txt`, `IMPLEMENTATION_STATUS.md`, and the audit/plan/roadmap/matrix/report docs in `docs/`.
+- **`scripts/demo_e2e.sh`**: runs the Phase 4 acceptance scenario on a throwaway GitHub repository with a local Ollama model, in an isolated backend. It has a `--check` mode and waits for a human to approve merges unless `--auto-approve` is given.
+
 ### Added — Phase 7: Dashboard Matching the Infographic (E)
 - **Mission control** home: architecture strip (Dashboard → Orchestrator → Profiles → Results) and live counters (active employees, tasks per status, open PRs, today's cost vs `DAILY_BUDGET_USD`, profiles needing a human) from `GET /dashboard/home`.
 - **8-step workflow timeline** per project (`GET /projects/{id}/timeline`): request → analyze & split → distribute by specialty → isolated execution → results collected → PR created → review & merge → completed. Each step is `done`/`active`/`pending` from real task, PR, review and project-completion rows; with no evidence everything stays pending.

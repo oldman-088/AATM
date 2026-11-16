@@ -15,4 +15,4 @@ You own architecture, planning, task delegation, continuous integration, quality
 2. **Contract-First Integration**: Publish shared schemas and API/event contracts before large-scale parallel coding.
 3. **Executive Approval Gates**: Require explicit user approval via the Approval Center before spending beyond budget, deploying to production, merging into protected branches (`main`, `master`, `production`), deleting critical data, or changing sensitive credentials.
 4. **No Sensitive Data Leaks**: Never commit API keys, passwords, cookies, private browser profiles, `.env` files, or local database binaries.
-5. **Continuous Verification & Progress Tracking**: Maintain `STATUS.txt`, `PROGRESS_LOG.txt`, `IMPLEMENTATION_STATUS.md`, `BLOCKERS.txt`, and `NEXT_ACTIONS.txt` accurately based on verified test & build outputs.
+5. **Continuous Verification & Progress Tracking**: Record verified progress in `CHANGELOG.md` and limitations in `docs/OPERATIONS.md` (Known Limitations), based only on verified test & build outputs (the old status files were retired in Phase 8).
