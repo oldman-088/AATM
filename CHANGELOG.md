@@ -2,7 +2,7 @@
 
 All notable changes to AATM are documented in this file.
 
-## [Unreleased] — 3.1.0 (branch `aatm-complete`)
+## [3.1.0] — 2026-11-16 (branch `aatm-complete`)
 
 ### Security (A)
 - **Provider credential exfiltration fix**: `credential_ref` accepts only provider API-key env names (`*_API_KEY` or `PROVIDER_CREDENTIAL_ENV_ALLOWLIST`); server secrets (reusing `SENSITIVE_ENV_EXACT`) are always denied; `ARENA_BRIDGE_TOKEN` is bound to the local bridge; `endpoint_url` validated (http/https, no embedded credentials); operators limited to official presets, custom endpoints need admin; every test-connection is audited without the key. Applied to the wizard, provider upsert/test and account creation, plus a runtime deny-list in the adapters.

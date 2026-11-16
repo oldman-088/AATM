@@ -1,4 +1,4 @@
-# AATM — AI Agent Team Manager
+# AATM — AI Agent Team Manager (v3.1.0)
 
 A manager AI turns your directive (Arabic or English) into tasks. Four AI workers execute them **in
 parallel**, each in its own git worktree and browser profile, and open draft PRs. A reviewer comments,

@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "AATM — AI Agent Team Manager"
-    APP_VERSION: str = "3.0.0"
+    APP_VERSION: str = "3.1.0"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
