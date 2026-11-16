@@ -217,7 +217,14 @@ export function CommandBridge({
   const engineLabel = engineConfigured
     ? `${t.bridge.engine}: ${(data.health?.model_status?.configured_providers || []).join(', ') || t.bridge.notAvailable}`
     : `${t.bridge.engine}: ${t.bridge.noEngine}`
-  const arenaLabel = data.arena ? (data.arena.real_enabled ? t.bridge.arenaApproved : t.bridge.arenaSimulated) : t.bridge.notAvailable
+  const arenaLabel =
+    data.arenaLabel === 'approved'
+      ? t.bridge.arenaApproved
+      : data.arenaLabel === 'simulated'
+        ? t.bridge.arenaSimulated
+        : data.arenaLabel === 'unavailable'
+          ? `${t.bridge.arenaSession}: ${t.bridge.notAvailable}`
+          : t.bridge.notAvailable
   const missionLabel = data.missionName || t.bridge.missionUnavailable
   const wsLabel = wsStatus === 'live' ? t.bridge.live : wsStatus === 'connecting' ? t.bridge.sending : t.common.liveOffline
 
@@ -280,6 +287,7 @@ export function CommandBridge({
       state={stationState(focusAgent, data.employees[focusAgent.id], stations[focusAgent.id])}
       pr={prForAgent(data.prs, focusAgent.id)}
       arena={data.arena}
+      arenaLabel={data.arenaLabel}
       profileId={data.arenaProfiles[focusAgent.id] || null}
       costUsd={data.employees[focusAgent.id]?.cost_usd || 0}
       busy={busy}
@@ -381,7 +389,7 @@ export function CommandBridge({
         <span className={`bridge-chip ${engineConfigured ? 'bridge-chip--muted' : 'bridge-chip--warn'}`} data-testid="bridge-engine-chip">
           {engineLabel}
         </span>
-        <span className={`bridge-chip ${data.arena?.real_enabled ? 'bridge-chip--ok' : 'bridge-chip--warn'}`} data-testid="bridge-arena-chip">
+        <span className={`bridge-chip ${data.arenaLabel === 'approved' ? 'bridge-chip--ok' : 'bridge-chip--warn'}`} data-testid="bridge-arena-chip">
           {arenaLabel}
         </span>
         <span className="bridge-chip bridge-chip--muted bridge-mono bridge-timer" data-testid="bridge-timer">

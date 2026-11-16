@@ -73,7 +73,7 @@ export function useBridgeData() {
         apiFetch<any[]>('/reviews/pull-requests').catch(() => []),
         apiFetch<any[]>('/approvals?status=pending').catch(() => []),
         apiFetch<any[]>('/chat').catch(() => []),
-        apiFetch<any[]>('/arena/profiles').catch(() => []),
+        apiFetch<any>('/arena/profiles').catch(() => []),
       ])
 
       const projectList = Array.isArray(projects) ? projects : []
@@ -89,7 +89,13 @@ export function useBridgeData() {
         employeeMap[employee.id] = employee
       }
       const profileMap: Record<string, string> = {}
-      for (const card of Array.isArray(profileCards) ? profileCards : []) {
+      // `/arena/profiles` returns `{gate, profiles}`; accept a bare list too so both shapes work.
+      const profileList = Array.isArray(profileCards)
+        ? profileCards
+        : Array.isArray(profileCards?.profiles)
+          ? profileCards.profiles
+          : []
+      for (const card of profileList) {
         if (card?.agent_id && card?.profile_id) profileMap[card.agent_id] = card.profile_id
       }
 
@@ -139,10 +145,18 @@ export function useBridgeData() {
   )
 
   const modelStatus = data.health?.model_status
+  const arenaGate = data.arena?.gate || data.arena || null
+  const arenaLabel = arenaGate?.real_enabled
+    ? 'approved'
+    : arenaGate?.enabled
+      ? 'simulated'
+      : arenaGate
+        ? 'unavailable'
+        : 'unknown'
   const hasEngine = Boolean(modelStatus?.configured)
   const hasProject = data.projects.length > 0
   const hasDirective = data.chats.some((message) => message?.sender_type === 'user')
   const missionName = data.projects.find((project) => project.id === data.projectId)?.name || null
 
-  return { ...data, reload: load, setProjectId, hasEngine, hasProject, hasDirective, missionName, modelStatus }
+  return { ...data, reload: load, setProjectId, hasEngine, hasProject, hasDirective, missionName, modelStatus, arenaGate, arenaLabel }
 }

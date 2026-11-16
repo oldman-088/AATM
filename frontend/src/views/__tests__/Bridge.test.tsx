@@ -116,8 +116,11 @@ function bridgeFixtures(overrides: Record<string, any> = {}) {
     '/api/v1/reviews/pull-requests': prs,
     '/api/v1/approvals': approvals,
     '/api/v1/chat': chats,
-    '/api/v1/arena/profiles': [{ agent_id: 'worker-2', profile_id: 'profile-2' }],
-    '/api/v1/arena/connector/status': { enabled: false, real_enabled: false, status_label: 'waiting_for_arena_approval' },
+    '/api/v1/arena/profiles': {
+      gate: { mode: 'mock', enabled: true, real_enabled: false },
+      profiles: [{ agent_id: 'worker-2', profile_id: 'profile-2', connector_status: 'needs_human' }],
+    },
+    '/api/v1/arena/connector/status': { enabled: true, real_enabled: false, mode: 'mock', code: 'mock_mode' },
     '/api/v1/code-stream': { agents: {}, pending: 0 },
     '/api/health': {
       status: 'ok',

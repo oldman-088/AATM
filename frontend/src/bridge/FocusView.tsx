@@ -14,6 +14,7 @@ type FocusViewProps = {
   state: StationState
   pr: any | null
   arena: any
+  arenaLabel?: string
   profileId?: string | null
   costUsd: number
   busy?: boolean
@@ -39,6 +40,7 @@ export function FocusView({
   state,
   pr,
   arena,
+  arenaLabel: arenaState,
   profileId,
   costUsd,
   busy = false,
@@ -55,7 +57,16 @@ export function FocusView({
   const connector = employee?.connector_status || null
   const progress = typeof task?.progress === 'number' ? Math.max(0, Math.min(100, task.progress)) : null
   const lastTest = station && (station.action === 'test' || station.action === 'lint') ? station : null
-  const arenaLabel = arena?.real_enabled ? t.bridge.arenaApproved : arena ? t.bridge.arenaSimulated : t.bridge.notAvailable
+  const arenaLabel =
+    arenaState === 'approved'
+      ? t.bridge.arenaApproved
+      : arenaState === 'simulated'
+        ? t.bridge.arenaSimulated
+        : arenaState === 'unavailable'
+          ? t.bridge.notAvailable
+          : arena
+            ? t.bridge.notAvailable
+            : t.bridge.notAvailable
 
   const row = (label: string, value: React.ReactNode) => (
     <div className="bridge-side__row">
