@@ -313,6 +313,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
             )
 
     # 8. Seed Initial Manager Chat & Approval & Git Record
+    # The greeting is seeded once with an `i18n_key` marker so the UI can render it in the operator's
+    # language (AR/EN/FA) instead of the English text stored here. `content` stays as the fallback for
+    # API consumers and for clients that do not resolve the key.
     existing_chat = await db.execute(select(ChatMessage).limit(1))
     if not existing_chat.scalar_one_or_none():
         db.add(
@@ -322,9 +325,36 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 sender_id="manager-0",
                 recipient_id="user",
                 content="Chief AI Engineering Manager online. All 4 Worker Agents initialized across 12 Divisions. Ready to coordinate parallel execution, monitor Browser Wall, and enforce Approval Center policies.",
-                metadata_json={"divisions_active": 12, "workers_online": 4},
+                metadata_json={
+                    "divisions_active": 12,
+                    "workers_online": 4,
+                    "i18n_key": "managerWelcome",
+                },
             )
         )
+    else:
+        # Databases seeded before 3.2.0 carry the greeting without the marker: add it in place so the
+        # same message renders localised without duplicating or rewriting operator history.
+        legacy = list(
+            (
+                await db.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.sender_id == "manager-0", ChatMessage.sender_type == "manager")
+                    .order_by(ChatMessage.created_at.asc())
+                    .limit(5)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for message in legacy:
+            meta = dict(message.metadata_json or {})
+            if meta.get("i18n_key"):
+                continue
+            if not str(message.content or "").startswith("Chief AI Engineering Manager online."):
+                continue
+            meta["i18n_key"] = "managerWelcome"
+            message.metadata_json = meta
 
     existing_git = await db.execute(select(GitWorkflowRecord).limit(1))
     if not existing_git.scalar_one_or_none():

@@ -18,6 +18,44 @@ fi
 
 mkdir -p logs
 
+bridge_port_open() {
+  "$ROOT_DIR/.venv/bin/python" - "$1" <<'PY' >/dev/null 2>&1
+import socket, sys
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(1.0)
+    raise SystemExit(0 if sock.connect_ex(("127.0.0.1", port)) == 0 else 1)
+PY
+}
+
+stop_pid_file() { # stop_pid_file <name> <expected pattern>
+  local name="$1" pattern="$2" pid_file="$ROOT_DIR/logs/$1.pid"
+  [[ -f "$pid_file" ]] || return 0
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  rm -f "$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  local cmdline
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  if [[ -n "$cmdline" ]] && ! printf '%s' "$cmdline" | grep -q -- "$pattern"; then
+    echo "[AATM] $name: PID $pid is not ours ('$cmdline'); leaving it alone." >&2
+    return 0
+  fi
+  echo "[AATM] $name: stopping stale process (PID $pid)..."
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+}
+
+backend_healthy() {
+  curl -fsS --max-time 2 "http://127.0.0.1:${BACKEND_PORT}/api/health" >/dev/null 2>&1
+}
+
+
 echo "[AATM] Running database migrations (alembic upgrade head)..."
 (cd "$ROOT_DIR/backend" && "$ROOT_DIR/.venv/bin/alembic" upgrade head)
 
@@ -37,9 +75,14 @@ fi
 # It reads ARENA_BRIDGE_TOKEN and the Arena approval flags from .env; real Arena stays off
 # unless ARENA_CONNECTOR_ENABLED, ARENA_AUTOMATION_APPROVED and ARENA_APPROVAL_REFERENCE are set.
 if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
-  if [[ -f logs/bridge.pid ]] && kill -0 "$(cat logs/bridge.pid)" 2>/dev/null; then
+  if [[ -f logs/bridge.pid ]] && kill -0 "$(cat logs/bridge.pid)" 2>/dev/null && \
+     bridge_port_open "${ARENA_BRIDGE_PORT:-4100}"; then
     echo "[AATM] Bridge already running (PID $(cat logs/bridge.pid))."
   else
+    if [[ -f logs/bridge.pid ]]; then
+      echo "[AATM] Bridge PID file is stale or the bridge is not listening — restarting it."
+      stop_pid_file bridge bridge.server
+    fi
     echo "[AATM] Starting local Arena bridge on 127.0.0.1:${ARENA_BRIDGE_PORT:-4100}..."
     (set -a; [[ -f .env ]] && . ./.env; set +a; \
       ARENA_BRIDGE_HOST=127.0.0.1 nohup "$ROOT_DIR/.venv/bin/python" -m bridge.server \
@@ -47,9 +90,25 @@ if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
   fi
 fi
 
-if [[ -f logs/backend.pid ]] && kill -0 "$(cat logs/backend.pid)" 2>/dev/null; then
-  echo "[AATM] Backend already running (PID $(cat logs/backend.pid))."
+# A PID file is not proof of a working backend: the process can be alive but dead-locked, failed
+# to migrate, or serving an old build. Health-check first, replace a stale process, and never keep
+# reporting "already running" for a backend that cannot answer /api/health.
+if backend_healthy; then
+  if [[ -f logs/backend.pid ]]; then
+    echo "[AATM] Backend already running and healthy (PID $(cat logs/backend.pid))."
+  else
+    echo "[AATM] A healthy backend is already serving port ${BACKEND_PORT} (not started by this script)."
+    echo "       Use scripts/ubuntu/restart.sh to replace it."
+  fi
 else
+  if [[ -f logs/backend.pid ]] && kill -0 "$(cat logs/backend.pid)" 2>/dev/null; then
+    echo "[AATM] Backend process exists (PID $(cat logs/backend.pid)) but /api/health fails — replacing it."
+  elif command -v ss >/dev/null 2>&1 && ss -ltn "( sport = :${BACKEND_PORT} )" 2>/dev/null | grep -q LISTEN; then
+    echo "[AATM] ERROR: port ${BACKEND_PORT} is in use by a process that is not answering /api/health." >&2
+    echo "       Free the port or choose another one: BACKEND_PORT=8010 scripts/ubuntu/start.sh" >&2
+    exit 1
+  fi
+  stop_pid_file backend uvicorn
   echo "[AATM] Starting Backend API on 0.0.0.0:${BACKEND_PORT}..."
   nohup "$ROOT_DIR/.venv/bin/uvicorn" app.main:app \
     --app-dir "$ROOT_DIR/backend" --host 0.0.0.0 --port "$BACKEND_PORT" \

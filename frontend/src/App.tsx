@@ -19,6 +19,7 @@ import {
   SunMoon,
 } from 'lucide-react'
 import { Badge, Button, Input } from './components/ui'
+import { createPortal } from 'react-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { I18nProvider, useI18n } from './i18n/I18nContext'
 import type { Language } from './i18n/types'
@@ -39,8 +40,10 @@ import {
 } from './views/EnterpriseViews'
 import { ApprovalsAuditView, QAView, SettingsNotificationsView } from './views/GovernanceViews'
 import { BrowserWallView, GitWorkflowsView, ProjectsMemoryView, ProvidersView } from './views/InfraViews'
+import CommandBridge from './bridge/Bridge'
 
 type NavTab =
+  | 'bridge'
   | 'dashboard'
   | 'chat'
   | 'agents'
@@ -58,7 +61,7 @@ function AATMWorkspace() {
   const { t, language, setLanguage, formatNumber } = useI18n()
   const { user, loading, login, logout, changePassword, syncPreferences } = useAuth()
 
-  const [tab, setTab] = useState<NavTab>('dashboard')
+  const [tab, setTab] = useState<NavTab>('bridge')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('aatm_theme') === 'light' ? 'light' : 'dark'))
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
 
@@ -196,9 +199,9 @@ function AATMWorkspace() {
             return
           }
           window.dispatchEvent(new CustomEvent(LIVE_EVENT, { detail: parsed }))
-          if (parsed?.type === 'agent.iteration') {
+          if (parsed?.type === 'agent.iteration' || parsed?.type === 'agent.code') {
             setWsStatus('live')
-            return // streamed into the live log; no full reload per iteration
+            return // streamed into the live log / command bridge; no full reload per frame
           }
         } catch {
           // non-JSON event triggers reload
@@ -445,6 +448,24 @@ function AATMWorkspace() {
         </div>
 
         <nav className="flex-1 space-y-1">
+          <button
+            onClick={() => setTab('bridge')}
+            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition ${
+              tab === 'bridge'
+                ? 'bg-cyan-500/20 font-medium text-cyan-300'
+                : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
+            }`}
+            data-testid="nav-bridge"
+          >
+            <span className="flex items-center gap-2.5">
+              <Cpu className="h-4 w-4" />
+              {t.bridge.title}
+            </span>
+          </button>
+          <div className="mt-3 mb-1 flex items-center justify-between px-3 text-[11px] uppercase tracking-wider text-slate-500">
+            <span>{t.bridge.advanced}</span>
+            <span className="normal-case tracking-normal text-slate-600">{t.bridge.advancedHint}</span>
+          </div>
           {navItems.map((item) => (
             <button
               key={item.id}
@@ -480,6 +501,9 @@ function AATMWorkspace() {
       <div className="flex flex-1 flex-col">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/50 px-5 py-3">
           <div className="flex w-full items-center gap-1.5 overflow-x-auto pb-1 md:hidden" aria-label="Mobile navigation">
+            <Button size="sm" className="shrink-0" variant={tab === 'bridge' ? 'primary' : 'secondary'} onClick={() => setTab('bridge')}>
+              {t.bridge.title}
+            </Button>
             {navItems.map((item) => (
               <Button
                 key={item.id}
@@ -536,6 +560,14 @@ function AATMWorkspace() {
             </Button>
           </div>
         </header>
+
+        {tab === 'bridge' &&
+          createPortal(
+            <div className="bridge-shell" data-testid="bridge-overlay">
+              <CommandBridge wsStatus={wsStatus} onOpenAdvanced={(next) => setTab((next as NavTab) || 'dashboard')} />
+            </div>,
+            document.body,
+          )}
 
         <main className="flex-1 space-y-6 p-5">
           {errorBanner && (

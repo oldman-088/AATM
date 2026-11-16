@@ -43,7 +43,12 @@ The dashboard timeline (`GET /projects/{id}/timeline`) computes each step's stat
 | `qa/` | Secret scanner, self-healing sweep, team intelligence |
 
 The data model uses SQLAlchemy 2 async models with Alembic migrations, and verify.sh enforces a single head.
-Events go out on `/ws/events` (authenticated). The live agent log streams `agent.iteration` events.
+Events go out on `/ws/events` (authenticated). The live agent log streams `agent.iteration` events, and
+`agent.code` carries the per-agent live code stream (file content/diffs, pytest + ruff output, review
+comments) that the Command Bridge renders on the workstation screens. The buffer behind it is read with
+`GET /api/v1/agents/{id}/code-stream?limit=` (see `docs/design/BRIDGE_BACKEND_MAP.md`). With
+`DEMO_MODE=true` the same screens render a scripted, labelled feed from `GET /api/v1/demo/code-stream`
+instead (`demo: true` on every frame, amber badge in the HUD, refused in production).
 
 ## 3. Bridge (`bridge/`)
 A loopback FastAPI daemon (`127.0.0.1:4100`) with three parts:
@@ -53,7 +58,7 @@ A loopback FastAPI daemon (`127.0.0.1:4100`) with three parts:
 
 ## 4. Frontend (`frontend/src/`)
 React 18, TypeScript, Vite and Tailwind, with i18n in `i18n/{en,ar,fa}.ts`. Arabic is the default and the layout uses CSS logical properties for RTL.
-- **Views:** `DashboardViews.tsx` (mission control, timeline, employee cards, live log, PR view, recovery), `ArenaViews.tsx` (connector panel), and the Core/Infra/Governance/Enterprise views.
+- **Views:** `bridge/` (the Command Bridge home screen: starship floor, 4+ workstations with live code screens, manager holo-table with the 8 mission stage lights, commander console, focus view; plain CSS 3D — no WebGL), `DashboardViews.tsx` (mission control, timeline, employee cards, live log, PR view, recovery), `ArenaViews.tsx` (connector panel), and the Core/Infra/Governance/Enterprise views, all reachable from the "متقدم / Advanced" menu.
 - **API calls** use relative `/api` and `/ws` URLs only.
 
 ## 5. Team ownership (multi-agent development)

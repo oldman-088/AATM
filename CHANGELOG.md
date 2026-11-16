@@ -2,6 +2,56 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.2.0] — 2026-11-16 (branch `arena/e4d4b142-aatm`)
+
+### Added — Command Bridge (the new home screen)
+- **`agent.code` live code stream (B1)**: every agent write/edit, pytest/ruff run and review comment is
+  published on `/ws/events` as `{agent_id, task_id, action, path, language, count, frames[], at}`.
+  Frames carry file content (≤400 lines / 32 KB) and diff hunks, the **logical** command (`pytest`,
+  `ruff check`) with its output lines (80 / 4 KB), review events and a bounded `done` summary; every
+  frame is redacted, re-checked, sensitive paths (`.env`, keys, tokens, `.git/`) are dropped, model
+  reasoning never leaves the process, ≤20 frames per event are flushed every 100 ms per agent, and a
+  120-frame per-agent buffer is served by `GET /agents/{id}/code-stream?limit=` and
+  `GET /code-stream?limit=`.
+- **Bridge screen (B2)**: Arabic-first sci-fi command bridge as the default route — panoramic window
+  with drifting stars, planet and a `perspective(700px)` floor grid, 44 px HUD (mission, crew, engine,
+  Arena, `T+HH:MM:SS`, socket state), four workstations whose tilted holo-screens stream the real code,
+  inline-SVG robots reacting to real state, hex name tags with short localised roles, a manager column
+  with a holo-table whose 8 stage lights mirror `/projects/{id}/timeline`, and a fixed commander console
+  (real manager chat, approvals, emergency stop). Click a robot to zoom into a 760×510 screen with a
+  300 px side panel (engine, Arena session, Tampermonkey, task, progress, tests, cost, PR) that only
+  offers controls the backend supports; `Esc` returns. Below 900 px the scene becomes one scrolling
+  column of station cards with a docked console. Plain CSS only (no WebGL/Three.js); fonts bundled with
+  `@fontsource`; animations respect `prefers-reduced-motion` and pause on a hidden tab.
+- **`متقدم / Advanced` menu**: every previous screen moved under one menu entry; nothing was removed.
+  The shell keeps the 12 advanced views and the HUD links to them.
+- **Demo mode (B3)**: `DEMO_MODE=true` serves a scripted, clearly labelled feed
+  (`GET /demo/code-stream`, every frame `demo: true`, `/api/health` → `demo_mode: true`, amber badge in
+  the HUD) so the bridge can be shown without a model key or repository. It never writes to the
+  database, never calls a model, is off by default, is refused in production, and replaces (never mixes
+  with) the live stream.
+- Localised manager welcome: the seeded greeting carries `metadata_json.i18n_key="managerWelcome"`, so
+  the bridge and the chat view render it in AR/EN/FA; older databases are repaired in place on the next
+  seed run.
+
+### Fixed — installer & startup (P1)
+- SQLite is pinned to `<repo>/data/aatm.db` (relative URLs resolve against the repository root, `data/`
+  is created) so `start.sh`, Alembic and the API always open the same file.
+- `install.sh` picks free ports for 5432/5672/15672/6379 (writing them to `.env` and printing them),
+  retries interrupted downloads (`--retry-downloads` for Playwright Chromium and the sandbox image),
+  never overwrites existing secrets and prints "existing admin kept" instead of a new password.
+- `start.sh` no longer trusts a stale PID file (healthy → reused, stale → replaced); new
+  `scripts/ubuntu/restart.sh` and `scripts/ubuntu/reset-admin-password.sh` (rotates the PBKDF2 hash,
+  sets `must_change_password`, bumps `token_version`, writes an audit entry, prints the password once).
+
+### Tests
+- Backend: `tests/test_b1_code_stream.py` (13), `tests/test_b2_bridge_ui_contract.py` (3),
+  `tests/test_b3_demo_mode.py` (4), `tests/test_p1_installer.py` (6).
+- Frontend: 20 Command Bridge vitest cases (live frames, focus + Esc, supported controls, real
+  directive, stage lights, onboarding strip, demo mode, mobile cards, AR/EN, reduced motion).
+- Playwright (`cd frontend && npm run test:e2e`): 1440×900 wide + focus and 390×844 mobile, with the
+  committed screenshots in `docs/design/` and a no-horizontal-overflow assertion at 390 px.
+
 ## [3.1.0] — 2026-11-16 (branch `aatm-complete`)
 
 ### Security (A)

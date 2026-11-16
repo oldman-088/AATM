@@ -119,6 +119,14 @@ bash scripts/ubuntu/verify.sh
 ## 8. Arena Browser Connector Safety (Phase 6)
 - Real Arena use is **off by default**: it needs `ARENA_CONNECTOR_ENABLED=true`, `ARENA_AUTOMATION_APPROVED=true` and a non-empty `ARENA_APPROVAL_REFERENCE`. Otherwise every real-Arena path returns `not_enabled`. The bridge checks the same three flags in its own environment before accepting a non-loopback origin. `ARENA_MOCK_URL` accepts loopback URLs only.
 - The human signs in to Arena manually in each employee's own profile. There is no account pooling or rotation, and AATM never reads cookies, storage or tokens.
+- Demo mode (`DEMO_MODE`) is a read-only scripted feed: no writes, no model calls, refused in production,
+  every frame flagged `demo: true`, badged in the UI and never mixed with live agent output.
+- The live code stream (`agent.code` / `GET /api/v1/agents/{id}/code-stream`) only carries artefacts an agent
+  actually produced: file content and diffs, the logical pytest/ruff command with its output, and review
+  comment bodies. Every frame is redacted (`redact_secrets`) and re-checked before it is buffered, frames
+  that still look like they carry a credential are dropped, sensitive paths (`.env`, keys, tokens, `.git/`)
+  never enter the stream, model prompts/private reasoning are never streamed, and frames are capped at
+  400 lines / 32 KB with a 120-frame per-agent ring buffer.
 - The userscript is generated per profile with `@grant none`, `@noframes`, and `@match` limited to the mock URL plus approved Arena domains. It is reviewed and installed by a human in Tampermonkey. AATM never injects scripts (`run_userscript` stays HTTP 501). The per-profile connector token is shown once; only its SHA-256 is stored, and the stored copy of the script is redacted.
 - One in-flight request per profile, a minimum delay between requests and a daily cap, which survives token rotation.
 - Any human-verification element, verification page, rate-limit message or terms prompt stops that profile with `needs_human`. The task is blocked, a critical notification is raised, and there is no failover to paid providers. AATM never solves or bypasses such checks. A human resolves it in the browser and clicks **Resume**.

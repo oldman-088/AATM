@@ -1,4 +1,4 @@
-# AATM — AI Agent Team Manager (v3.1.0)
+# AATM — AI Agent Team Manager (v3.2.0)
 
 A manager AI turns your directive (Arabic or English) into tasks. Four AI workers execute them **in
 parallel**, each in its own git worktree and browser profile, and open draft PRs. A reviewer comments,
@@ -16,7 +16,10 @@ parallel**, each in its own git worktree and browser profile, and open draft PRs
 ```bash
 ./scripts/ubuntu/install.sh      # Postgres + RabbitMQ + Redis via Docker (use --sqlite to skip), venv, npm, Chromium
 ./scripts/ubuntu/start.sh        # backend :8000, local Arena bridge 127.0.0.1:4100, UI :5173
+./scripts/ubuntu/restart.sh      # after changing .env / pulling (health-checked restart)
+./scripts/ubuntu/reset-admin-password.sh   # lost the admin password? rotate it, printed once
 ./scripts/ubuntu/verify.sh       # all release gates (lint, migrations, backend/bridge/frontend tests, secret scan, build)
+cd frontend && npm run test:e2e  # Playwright: 1440×900 + 390×844 bridge layout + docs/design screenshots
 ./scripts/demo_e2e.sh --check    # end-to-end demo prerequisites (see docs/OPERATIONS.md)
 ```
 Windows 11: `.\scripts\windows\install.ps1`, then `.\scripts\windows\start.ps1`.
@@ -32,6 +35,16 @@ Windows 11: `.\scripts\windows\install.ps1`, then `.\scripts\windows\start.ps1`.
   (`ARENA_CONNECTOR_ENABLED`, `ARENA_AUTOMATION_APPROVED`, `ARENA_APPROVAL_REFERENCE`). You then sign in
   yourself in each employee's profile and install the reviewed userscript. AATM never solves
   verification checks, reads cookies, or rotates accounts.
+
+## The Command Bridge (v3.2.0 home screen)
+After login AATM opens **جسر القيادة / Command Bridge**: a starship bridge where each employee sits at a
+workstation and its tilted holo-screen streams the code that agent is actually writing right now
+(`agent.code` on the authenticated WebSocket), what pytest/ruff said, and the review comment it left.
+The manager stands at the holo-table whose eight lights follow the real project timeline, and the
+commander console at the bottom is a real chat with the manager (plus approvals and the emergency stop).
+Click a robot to zoom in (`Esc` returns); every previous screen lives under **متقدم / Advanced**.
+No WebGL, no game engine — plain React, CSS 3D transforms and inline SVG, ~12 kB gzipped.
+Want to show it without a model key? Set `DEMO_MODE=true` — the feed is scripted and badged "وضع العرض".
 
 ## Upgrading from 3.0.0
 Run `git pull`, then `scripts/ubuntu/install.sh` (it applies migrations), then `scripts/ubuntu/start.sh`. New settings are listed in

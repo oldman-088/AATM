@@ -1748,14 +1748,15 @@ async def test_e2e_postgresql_url_normalization_and_alembic_sql_ddl_compilation(
         assert normalize_database_url(raw_pg, async_driver=True) == expected_pg
         assert normalize_database_url(raw_pg, async_driver=False) == expected_pg
 
-    assert (
-        normalize_async_database_url("sqlite:///./data/aatm.db")
-        == "sqlite+aiosqlite:///./data/aatm.db"
-    )
-    assert (
-        normalize_sync_database_url("sqlite+aiosqlite:///./data/aatm.db")
-        == "sqlite:///./data/aatm.db"
-    )
+    # Since 3.2.0 (P1 installer item 1) a relative SQLite path is resolved against the repo root,
+    # so `start.sh`/`install.sh` and the backend always open the same database file.
+    repo_root = Path(__file__).resolve().parents[2]
+    expected_sqlite_async = f"sqlite+aiosqlite:///{repo_root}/data/aatm.db"
+    expected_sqlite_sync = f"sqlite:///{repo_root}/data/aatm.db"
+    assert normalize_async_database_url("sqlite:///./data/aatm.db") == expected_sqlite_async
+    assert normalize_sync_database_url("sqlite+aiosqlite:///./data/aatm.db") == expected_sqlite_sync
+    # In-memory databases must stay in memory.
+    assert normalize_async_database_url("sqlite:///:memory:") == "sqlite+aiosqlite:///:memory:"
 
     pg_settings = Settings(DATABASE_URL="postgres://aatm@localhost:5432/aatm")
     assert pg_settings.get_async_database_url() == expected_pg

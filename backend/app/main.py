@@ -17,7 +17,9 @@ import app.models  # noqa: F401
 from app.api.routes import (
     arena,
     auth,
+    code_stream,
     dashboard,
+    demo,
     devices,
     governance,
     infra,
@@ -35,6 +37,7 @@ from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, get_db
 from app.models import User
 from app.providers.router import get_model_configuration_status
+from app.runtime.demo import demo_mode_active
 from app.runtime.sandbox import get_sandbox_status
 
 WS_AUTH_TIMEOUT_SECONDS = 5.0
@@ -170,6 +173,7 @@ async def health(db: AsyncSession = Depends(get_db)):
         "environment": settings.ENVIRONMENT,
         "sandbox": await get_sandbox_status(),
         "model_status": model_status,
+        "demo_mode": demo_mode_active(),
     }
 
 
@@ -186,6 +190,8 @@ app.include_router(reviews.router, prefix=API_PREFIX)
 app.include_router(scaling.router, prefix=API_PREFIX)
 app.include_router(arena.router, prefix=API_PREFIX)
 app.include_router(dashboard.router, prefix=API_PREFIX)
+app.include_router(code_stream.router, prefix=API_PREFIX)
+app.include_router(demo.router, prefix=API_PREFIX)
 
 
 async def _authenticate_websocket(websocket: WebSocket) -> tuple[User | None, int, str]:
