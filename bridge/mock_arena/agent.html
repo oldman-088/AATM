@@ -57,10 +57,67 @@
   var variant = params.get("variant") || "";   // human_check | human_check_after_send | login | disconnected | recover
   var composerKind = params.get("composer") || "textarea";  // textarea | contenteditable
   var finalReport = params.get("report") || "Implementation summary: mock work done.\nModified files: feature.py\nTests: 1 passed";
-  var stats = { submits: 0, kw_clicks: 0, new_sessions: 0, generations: 0 };
+  var stats = { submits: 0, kw_clicks: 0, new_sessions: 0, generations: 0, submits_while_generating: 0,
+                manager_prompts: [] };
   window.__mockArena = stats;
   // Test hook: the next final reply (the agent's report) changes between review rounds.
   stats.setReport = function (text) { finalReport = String(text); };
+
+  // ---------------------------------------------------------------- R7: answering as the manager
+  // A prompt that carries an [AATM-MANAGER:<KIND>] marker gets a manager answer instead of a report:
+  // CONTEXT -> short ack, CHAT -> Arabic prose, STATUS -> echoes the real state AATM sent, PLAN -> a plan
+  // JSON block, REVIEW -> a verdict JSON block. The "JSON only" retry repeats the last JSON kind.
+  // mgr_invalid=N (or setManager({invalid: N})) makes the next N JSON answers invalid prose.
+  // mgr_reviews=request_changes,approve sets the verdict sequence (default: approve).
+  var manager = {
+    invalid: num("mgr_invalid", 0),
+    reviews: (params.get("mgr_reviews") || "").split(",").filter(Boolean),
+    chat: "مرحبًا، أنا المدير. الفريق جاهز، وسأوزّع العمل حسب تخصص كل موظف.",
+    plan: {
+      summary_ar: "خطة من مهمتين: الواجهة الخلفية ثم اختبارها.",
+      tasks: [
+        { title: "Add answer()", assignee: "worker-1", description: "Create answer() returning 42 with a pytest test.",
+          acceptance_criteria: ["answer() returns 42", "tests/test_answer.py covers it"], depends_on: [] },
+        { title: "Document answer()", assignee: "worker-2", description: "Document answer() in README.md.",
+          acceptance_criteria: ["README.md mentions answer()"], depends_on: [0] }
+      ]
+    },
+    lastJsonKind: null
+  };
+  stats.setManager = function (cfg) { Object.keys(cfg || {}).forEach(function (k) { manager[k] = cfg[k]; }); };
+
+  function fenced(obj) { return "Here is the result.\n```json\n" + JSON.stringify(obj, null, 2) + "\n```"; }
+  function jsonAnswer(kind) {
+    manager.lastJsonKind = kind;
+    if (manager.invalid > 0) {
+      manager.invalid -= 1;
+      return kind === "PLAN" ? "Sure! I would split this into a backend task and a docs task." : "Looks fine to me overall.";
+    }
+    if (kind === "PLAN") return fenced(manager.plan);
+    var verdict = manager.reviews.length ? manager.reviews.shift() : "approve";
+    if (verdict === "request_changes") {
+      return fenced({ verdict: "request_changes", summary_ar: "ينقص اختبار للدالة.", comments: ["Add tests/test_answer.py with a test for answer()."] });
+    }
+    return fenced({ verdict: "approve", summary_ar: "التغييرات تطابق معايير القبول.", comments: [] });
+  }
+  function managerReply(text) {
+    var m = /\[AATM-MANAGER:([A-Z]+)\]/.exec(text);
+    var retry = text.indexOf("Reply again with only the JSON block, no other text.") === 0;
+    if (!m && !retry) return null;
+    var kind = m ? m[1] : "RETRY";
+    stats.manager_prompts.push({ kind: kind, chars: text.length });
+    if (retry) return jsonAnswer(manager.lastJsonKind || "PLAN");
+    if (kind === "CONTEXT") return "جاهز.";
+    if (kind === "CHAT") return manager.chat;
+    if (kind === "STATUS") {
+      var start = text.indexOf("## Current state");
+      var end = text.indexOf("Answer in Arabic");
+      return "الوضع الآن حسب بيانات AATM:\n" + (start >= 0 ? text.slice(start, end > start ? end : undefined).trim() : "(لا بيانات)");
+    }
+    if (kind === "PLAN" || kind === "REVIEW") return jsonAnswer(kind);
+    return "تم.";
+  }
+  var nextReply = null;
 
   var log = document.getElementById("log");
   var widget = document.getElementById("widget");
@@ -138,7 +195,7 @@
         widget.hidden = false;      // "Was this task successful?" + Keep working
         box.hidden = true;          // the widget replaces the composer, like Arena
       } else {
-        bubble.textContent = finalReport;
+        bubble.textContent = nextReply !== null ? nextReply : finalReport;
       }
     }, genMs);
   }
@@ -147,6 +204,8 @@
     var text = draft;
     if (!text.trim()) return;
     stats.submits += 1;
+    if (!stopBtn.hidden) stats.submits_while_generating += 1;   // must stay 0: one prompt in flight
+    nextReply = managerReply(text);
     draft = "";
     render();
     add("user", text, "user");
