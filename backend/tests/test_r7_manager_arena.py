@@ -741,3 +741,22 @@ async def _job_in(env, kind: str, statuses: set[str]):
     async with env() as db:
         jobs = list((await db.execute(select(ManagerJob).where(ManagerJob.kind == kind))).scalars())
     return [j for j in jobs if j.status in statuses] or None
+
+
+# =========================================================================== R7.5 docs
+def test_operations_guide_explains_running_the_manager_on_arena_with_existing_settings():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    doc = (root / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+    start = doc.index("## تشغيل المدير عبر Arena")
+    section = doc[start:doc.index("\n## ", start + 10)]
+    for needle in ("google-chrome --user-data-dir=$HOME/.aatm-profiles/manager", "سجّل الدخول إلى Arena", "بطاقة المدير",
+                   "اختبار المحددات", "AATM_MANAGER_PROVIDER=arena_agent", "الهدف الأول", NOT_CONNECTED_AR,
+                   MANAGER_JSON_RETRY, "20 دقيقة", "لا يدمج أبداً", "ARENA_MANAGER_MAX_EXCHANGES"):
+        assert needle in section, needle
+    documented = set(re.findall(r"\b((?:ARENA|AATM)_[A-Z_]+)=", section))
+    assert {"AATM_MANAGER_PROVIDER", "ARENA_MANAGER_MAX_EXCHANGES"} <= documented
+    assert documented - set(Settings.model_fields) == set()
+    env_example = (root / ".env.example").read_text(encoding="utf-8")
+    assert "AATM_MANAGER_PROVIDER=" in env_example and "ARENA_MANAGER_MAX_EXCHANGES=" in env_example
