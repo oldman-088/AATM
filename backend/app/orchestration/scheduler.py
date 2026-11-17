@@ -245,6 +245,16 @@ class TaskScheduler:
             await db.rollback()
             arena = {"error": type(exc).__name__}
         review_tasks_created = await review_service.create_pending_reviews(db)
+        manager: dict[str, Any] = {}
+        try:
+            from app.orchestration.manager_arena import manager_arena_runtime, manager_provider_mode
+
+            if await manager_provider_mode(db) == "arena_agent":
+                manager = await manager_arena_runtime.tick(db)
+        except Exception as exc:  # noqa: BLE001 - the manager runtime must never break dispatch
+            logger.warning("Manager Arena tick failed: %s", type(exc).__name__)
+            await db.rollback()
+            manager = {"error": type(exc).__name__}
         # Employees whose Arena session still owns a PR only take that PR's follow-ups (same session).
         reserved = await arena_reservations(db)
 
@@ -407,6 +417,7 @@ class TaskScheduler:
             "session_recovery": session_recovery,
             "review_tasks_created": review_tasks_created,
             "arena": arena,
+            "manager": manager,
             "scaling": scaling,
         }
 
@@ -741,7 +752,15 @@ class TaskScheduler:
         await event_bus.emit("chat.message", {"id": message.id, "sender": "manager-0", "content": message.content})
         return message
 
-    async def handle_manager_directive(self, db: AsyncSession, project_id: str | None, content: str) -> ChatMessage:
+    async def handle_manager_directive(
+        self,
+        db: AsyncSession,
+        project_id: str | None,
+        content: str,
+        *,
+        user_message_id: str | None = None,
+        intent: str | None = None,
+    ) -> ChatMessage:
         """Use manager-0 to interpret a directive into a validated task DAG and localized reply."""
         actions_taken: list[str] = []
 
@@ -780,6 +799,15 @@ class TaskScheduler:
                 "لتشغيل المدير فعليًا اضبط AATM_MANAGER_PROVIDER على arena_agent أو مزود نماذج.",
                 actions_taken,
                 metadata={"demo": True, "manager_provider": "demo"},
+            )
+
+        if manager_mode == "arena_agent":
+            # R7: the manager answers from its own Arena session. No demo answer and no model fallback:
+            # when the manager profile is not connected the console says so and the job waits.
+            from app.orchestration.manager_arena import manager_arena_runtime
+
+            return await manager_arena_runtime.handle_owner_message(
+                db, project_id, content, user_message_id=user_message_id, intent=intent, gated_categories=gated_categories
             )
 
         manager = await db.get(Agent, "manager-0")

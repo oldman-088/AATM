@@ -400,6 +400,8 @@ class ChatSendRequest(BaseModel):
     project_id: str | None = None
     content: str = Field(min_length=1)
     recipient_id: str | None = "manager-0"
+    # R7 (manager on Arena): chat | goal | status; empty = detected from the message (see manager_arena).
+    intent: str | None = Field(default=None, pattern="^(auto|chat|goal|status)$")
 
 
 class ApprovalCreate(BaseModel):

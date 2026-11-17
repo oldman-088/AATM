@@ -93,6 +93,11 @@ class ArenaSession(Base):
     task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # The task currently driving this session: the implementation task, or a correction follow-up.
     active_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # R7: worker = one task per session; manager = manager-0's long-lived session for one project.
+    kind: Mapped[str] = mapped_column(String(16), default="worker", server_default="worker", nullable=False, index=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Prompts answered in this session (the manager starts a new session after ARENA_MANAGER_MAX_EXCHANGES).
+    exchange_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     # Page state reported by the userscript: ready|generating|idle|keep_working_visible|needs_human|offline
     page_state: Mapped[str] = mapped_column(String(32), default="offline", nullable=False)
     # Workflow phase: new|starting|submitting|working|awaiting_pr|reporting|reviewing|correcting|
@@ -130,3 +135,34 @@ class BrowserSession(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recovery_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ManagerJob(Base):
+    """One job for manager-0 on Arena (R7): owner chat, planning, PR review, status question, session context.
+
+    Jobs are persisted so a job that waits for the manager's Arena profile (not connected) survives
+    restarts and runs once the profile is back. One manager prompt is in flight at a time.
+    """
+
+    __tablename__ = "manager_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # chat|plan|review|status|context
+    # queued|waiting_connection|running|done|needs_human|failed
+    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False, index=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    request_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    chat_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)   # the owner's message
+    reply_message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # the manager's console reply
+    review_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    context: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    json_retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    raw_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

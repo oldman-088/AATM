@@ -177,6 +177,9 @@ class Settings(BaseSettings):
     # anthropic_claude / openai_compatible = the first enabled provider of that type; demo = labelled
     # demo replies that never create tasks. Empty = the provider assigned to manager-0 (wizard / DB).
     AATM_MANAGER_PROVIDER: str = Field(default="", pattern="^(|arena_agent|anthropic_claude|openai_compatible|demo)$")
+    # R7: the manager keeps one long-lived Arena session per project; after this many exchanges it starts a
+    # new session (with a short context prompt). 0 = never rotate on count.
+    ARENA_MANAGER_MAX_EXCHANGES: int = Field(default=40, ge=0)
     # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
     ARENA_DOM_SELECTORS: str = ""
     # Phase 5 - True parallelism / autoscaling

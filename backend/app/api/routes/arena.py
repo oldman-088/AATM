@@ -290,6 +290,34 @@ async def session_live_diff(session_id: str, refresh: bool = False, db: AsyncSes
     return await arena_runner.live_diff(db, session, refresh=refresh)
 
 
+class ManagerNewSessionBody(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
+
+
+@router.post("/arena/manager/new-session", dependencies=[Depends(require_role("admin", "operator"))])
+async def manager_new_session(body: ManagerNewSessionBody | None = None, user: User = Depends(get_current_user),
+                              db: AsyncSession = Depends(get_db)):
+    """R7 'New session' on the manager card: close the manager's session and start a new one with context."""
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    if not arena_gate()["enabled"]:
+        raise _not_enabled()
+    job = await manager_arena_runtime.request_new_session(db, body.project_id if body else None, actor=user.email)
+    return {"ok": True, "job_id": job.id, "status": job.status}
+
+
+@router.get("/arena/manager/jobs")
+async def manager_jobs(limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """Recent manager jobs (chat, plan, review, status, context) with their state; raw replies are not included."""
+    from app.models import ManagerJob
+
+    rows = (await db.execute(select(ManagerJob).order_by(ManagerJob.created_at.desc()).limit(max(1, min(limit, 100))))).scalars()
+    return {"jobs": [{"id": j.id, "kind": j.kind, "status": j.status, "project_id": j.project_id, "error": j.error,
+                      "review_task_id": j.review_task_id, "json_retries": j.json_retries, "has_raw_reply": bool(j.raw_reply),
+                      "created_at": j.created_at.isoformat() if j.created_at else None,
+                      "finished_at": j.finished_at.isoformat() if j.finished_at else None} for j in rows]}
+
+
 class AssignTaskBody(BaseModel):
     task_id: str = Field(min_length=1, max_length=36)
 
@@ -345,12 +373,22 @@ async def run_profile_command(profile_id: str, body: ArenaCommandBody, user: Use
         if not (body.text or "").strip():
             raise HTTPException(status_code=422, detail={"code": "text_required", "message": "Submit needs a task prompt."})
         args["text"] = body.text
-    res = await bridge_call(
-        "POST",
-        f"/v1/connector/profiles/{profile.id}/command",
-        {"command": body.command, "args": args, "timeout_seconds": COMMAND_TIMEOUTS[body.command]},
-        timeout=COMMAND_TIMEOUTS[body.command] + 10,
-    )
+    async def _send() -> dict[str, Any]:
+        return await bridge_call(
+            "POST",
+            f"/v1/connector/profiles/{profile.id}/command",
+            {"command": body.command, "args": args, "timeout_seconds": COMMAND_TIMEOUTS[body.command]},
+            timeout=COMMAND_TIMEOUTS[body.command] + 10,
+        )
+
+    if body.command == "submit":
+        # Operator prompts use the same submit path as the workers and the manager (R7).
+        from app.providers.adapters.arena_agent import arena_submit_queue
+
+        async with arena_submit_queue.slot(profile.id, source="operator"):
+            res = await _send()
+    else:
+        res = await _send()
     result = dict(res.get("result") or {}) if res.get("ok") else {}
     if body.command == "read_last_reply" and "text" in result:
         result.update(redact_reply(result.get("text") or ""))

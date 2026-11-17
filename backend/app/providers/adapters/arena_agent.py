@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from app.core.config import get_settings
@@ -30,6 +33,49 @@ from app.providers.base import (
 COMMAND_TIMEOUTS = {"new_session": 90.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
 QUIET_STATES = {"idle", "ready"}
 MAX_REPLY_CHARS = 60_000
+
+
+class ArenaSubmitQueue:
+    """The single submit path for every prompt AATM sends to an Arena page (workers and manager).
+
+    Each profile has one FIFO slot, so one prompt is being sent per browser tab at a time, and every
+    submission is counted per source. Any limit added later (rate, quota, pause) belongs here so it
+    applies to the manager and the workers alike.
+    """
+
+    def __init__(self, history: int = 500) -> None:
+        self._locks: dict[str, tuple[Any, asyncio.Lock]] = {}
+        self.history: deque[dict[str, Any]] = deque(maxlen=history)
+        self.in_flight: dict[str, str] = {}
+        self.max_in_flight: dict[str, int] = {}
+        self._active: dict[str, int] = {}
+
+    def _lock(self, profile_id: str) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        current = self._locks.get(profile_id)
+        if current is None or current[0] is not loop:  # locks never cross event loops (tests, restarts)
+            current = (loop, asyncio.Lock())
+            self._locks[profile_id] = current
+        return current[1]
+
+    @asynccontextmanager
+    async def slot(self, profile_id: str, *, source: str) -> AsyncIterator[None]:
+        async with self._lock(profile_id):
+            self._active[profile_id] = self._active.get(profile_id, 0) + 1
+            self.max_in_flight[profile_id] = max(self.max_in_flight.get(profile_id, 0), self._active[profile_id])
+            self.in_flight[profile_id] = source
+            self.history.append({"profile_id": profile_id, "source": source, "at": time.time()})
+            try:
+                yield
+            finally:
+                self._active[profile_id] -= 1
+                self.in_flight.pop(profile_id, None)
+
+    def sources(self) -> list[str]:
+        return [entry["source"] for entry in self.history]
+
+
+arena_submit_queue = ArenaSubmitQueue()
 
 
 class ArenaAgentError(Exception):
@@ -101,8 +147,9 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         await self.wait_for_state(profile_id, {"ready"}, timeout=ready_timeout)
         return result
 
-    async def submit(self, profile_id: str, text: str) -> dict[str, Any]:
-        result = await self.command(profile_id, "submit", text)
+    async def submit(self, profile_id: str, text: str, *, source: str = "worker") -> dict[str, Any]:
+        async with arena_submit_queue.slot(profile_id, source=source):
+            result = await self.command(profile_id, "submit", text)
         if not result.get("sent"):
             raise ArenaAgentError("send_failed", "The Arena page did not confirm the message was sent.")
         return result

@@ -208,6 +208,10 @@ export function ArenaAgentDashboard() {
   const resume = (row: any) => run(`${row.agent_id}:resume`, async () => {
     await apiFetch<any>(`/arena/profiles/${row.profile_id}/resume`, { method: 'POST' })
   })
+  // R7: the manager's New session goes through the manager runtime (new long-lived session + context prompt).
+  const managerNewSession = (row: any) => run(`${row.agent_id}:new_session`, async () => {
+    await apiFetch<any>('/arena/manager/new-session', { method: 'POST', body: JSON.stringify({}) })
+  })
   const assign = (row: any) => run(`${row.agent_id}:assign`, async () => {
     const taskId = choice[row.agent_id]
     if (!taskId) return
@@ -289,7 +293,7 @@ export function ArenaAgentDashboard() {
         <div className="mt-3 flex flex-wrap gap-1.5">
           <Button size="sm" variant="secondary" disabled={!gate?.enabled || busy === mk('script')} onClick={() => script(m)}><KeyRound className="me-1 h-4 w-4" />{m.token_issued ? a.rotateScript : a.generateScript}</Button>
           <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('selector_test')} onClick={() => command(m, 'selector_test')}><ListChecks className="me-1 h-4 w-4" />{a.selectorTest}</Button>
-          <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('new_session')} onClick={() => command(m, 'new_session')}><Plus className="me-1 h-4 w-4" />{a.newSession}</Button>
+          <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('new_session')} onClick={() => managerNewSession(m)}><Plus className="me-1 h-4 w-4" />{a.newSession}</Button>
           <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('read_last_reply')} onClick={() => command(m, 'read_last_reply')}><BookOpen className="me-1 h-4 w-4" />{a.readLastReply}</Button>
           <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('keep_working')} onClick={() => command(m, 'keep_working')}><Play className="me-1 h-4 w-4" />{a.continueWorking}</Button>
           {(m.page_state === 'needs_human' || m.connector_status === 'needs_human') && <Button size="sm" disabled={busy === mk('resume')} onClick={() => resume(m)}><PlayCircle className="me-1 h-4 w-4" />{a.resumeSession}</Button>}

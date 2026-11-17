@@ -411,7 +411,9 @@ async def send_chat(
         "content": user_msg.content,
         "created_at": user_msg.created_at,
     }
-    reply = await task_scheduler.handle_manager_directive(db, body.project_id, body.content)
+    reply = await task_scheduler.handle_manager_directive(
+        db, body.project_id, body.content, user_message_id=user_msg.id, intent=body.intent
+    )
     await db.refresh(reply)
     return {
         "user_message": user_payload,

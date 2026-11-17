@@ -1,5 +1,5 @@
 from app.models.agent import Agent, ApprovalRequest, ChatMessage, Task
-from app.models.infra import AIProvider, ArenaSession, BrowserProfile, BrowserSession, ProviderUsageLog
+from app.models.infra import AIProvider, ArenaSession, BrowserProfile, BrowserSession, ManagerJob, ProviderUsageLog
 from app.models.platform import (
     AgentMessage,
     ExecutionDevice,
@@ -17,6 +17,7 @@ __all__ = [
     "AgentMessage",
     "ApprovalRequest",
     "ArenaSession",
+    "ManagerJob",
     "AuditLog",
     "BrowserProfile",
     "BrowserSession",

@@ -235,7 +235,8 @@ describe('ArenaAgentDashboard manager card (R7)', () => {
     fireEvent.click(within(card).getByRole('button', { name: /Rotate userscript/ }))
     await waitFor(() => expect((within(card).getByLabelText(/Review this script/) as HTMLTextAreaElement).value).toContain('profile-manager'))
     fireEvent.click(within(card).getByRole('button', { name: /Start new session/ }))
-    await waitFor(() => expect(onManager('new_session')).toBeDefined())
+    await waitFor(() => expect(calls.find((c) => c.path.endsWith('/arena/manager/new-session'))?.method).toBe('POST'))
+    expect(onManager('new_session')).toBeUndefined() // the runtime opens the session and sends the context prompt
     // worker cards keep their own controls
     expect(within(screen.getByTestId('arena-employee-worker-1')).getByRole('button', { name: /Selector test/ })).toBeTruthy()
   })

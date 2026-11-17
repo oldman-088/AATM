@@ -111,7 +111,14 @@ class ReviewMergeService:
         existing = (await db.execute(select(Task).where(Task.idempotency_key == key))).scalar_one_or_none()
         if existing is not None:
             return existing
-        reviewer = await self.ensure_reviewer(db)
+        from app.orchestration.manager_arena import manager_reviews_arena_prs
+
+        if await manager_reviews_arena_prs(db, task):
+            # R7: the manager reviews Arena-built PRs in its own Arena session (manager_arena runtime).
+            reviewer = await db.get(Agent, "manager-0")
+        else:
+            reviewer = None
+        reviewer = reviewer or await self.ensure_reviewer(db)
         review = Task(
             project_id=task.project_id,
             division_code="D11",
