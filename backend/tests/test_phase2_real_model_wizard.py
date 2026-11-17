@@ -259,7 +259,12 @@ async def test_wizard_endpoints_and_per_employee_model_assignment(
 ):
     presets_res = await client.get("/api/v1/providers/wizard/presets", headers=auth_headers)
     assert presets_res.status_code == 200
-    assert len(presets_res.json()["options"]) == 3
+    options = presets_res.json()["options"]
+    # R7 added the "Arena Agent (browser)" option; the three original presets are unchanged.
+    assert len(options) == 4
+    assert [o["provider_type"] for o in options] == ["anthropic_claude", "openai_compatible", "arena_local_bridge", "arena_agent"]
+    arena_agent = options[-1]
+    assert arena_agent["requires_api_key"] is False and arena_agent["credential_ref"] == "env:ARENA_BRIDGE_TOKEN"
 
     bad_cred = await client.post(
         "/api/v1/providers/wizard/test-connection",
