@@ -28,7 +28,7 @@ import httpx
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
-SCRIPT_VERSION = "2.0.0"
+SCRIPT_VERSION = "2.0.1"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
 # R7: the manager's own Arena profile (Chrome --user-data-dir=$HOME/.aatm-profiles/manager).
@@ -438,9 +438,66 @@ USERSCRIPT_BODY = r"""(function () {
     }
     var text = pageTextWithoutTranscript();
     for (var k = 0; k < settings.stop_phrases.length; k++) {
-      if (text.indexOf(settings.stop_phrases[k]) !== -1) return "page shows: " + settings.stop_phrases[k];
+      var phrase = settings.stop_phrases[k];
+      if (isTermsPhrase(phrase)) {
+        // A "Terms of Use" link row is on every Arena page; only a real terms prompt stops the session.
+        if (text.indexOf(phrase) !== -1 && termsPromptShown(phrase)) return "page shows: " + phrase;
+      } else if (text.indexOf(phrase) !== -1) {
+        return "page shows: " + phrase;
+      }
     }
     return null;
+  }
+
+  // ---- terms prompts: the phrase counts only inside a dialog / modal / full-screen overlay, or next to
+  // an Accept / Agree button. A plain "Terms of Use" link (a footer-style link row) is not a prompt.
+  function isTermsPhrase(p) { return /\bterms\b/.test(p); }
+  var ACCEPT_LABEL = /\b(accept|agree)\b/i;
+
+  function isModalContainer(el) {
+    if (el.tagName === "DIALOG" && el.open) return true;
+    var role = (el.getAttribute("role") || "").toLowerCase();
+    if (role === "dialog" || role === "alertdialog" || el.getAttribute("aria-modal") === "true") return true;
+    var cs = window.getComputedStyle(el);
+    if (cs.position !== "fixed") return false;
+    var r = el.getBoundingClientRect();
+    return r.width >= window.innerWidth * 0.6 && r.height >= window.innerHeight * 0.6;  // full-screen overlay
+  }
+
+  function acceptButtonNear(start) {
+    // Look a few levels up, but only inside a small block: an "Accept" elsewhere on the page doesn't count.
+    var node = start;
+    for (var depth = 0; node && node !== document.body && depth < 6; depth++, node = node.parentElement) {
+      if (textOf(node).length > 1500) break;
+      var btns = node.querySelectorAll ? node.querySelectorAll("button, [role='button'], input[type='submit'], input[type='button']") : [];
+      for (var i = 0; i < btns.length; i++) {
+        var b = btns[i];
+        var label = (textOf(b) + " " + (b.value || "") + " " + labelOf(b));
+        if (ACCEPT_LABEL.test(label) && isVisible(b)) return true;
+      }
+    }
+    return false;
+  }
+
+  function termsPromptShown(phrase) {
+    var skip = transcriptText().concat([findInput()]).filter(Boolean);
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var seen = [];
+    for (var n = walker.nextNode(); n; n = walker.nextNode()) {
+      if ((n.nodeValue || "").toLowerCase().indexOf("terms") === -1) continue;
+      var el = n.parentElement;
+      // The parent's text, so a phrase split across tags ("terms of <b>use</b>") still matches.
+      while (el && el !== document.body && (el.textContent || "").toLowerCase().replace(/\s+/g, " ").indexOf(phrase) === -1) el = el.parentElement;
+      if (!el || el === document.body || seen.indexOf(el) !== -1) continue;
+      seen.push(el);
+      if (!isVisible(el)) continue;
+      if (skip.some(function (s) { return s.contains(el); })) continue;  // the agent's own words
+      for (var a = el; a && a !== document.body; a = a.parentElement) {
+        if (isModalContainer(a)) return true;
+      }
+      if (acceptButtonNear(el)) return true;
+    }
+    return false;
   }
 
   function offlineReason() {

@@ -239,7 +239,31 @@
     setTimeout(render, 300);
   });
 
+  // Terms variants. terms_links is the real arena.ai link row ("Terms of UsePrivacy PolicyCookies"):
+  // a permanent row of plain links, not in a <footer>, form or dialog -> must NOT stop the session.
+  // terms_dialog / terms_overlay / terms_accept are real prompts -> must stop it.
+  function linkRow() {
+    var row = document.createElement("div");
+    ["Terms of Use", "Privacy Policy", "Cookies"].forEach(function (t) {
+      var a = document.createElement("a"); a.href = "#"; a.textContent = t; row.appendChild(a);
+    });
+    document.querySelector("main").appendChild(row);
+  }
+  function termsPrompt(kind) {
+    var box = document.createElement("div");
+    if (kind === "dialog") { box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); }
+    if (kind === "overlay") { box.style.cssText = "position:fixed;inset:0;background:#000c;padding:40px"; }
+    box.className = "terms-prompt";
+    box.innerHTML = "<p>Before you continue, please review our <a href='#'>Terms of <b>Use</b></a>.</p>" +
+      (kind === "overlay" ? "<button type='button'>Continue</button>" : "<button type='button'>I agree</button>");
+    (kind === "accept" ? document.querySelector("main") : document.body).appendChild(box);
+  }
+
   render();
+  if (variant.indexOf("terms_") === 0) linkRow();
+  if (variant === "terms_dialog") termsPrompt("dialog");
+  if (variant === "terms_overlay") termsPrompt("overlay");
+  if (variant === "terms_accept") termsPrompt("accept");
   if (variant === "human_check") showHumanCheck();
   if (variant === "login") {
     box.hidden = true;

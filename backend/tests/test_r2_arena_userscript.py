@@ -247,6 +247,38 @@ async def test_new_session_url_navigation_and_contenteditable_composer(harness, 
             await browser.close()
 
 
+
+@needs_chromium
+async def test_terms_link_row_is_not_a_human_check_but_a_real_terms_prompt_is(harness):
+    """Real arena.ai shows a permanent 'Terms of UsePrivacy PolicyCookies' link row. It must not stop the
+    session; a terms dialog, a full-screen overlay or a terms notice with an Agree button must."""
+    from playwright.async_api import async_playwright
+
+    base = f"{harness.bridge.base}/mock-arena/agent/"
+    async with async_playwright() as pw:
+        browser = await _browser(pw)
+        try:
+            pid, script = await harness.setup_profile("worker-1")
+            page = await _open(browser, script, f"{base}?variant=terms_links")
+            ready = await harness.wait_state(pid, "ready")
+            assert ready["status"] == "ready" and not ready["needs_human_reason"]
+            assert await page.evaluate("document.body.innerText.includes('Terms of Use')")
+            probe = (await harness.cmd(pid, "selector_test")).json()["result"]
+            assert probe["human_check"] == {"found": False, "reason": None} and probe["ok"] is True
+            assert (await harness.cmd(pid, "submit", "works with the link row")).status_code == 200
+
+            for n, (variant, reason) in enumerate((("terms_dialog", "terms of use"), ("terms_overlay", "terms of use"),
+                                                   ("terms_accept", "terms of use")), start=2):
+                pid_n, script_n = await harness.setup_profile(f"worker-{n}")
+                await _open(browser, script_n, f"{base}?variant={variant}")
+                stopped = await harness.wait_state(pid_n, "needs_human")
+                assert reason in stopped["needs_human_reason"], (variant, stopped["needs_human_reason"])
+                r = await harness.cmd(pid_n, "submit", "must not be sent")
+                assert r.status_code == 409 and r.json()["detail"]["code"] == "needs_human", variant
+        finally:
+            await browser.close()
+
+
 # --------------------------------------------------------------------------- human checks, login wall, offline
 
 
