@@ -110,10 +110,13 @@ else
   fi
   stop_pid_file backend uvicorn
   echo "[AATM] Starting Backend API on 0.0.0.0:${BACKEND_PORT}..."
-  nohup "$ROOT_DIR/.venv/bin/uvicorn" app.main:app \
+  # Export the root .env into the backend's environment, exactly like the bridge above: env:VAR
+  # credential refs and the backend -> bridge ARENA_BRIDGE_TOKEN are read from the process
+  # environment, so both processes must get the same token from the same file.
+  (set -a; [[ -f .env ]] && . ./.env; set +a; \
+    nohup "$ROOT_DIR/.venv/bin/uvicorn" app.main:app \
     --app-dir "$ROOT_DIR/backend" --host 0.0.0.0 --port "$BACKEND_PORT" \
-    > "$ROOT_DIR/logs/backend.log" 2>&1 &
-  echo $! > "$ROOT_DIR/logs/backend.pid"
+    > "$ROOT_DIR/logs/backend.log" 2>&1 & echo $! > "$ROOT_DIR/logs/backend.pid")
 fi
 
 echo "[AATM] Waiting for the backend health endpoint..."
