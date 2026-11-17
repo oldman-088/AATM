@@ -12,6 +12,9 @@ All notable changes to AATM are documented in this file.
   inside a dialog, `aria-modal`, an open `<dialog>`, a full-screen overlay, or next to an Accept / Agree
   button. Captcha, human-check and login-wall detection are unchanged.
 
+- **Tests no longer wipe the live database**: backend and bridge tests now use a temporary SQLite
+  database (`data/aatm.db` was being dropped by every `verify.sh` run); a guard test enforces it.
+
 ### Added
 - **Per-project team** (`project.config.team`): the manager plans only with the listed workers.
 - **`docs/SETUP_AR.md`**: Arabic guide for setting up Arena mode from zero on Ubuntu.
