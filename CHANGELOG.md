@@ -2,6 +2,20 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.4.1] — 2026-11-17
+
+### Fixed
+- **Bridge 401 / every Arena profile "not connected"**: `scripts/ubuntu/start.sh` now exports the root
+  `.env` into the backend's environment, like the bridge, so both use the same `ARENA_BRIDGE_TOKEN`.
+- **Userscript 2.0.1 — "terms of use" false positive**: Arena's permanent
+  `Terms of Use · Privacy Policy · Cookies` link row no longer stops a session. Terms phrases count only
+  inside a dialog, `aria-modal`, an open `<dialog>`, a full-screen overlay, or next to an Accept / Agree
+  button. Captcha, human-check and login-wall detection are unchanged.
+
+### Added
+- **Per-project team** (`project.config.team`): the manager plans only with the listed workers.
+- **`docs/SETUP_AR.md`**: Arabic guide for setting up Arena mode from zero on Ubuntu.
+
 ## [3.2.0] — 2026-11-16 (branch `arena/e4d4b142-aatm`)
 
 ### Added — Command Bridge (the new home screen)

@@ -9,6 +9,8 @@ parallel**, each in its own git worktree and browser profile, and open draft PRs
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | Components, the 8-step workflow, team ownership |
 | [`docs/SECURITY.md`](./docs/SECURITY.md) | Controls, approval gates, Arena connector safety, risk register |
 | [`docs/OPERATIONS.md`](./docs/OPERATIONS.md) | Install, run, providers, dashboard usage, remote nodes, known limitations |
+| [`docs/SETUP_AR.md`](./docs/SETUP_AR.md) | دليل عربي خطوة بخطوة لإعداد وضع Arena من الصفر على Ubuntu |
+| [`docs/SETUP_AR.md`](./docs/SETUP_AR.md) | Arabic step-by-step guide: Arena mode setup from zero on Ubuntu (profiles, Tampermonkey, troubleshooting, backups) |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release notes |
 | [`AGENTS.md`](./AGENTS.md) · [`AATM_MASTER_SPECIFICATION.md`](./AATM_MASTER_SPECIFICATION.md) | Rules for coding agents working on this repo |
 
