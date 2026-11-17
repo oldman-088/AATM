@@ -389,6 +389,7 @@ class CodeStream:
         self._pending: dict[str, list[dict[str, Any]]] = {}
         self._last_emit: dict[str, float] = {}
         self._flusher: asyncio.Task[None] | None = None
+        self._flusher_loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------ buffer
     def record(self, frame: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -487,9 +488,11 @@ class CodeStream:
             running = asyncio.get_running_loop()
         except RuntimeError:  # no loop (sync caller): frames stay buffered for the endpoint
             return
-        if self._flusher is not None and not self._flusher.done():
+        if self._flusher is not None and not self._flusher.done() and self._flusher_loop is running:
             return
+        # A flusher left on another (closed) event loop can never run again: replace it.
         self._flusher = running.create_task(self._flush_loop(), name="aatm-code-stream-flusher")
+        self._flusher_loop = running
 
     async def _flush_loop(self) -> None:
         try:
@@ -504,13 +507,16 @@ class CodeStream:
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             raise
         finally:
-            self._flusher = None
+            if self._flusher is asyncio.current_task():
+                self._flusher = None
 
     async def drain(self) -> list[dict[str, Any]]:
         """Force every pending frame out (used by tests and shutdown)."""
         if self._flusher is not None and not self._flusher.done():
             self._flusher.cancel()
-            await asyncio.gather(self._flusher, return_exceptions=True)
+            if self._flusher_loop is asyncio.get_running_loop():
+                await asyncio.gather(self._flusher, return_exceptions=True)
+        self._flusher = None
         events: list[dict[str, Any]] = []
         while True:
             batch = self.take_due_events(now=self._clock() + self.interval_seconds + 1.0)

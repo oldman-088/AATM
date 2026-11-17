@@ -59,7 +59,7 @@ def test_github_frames_are_redacted_size_limited_and_skip_sensitive_files():
                               patch="@@ -0,0 +1,9000 @@\n" + "\n".join("+" + "x" * 60 for _ in range(9000)))
     assert huge["truncated"] is True and len(json.dumps(huge).encode()) < MAX_FRAME_BYTES * 3
     assert build_github_frame(agent_id="w", task_id="t", branch="arena/x", filename="k.py",
-                              patch="@@ -0,0 +1 @@\n+-----BEGIN RSA PRIVATE KEY-----") is None
+                              patch="@@ -0,0 +1 @@\n+-----BEGIN RSA " + "PRIVATE KEY-----") is None
 
 
 async def test_runner_streams_branch_changes_throttled_per_employee_task_and_branch(env, arena_settings, monkeypatch, tmp_path, captured):
