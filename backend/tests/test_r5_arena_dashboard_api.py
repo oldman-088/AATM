@@ -37,7 +37,9 @@ async def test_overview_lists_every_employee_with_session_task_and_human_events(
         r = await client.put("/api/v1/arena/agents/mode", json={"mode": "agent"}, headers=headers)
         assert r.status_code == 200 and r.json()["count"] == len(workers)
         body = (await client.get("/api/v1/arena/agent/overview", headers=headers)).json()
-    assert len(body["employees"]) == len(workers) and body["counts"]["agent_mode_profiles"] == len(workers)
+    # R7: the manager has its own card and counts as one Arena (agent-mode) profile like any worker.
+    assert len(body["employees"]) == len(workers) and body["counts"]["agent_mode_profiles"] == len(workers) + 1
+    assert body["manager"]["agent_id"] == "manager-0" and body["manager"]["profile_name"] == "manager"
     row = next(e for e in body["employees"] if e["agent_id"] == workers[0].id)
     assert row["task"]["title"] == "Add answer()" and row["session"]["branch_name"] == "arena/x"
     assert row["session"]["keep_working_count"] == 4

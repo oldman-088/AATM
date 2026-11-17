@@ -488,6 +488,19 @@ export const en: Translations = {
     humanAlertHint: "Resolve the issue in that employee's Chrome window, then press Resume session.",
     noEmployees: 'No employee has a browser profile yet.',
     liveFrames: 'Streamed from GitHub',
+    manager: {
+      title: 'Manager (manager-0) — Arena',
+      subtitle: 'The manager works through Arena like the workers: its own Chrome profile ("manager"), the same userscript and connector.',
+      connected: 'Connected',
+      notConnected: 'Not connected',
+      notConnectedHint: 'The manager is not connected to Arena — open the manager Chrome profile',
+      currentSession: 'Current session',
+      currentActivity: 'Current activity',
+      exchanges: 'Exchanges',
+      selectorPassed: 'Selector test passed',
+      selectorNotRun: 'Selector test not run yet',
+      activities: { chat: 'Owner chat', plan: 'Planning', review: 'Reviewing a PR', status: 'Status question', context: 'New session context', idle: 'Idle', waiting_connection: 'Waiting for connection', needs_human: 'Needs a human', queued: 'Queued', running: 'Working' },
+    },
     states: {
       idle: 'Idle (finished)',
       ready: 'Ready',
@@ -497,6 +510,8 @@ export const en: Translations = {
       offline: 'Offline',
     },
     phases: {
+      manager_ready: 'Manager session ready',
+      manager_busy: 'Manager working',
       new: 'New',
       starting: 'Starting',
       submitting: 'Submitting',

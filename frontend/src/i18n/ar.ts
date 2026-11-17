@@ -488,6 +488,19 @@ export const ar: Translations = {
     humanAlertHint: 'عالج المشكلة في نافذة Chrome الخاصة بهذا الموظف، ثم اضغط استئناف الجلسة.',
     noEmployees: 'لا يوجد موظف لديه ملف متصفح بعد.',
     liveFrames: 'مباشر من GitHub',
+    manager: {
+      title: 'المدير (manager-0) — Arena',
+      subtitle: 'المدير يعمل عبر Arena مثل الموظفين: ملف Chrome خاص به («manager») ونفس السكربت والموصّل.',
+      connected: 'متصل',
+      notConnected: 'غير متصل',
+      notConnectedHint: 'المدير غير متصل بـ Arena — افتح ملف Chrome الخاص بالمدير',
+      currentSession: 'الجلسة الحالية',
+      currentActivity: 'النشاط الحالي',
+      exchanges: 'عدد التبادلات',
+      selectorPassed: 'اختبار المحددات ناجح',
+      selectorNotRun: 'لم يُشغَّل اختبار المحددات بعد',
+      activities: { chat: 'محادثة المالك', plan: 'تخطيط', review: 'مراجعة طلب دمج', status: 'سؤال عن الحالة', context: 'سياق جلسة جديدة', idle: 'متفرغ', waiting_connection: 'بانتظار الاتصال', needs_human: 'يحتاج تدخلًا بشريًا', queued: 'في الطابور', running: 'يعمل' },
+    },
     states: {
       idle: 'خامل (انتهى)',
       ready: 'جاهز',
@@ -497,6 +510,8 @@ export const ar: Translations = {
       offline: 'غير متصل',
     },
     phases: {
+      manager_ready: 'جلسة المدير جاهزة',
+      manager_busy: 'المدير يعمل',
       new: 'جديدة',
       starting: 'تبدأ',
       submitting: 'تُرسل',

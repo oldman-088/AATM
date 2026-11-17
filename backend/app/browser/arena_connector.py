@@ -31,6 +31,10 @@ from app.models import Agent, AIProvider, BrowserProfile
 SCRIPT_VERSION = "2.0.0"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
+# R7: the manager's own Arena profile (Chrome --user-data-dir=$HOME/.aatm-profiles/manager).
+MANAGER_AGENT_ID = "manager-0"
+MANAGER_PROFILE_ID = "profile-manager"
+MANAGER_PROFILE_NAME = "manager"
 DOM_KEYS = ("input", "send", "assistant_message", "user_message", "busy", "agent_input", "agent_reply")
 NOT_ENABLED_MESSAGE = (
     "Arena connector is not enabled: set ARENA_CONNECTOR_ENABLED=true (with ARENA_ALLOWED_ORIGINS), "

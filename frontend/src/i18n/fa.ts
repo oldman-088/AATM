@@ -488,6 +488,19 @@ export const fa: Translations = {
     humanAlertHint: 'مشکل را در پنجرهٔ Chrome همان کارمند برطرف کنید، سپس «ادامهٔ جلسه» را بزنید.',
     noEmployees: 'هنوز هیچ کارمندی پروفایل مرورگر ندارد.',
     liveFrames: 'پخش زنده از GitHub',
+    manager: {
+      title: 'مدیر (manager-0) — Arena',
+      subtitle: 'مدیر مانند کارکنان از طریق Arena کار می‌کند: پروفایل Chrome خودش («manager») و همان اسکریپت و اتصال‌دهنده.',
+      connected: 'متصل',
+      notConnected: 'متصل نیست',
+      notConnectedHint: 'مدیر به Arena متصل نیست — پروفایل Chrome مدیر را باز کنید',
+      currentSession: 'جلسه فعلی',
+      currentActivity: 'فعالیت فعلی',
+      exchanges: 'تعداد تبادل‌ها',
+      selectorPassed: 'آزمون انتخابگرها موفق بود',
+      selectorNotRun: 'آزمون انتخابگرها هنوز اجرا نشده',
+      activities: { chat: 'گفتگوی مالک', plan: 'برنامه‌ریزی', review: 'بازبینی درخواست ادغام', status: 'پرسش وضعیت', context: 'زمینه جلسه جدید', idle: 'بیکار', waiting_connection: 'در انتظار اتصال', needs_human: 'نیاز به انسان', queued: 'در صف', running: 'در حال کار' },
+    },
     states: {
       idle: 'بیکار (پایان)',
       ready: 'آماده',
@@ -497,6 +510,8 @@ export const fa: Translations = {
       offline: 'آفلاین',
     },
     phases: {
+      manager_ready: 'جلسه مدیر آماده است',
+      manager_busy: 'مدیر در حال کار',
       new: 'جدید',
       starting: 'در حال شروع',
       submitting: 'در حال ارسال',

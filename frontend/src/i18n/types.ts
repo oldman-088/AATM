@@ -488,6 +488,19 @@ export interface Translations {
     humanAlertHint: string
     noEmployees: string
     liveFrames: string
+    manager: {
+      title: string
+      subtitle: string
+      connected: string
+      notConnected: string
+      notConnectedHint: string
+      currentSession: string
+      currentActivity: string
+      exchanges: string
+      selectorPassed: string
+      selectorNotRun: string
+      activities: Record<string, string>
+    }
     states: Record<string, string>
     phases: Record<string, string>
   }

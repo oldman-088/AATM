@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.browser.arena_connector import MANAGER_PROFILE_ID, MANAGER_PROFILE_NAME
 from app.core.config import KNOWN_DEFAULT_PASSWORDS, get_settings, is_placeholder_password
 from app.core.security import hash_password, verify_password
 from app.employees.catalog import ensure_employee_workspace
@@ -164,6 +165,21 @@ async def seed_initial_data(db: AsyncSession) -> None:
             page_title="GitHub PR Verification",
         ),
     ]
+    # R7: manager-0 drives its own Arena Agent session through its own Chrome profile ("manager"),
+    # with the same userscript and connector as the workers.
+    profiles.append(
+        BrowserProfile(
+            id=MANAGER_PROFILE_ID,
+            name=MANAGER_PROFILE_NAME,
+            agent_id="manager-0",
+            profile_dir=str(settings.BROWSER_PROFILES_DIR / MANAGER_PROFILE_NAME),
+            mode="visible",
+            status="ready",
+            current_url="https://arena.ai",
+            page_title="Arena Agent (manager)",
+            arena_mode="agent",
+        )
+    )
     for bp in profiles:
         if not await db.get(BrowserProfile, bp.id):
             db.add(bp)
@@ -182,6 +198,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             status="idle",
             provider_id="arena-agent",
             model_name="arena-agent-orchestrator",
+            browser_profile_id=MANAGER_PROFILE_ID,
             git_branch="arena/b15bbe5c-aatm",
         ),
         Agent(
@@ -250,6 +267,8 @@ async def seed_initial_data(db: AsyncSession) -> None:
         if existing_agent is None:
             db.add(ag)
         else:
+            if ag.id == "manager-0" and not existing_agent.browser_profile_id:
+                existing_agent.browser_profile_id = MANAGER_PROFILE_ID
             if not existing_agent.role_template and ag.role_template:
                 existing_agent.role_template = ag.role_template
             if not existing_agent.skills and ag.skills:

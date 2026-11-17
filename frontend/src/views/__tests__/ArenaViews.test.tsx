@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { I18nProvider } from '../../i18n/I18nContext'
 import { installFetchMock } from '../../test/mockApi'
@@ -177,5 +177,78 @@ describe('ArenaAgentDashboard (R5)', () => {
     installFetchMock({ '/api/v1/arena/agent/overview': overview([employee()]), '/api/v1/tasks': [] })
     renderDashboard('fa')
     expect(await screen.findByText('عامل Arena — عملیات کامل')).toBeTruthy()
+  })
+})
+
+// ----------------------------------------------------------------------------- R7 manager card
+
+const manager = (overrides: Record<string, any> = {}) => employee({
+  agent_id: 'manager-0', agent_name: 'Chief AI Engineering Manager', agent_role: 'manager', is_manager: true,
+  profile_id: 'profile-manager', profile_name: 'manager', page_state: 'ready', task: null,
+  session: { id: 'msess-1', phase: 'manager_ready', page_state: 'ready', exchange_count: 3, last_activity_at: '2026-11-17T09:00:00' },
+  selector_test: { ran: true, ok: true },
+  activity: { kind: 'plan', status: 'running', updated_at: '2026-11-17T09:00:05' },
+  ...overrides,
+})
+
+describe('ArenaAgentDashboard manager card (R7)', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('shows the manager card above the worker cards with status, session, activity and selector result', async () => {
+    installFetchMock({ '/api/v1/arena/agent/overview': overview([employee()], { manager: manager() }), '/api/v1/tasks': [] })
+    renderDashboard()
+    const card = await screen.findByTestId('arena-manager-card')
+    const worker = screen.getByTestId('arena-employee-worker-1')
+    // the manager card comes first in the document
+    expect(card.compareDocumentPosition(worker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(card).getByTestId('arena-manager-connection').textContent).toBe('Connected')
+    expect(within(card).getByTestId('arena-manager-session').textContent).toContain('Manager session ready')
+    expect(within(card).getByTestId('arena-manager-session').textContent).toContain('3')
+    expect(within(card).getByTestId('arena-manager-activity').textContent).toContain('Planning')
+    expect(card.textContent).toContain('Selector test passed')
+    expect(card.textContent).toContain('manager')
+  })
+
+  it('runs the same controls as a worker card on the manager profile', async () => {
+    const { calls } = installFetchMock({
+      '/api/v1/arena/agent/overview': overview([employee()], { manager: manager() }),
+      '/api/v1/tasks': [],
+      '/api/v1/arena/profiles/profile-manager/command': (_path: string, init: any) => {
+        const body = JSON.parse(init.body)
+        if (body.command === 'read_last_reply') return { result: { text: 'تم إنشاء الخطة' } }
+        if (body.command === 'selector_test') return { result: { ok: true, composer: { found: true } } }
+        return { result: { ok: true } }
+      },
+      '/api/v1/arena/profiles/profile-manager/userscript': { script: '// ==UserScript==\n// @name AATM Arena Connector - profile-manager' },
+      '/api/v1/arena/manager/new-session': { ok: true },
+    })
+    renderDashboard()
+    const card = await screen.findByTestId('arena-manager-card')
+    const onManager = (cmd: string) => calls.find((c) => c.path.endsWith('/profiles/profile-manager/command') && c.body?.command === cmd)
+    fireEvent.click(within(card).getByRole('button', { name: /Continue working/ }))
+    await waitFor(() => expect(onManager('keep_working')).toBeDefined())
+    fireEvent.click(within(card).getByRole('button', { name: /Selector test/ }))
+    await waitFor(() => expect(screen.getByTestId('arena-output-manager-0').textContent).toContain('All required elements were found'))
+    expect(onManager('selector_test')).toBeDefined()
+    fireEvent.click(within(card).getByRole('button', { name: /Read last reply/ }))
+    await waitFor(() => expect(screen.getByTestId('arena-output-manager-0').textContent).toContain('تم إنشاء الخطة'))
+    fireEvent.click(within(card).getByRole('button', { name: /Rotate userscript/ }))
+    await waitFor(() => expect((within(card).getByLabelText(/Review this script/) as HTMLTextAreaElement).value).toContain('profile-manager'))
+    fireEvent.click(within(card).getByRole('button', { name: /Start new session/ }))
+    await waitFor(() => expect(onManager('new_session')).toBeDefined())
+    // worker cards keep their own controls
+    expect(within(screen.getByTestId('arena-employee-worker-1')).getByRole('button', { name: /Selector test/ })).toBeTruthy()
+  })
+
+  it('shows the Arabic not-connected message and disables page commands', async () => {
+    installFetchMock({ '/api/v1/arena/agent/overview': overview([], { manager: manager({ connected: false, page_state: 'offline', session: null,
+      selector_test: { ran: false, ok: false }, activity: { kind: 'chat', status: 'waiting_connection' } }) }), '/api/v1/tasks': [] })
+    renderDashboard('ar')
+    const card = await screen.findByTestId('arena-manager-card')
+    expect(within(card).getByTestId('arena-manager-connection').textContent).toBe('غير متصل')
+    expect(within(card).getByTestId('arena-manager-hint').textContent).toBe('المدير غير متصل بـ Arena — افتح ملف Chrome الخاص بالمدير')
+    expect(within(card).getByTestId('arena-manager-activity').textContent).toContain('بانتظار الاتصال')
+    expect((within(card).getByRole('button', { name: /اختبار/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect(document.documentElement.dir).toBe('rtl')
   })
 })

@@ -260,6 +260,52 @@ export function ArenaAgentDashboard() {
       </ul>
     </div>}
 
+    {data?.manager && (() => {
+      const m = data.manager
+      const mk = (cmd: string) => `${m.agent_id}:${cmd}`
+      const canCommand = !!gate?.enabled && m.arena_mode === 'agent' && m.connected
+      const act = m.activity
+      const activityText = act ? `${label(a.manager.activities, act.kind)} · ${label(a.manager.activities, act.status)}` : a.manager.activities.idle
+      const ms = m.session
+      return <div data-testid="arena-manager-card" className="rounded-lg border border-indigo-500/50 bg-indigo-500/5 p-3 text-start">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-white">{a.manager.title}</div>
+            <div className="truncate text-xs text-slate-400">{a.profile}: <span dir="ltr">{m.profile_name || m.profile_id}</span> · {a.manager.subtitle}</div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1">
+            <span data-testid="arena-manager-connection"><Badge variant={m.connected ? 'success' : 'warning'}>{m.connected ? a.manager.connected : a.manager.notConnected}</Badge></span>
+            <Badge variant={PAGE_TONE[m.page_state] || 'neutral'}>{label(a.states, m.page_state)}</Badge>
+          </div>
+        </div>
+        {!m.connected && <p data-testid="arena-manager-hint" className="mt-2 text-xs text-amber-200">{a.manager.notConnectedHint}</p>}
+        <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+          <dt className="text-slate-400">{a.manager.currentSession}</dt><dd className="text-slate-200" data-testid="arena-manager-session">{ms ? `${label(a.phases, ms.phase)} · ${a.manager.exchanges}: ${ms.exchange_count ?? 0}` : a.none}</dd>
+          <dt className="text-slate-400">{a.manager.currentActivity}</dt><dd className="text-slate-200" data-testid="arena-manager-activity">{activityText}</dd>
+          <dt className="text-slate-400">{a.lastActivity}</dt><dd className="text-slate-200">{fmtTime(act?.updated_at || ms?.last_activity_at || ms?.last_state_change_at)}</dd>
+          <dt className="text-slate-400">{a.selectorTest}</dt><dd className={m.selector_test?.ok ? 'text-emerald-300' : 'text-amber-300'}>{m.selector_test?.ran ? (m.selector_test.ok ? a.manager.selectorPassed : a.selectorFailed) : a.manager.selectorNotRun}</dd>
+          {(ms?.error_message || m.last_error || m.needs_human_reason) && <><dt className="text-slate-400">{a.error}</dt><dd className="truncate text-rose-300">{m.needs_human_reason || ms?.error_message || m.last_error}</dd></>}
+        </dl>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          <Button size="sm" variant="secondary" disabled={!gate?.enabled || busy === mk('script')} onClick={() => script(m)}><KeyRound className="me-1 h-4 w-4" />{m.token_issued ? a.rotateScript : a.generateScript}</Button>
+          <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('selector_test')} onClick={() => command(m, 'selector_test')}><ListChecks className="me-1 h-4 w-4" />{a.selectorTest}</Button>
+          <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('new_session')} onClick={() => command(m, 'new_session')}><Plus className="me-1 h-4 w-4" />{a.newSession}</Button>
+          <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('read_last_reply')} onClick={() => command(m, 'read_last_reply')}><BookOpen className="me-1 h-4 w-4" />{a.readLastReply}</Button>
+          <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('keep_working')} onClick={() => command(m, 'keep_working')}><Play className="me-1 h-4 w-4" />{a.continueWorking}</Button>
+          {(m.page_state === 'needs_human' || m.connector_status === 'needs_human') && <Button size="sm" disabled={busy === mk('resume')} onClick={() => resume(m)}><PlayCircle className="me-1 h-4 w-4" />{a.resumeSession}</Button>}
+        </div>
+        {output && output.agent === m.agent_id && <div className="mt-2 space-y-1" data-testid={`arena-output-${m.agent_id}`}>
+          {output.kind === 'reply' && <><div className="text-xs text-slate-400">{a.lastReply}</div>
+            <pre dir="auto" className="max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 text-start text-xs text-slate-200">{output.value || a.none}</pre></>}
+          {output.kind === 'selector' && <><div className="text-xs text-slate-400">{a.selectorReport}</div>
+            <p className={`text-xs ${output.value.ok ? 'text-emerald-300' : 'text-amber-300'}`}>{output.value.ok ? a.selectorOk : a.selectorFailed}</p>
+            <pre dir="ltr" className="max-h-48 overflow-auto rounded bg-black/40 p-2 text-start text-[11px] text-slate-300">{JSON.stringify(output.value, null, 2)}</pre></>}
+          {output.kind === 'script' && <><p className="text-xs text-amber-200">{t.arena.review} {t.arena.tokenOnce}</p>
+            <textarea readOnly dir="ltr" aria-label={t.arena.review} className="h-40 w-full rounded-lg bg-slate-950 p-2 font-mono text-xs text-slate-200" value={output.value} /></>}
+        </div>}
+      </div>
+    })()}
+
     {rows.length === 0 && <p className="text-xs text-slate-400">{a.noEmployees}</p>}
     <div className="grid gap-3 lg:grid-cols-2">
       {rows.map((r) => {

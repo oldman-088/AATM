@@ -259,7 +259,8 @@ async def test_every_worker_can_switch_to_agent_mode_and_registration_has_no_lim
         live = bridge.hub.profiles["profile-backend-docs"]
         assert live.mode == "agent"
         overview = (await client.get("/api/v1/arena/agent/overview", headers=headers)).json()
-        assert overview["counts"]["agent_mode_profiles"] == len(workers)
+        # R7: plus the manager's own agent-mode profile.
+        assert overview["counts"]["agent_mode_profiles"] == len(workers) + 1 and overview["manager"]["arena_mode"] == "agent"
         assert {row["arena_mode"] for row in overview["employees"]} == {"agent"}
         wall = (await client.get("/api/v1/arena/profiles", headers=headers)).json()
         assert {c["arena_mode"] for c in wall["profiles"] if c["agent_role"] == "worker"} == {"agent"}

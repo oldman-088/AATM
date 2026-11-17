@@ -203,8 +203,64 @@ def session_dict(session: ArenaSession | None) -> dict[str, Any] | None:
     }
 
 
+def _profile_row(agent: Agent, profile: BrowserProfile, live: dict[str, Any], session: ArenaSession | None,
+                 task: Task | None) -> dict[str, Any]:
+    return {
+        "agent_id": agent.id,
+        "agent_name": agent.name,
+        "agent_role": agent.role,
+        "agent_status": agent.status,
+        "profile_id": profile.id,
+        "profile_name": profile.name,
+        "arena_mode": profile_arena_mode(profile),
+        "token_issued": bool(profile.connector_token_hash),
+        "connected": bool(live.get("connected")),
+        "connector_status": live.get("status") or profile.connector_status,
+        "page_state": live.get("agent_state") or (session.page_state if session else "offline"),
+        "needs_human_reason": live.get("needs_human_reason") or profile.needs_human_reason or (session.needs_human_reason if session else None),
+        "keep_working_clicks": live.get("keep_working_clicks", 0),
+        "last_error": live.get("last_error"),
+        "session": session_dict(session),
+        "task": {"id": task.id, "title": task.title, "status": task.status} if task else None,
+        "human_events": [e for e in (session.events or []) if str(e.get("kind", "")).startswith(("needs_human", "escalated", "merged_outside"))][-10:]
+        if session else [],
+    }
+
+
+async def manager_overview_row(db: AsyncSession, bridge: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """The manager's Arena card (R7): same fields as a worker card plus the Selector test result and activity."""
+    from app.browser.arena_connector import MANAGER_AGENT_ID
+
+    manager = await db.get(Agent, MANAGER_AGENT_ID)
+    if manager is None or not manager.browser_profile_id:
+        return None
+    profile = await agent_profile(db, manager)
+    if profile is None:
+        return None
+    live = dict((bridge or {}).get(profile.id) or {})
+    selector: dict[str, Any] | None = None
+    if arena_gate()["enabled"] and profile.connector_token_hash:
+        detail = await bridge_call("GET", f"/v1/connector/profiles/{profile.id}")
+        if detail.get("ok"):
+            live = {**live, **{k: v for k, v in detail.items() if k not in {"ok", "recent_events"}}}
+            selector = detail.get("selector_report")
+    session = await open_session_for(db, profile.id)
+    row = _profile_row(manager, profile, live, session, None)
+    from app.orchestration.manager_arena import manager_activity
+
+    row.update({
+        "is_manager": True,
+        "selector_test": {"ran": selector is not None, "ok": bool((selector or {}).get("ok"))},
+        "activity": await manager_activity(db),
+    })
+    return row
+
+
 async def arena_agent_overview(db: AsyncSession) -> dict[str, Any]:
-    """Every enabled worker with a profile, its Arena mode, open session and live bridge state."""
+    """Every enabled worker with a profile, its Arena mode, open session and live bridge state.
+
+    The manager (R7) has its own card under ``manager`` and counts as one Arena profile like any worker.
+    """
     gate = arena_gate()
     bridge: dict[str, dict[str, Any]] = {}
     if gate["enabled"]:
@@ -221,26 +277,9 @@ async def arena_agent_overview(db: AsyncSession) -> dict[str, Any]:
             continue
         session = await open_session_for(db, profile.id)
         task = await db.get(Task, session.task_id) if session and session.task_id else None
-        live = bridge.get(profile.id) or {}
-        rows.append({
-            "agent_id": agent.id,
-            "agent_name": agent.name,
-            "agent_status": agent.status,
-            "profile_id": profile.id,
-            "profile_name": profile.name,
-            "arena_mode": profile_arena_mode(profile),
-            "token_issued": bool(profile.connector_token_hash),
-            "connected": bool(live.get("connected")),
-            "connector_status": live.get("status") or profile.connector_status,
-            "page_state": live.get("agent_state") or (session.page_state if session else "offline"),
-            "needs_human_reason": live.get("needs_human_reason") or profile.needs_human_reason or (session.needs_human_reason if session else None),
-            "keep_working_clicks": live.get("keep_working_clicks", 0),
-            "last_error": live.get("last_error"),
-            "session": session_dict(session),
-            "task": {"id": task.id, "title": task.title, "status": task.status} if task else None,
-            "human_events": [e for e in (session.events or []) if str(e.get("kind", "")).startswith(("needs_human", "escalated", "merged_outside"))][-10:]
-            if session else [],
-        })
+        rows.append(_profile_row(agent, profile, bridge.get(profile.id) or {}, session, task))
+    manager = await manager_overview_row(db, bridge)
+    profiles = rows + ([manager] if manager else [])
     sessions = list((await db.execute(select(ArenaSession))).scalars())
     tasks = [s.task_id for s in sessions if s.task_id]
     task_rows = list((await db.execute(select(Task).where(Task.id.in_(tasks))))) if tasks else []
@@ -252,14 +291,15 @@ async def arena_agent_overview(db: AsyncSession) -> dict[str, Any]:
         "gate": gate,
         "task_distribution": distribution,
         "counts": {
-            "profiles": len(rows),
-            "agent_mode_profiles": sum(1 for r in rows if r["arena_mode"] == "agent"),
-            "connected_profiles": sum(1 for r in rows if r["connected"]),
+            "profiles": len(profiles),
+            "agent_mode_profiles": sum(1 for r in profiles if r["arena_mode"] == "agent"),
+            "connected_profiles": sum(1 for r in profiles if r["connected"]),
             "open_sessions": sum(1 for s in sessions if s.is_open),
             "running_tasks": sum(1 for s in statuses if s in {"in_progress", "pr_open", "in_review", "changes_requested"}),
             "completed_tasks": sum(1 for s in statuses if s in {"done", "merged", "completed"}),
             "failed_tasks": sum(1 for s in statuses if s in {"failed", "blocked"}),
-            "needs_human": sum(1 for r in rows if r["page_state"] == "needs_human"),
+            "needs_human": sum(1 for r in profiles if r["page_state"] == "needs_human"),
         },
+        "manager": manager,
         "employees": rows,
     }

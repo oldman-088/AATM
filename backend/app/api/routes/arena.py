@@ -156,7 +156,7 @@ async def generate_userscript(profile_id: str, user: User = Depends(get_current_
     row.code = redacted
     row.description = f"Arena connector for {agent.name if agent else profile.id} (installed manually by a human; never executed by AATM)."
     row.match_patterns = patterns
-    row.allowed_roles = ["worker"]
+    row.allowed_roles = [agent.role if agent and agent.role == "manager" else "worker"]
     row.allowed_agent_ids = [profile.agent_id] if profile.agent_id else []
     row.is_enabled = False
     row.audit_status = "connector_generated"
