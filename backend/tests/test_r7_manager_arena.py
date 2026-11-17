@@ -760,3 +760,25 @@ def test_operations_guide_explains_running_the_manager_on_arena_with_existing_se
     assert documented - set(Settings.model_fields) == set()
     env_example = (root / ".env.example").read_text(encoding="utf-8")
     assert "AATM_MANAGER_PROVIDER=" in env_example and "ARENA_MANAGER_MAX_EXCHANGES=" in env_example
+
+
+async def test_project_team_limits_who_the_manager_may_plan_for(env, scripted):
+    make, _ = scripted
+    w2 = '```json\n{"summary_ar": "خطة", "tasks": [{"title": "UI", "assignee": "worker-2", "description": "d", "acceptance_criteria": ["c"], "depends_on": []}]}\n```'
+    w1 = '```json\n{"summary_ar": "خطة", "tasks": [{"title": "API", "assignee": "worker-1", "description": "d", "acceptance_criteria": ["c"], "depends_on": []}]}\n```'
+    page, runtime = make({"PLAN": [w2], "RETRY": [w1]})
+    async with env() as db:
+        project = Project(name="Team test", slug="team-test", repo_url="https://github.com/acme/team", config={"team": ["worker-1"]})
+        db.add(project)
+        await db.commit()
+        await runtime.handle_owner_message(db, project.id, "ابنِ واجهة وخادمًا")
+    await runtime.wait_idle()
+    plan_prompt = page.submitted("PLAN")[0]
+    assert "worker-1 —" in plan_prompt and "worker-2 —" not in plan_prompt and "worker-3 —" not in plan_prompt
+    job = next(j for j in await _jobs(env) if j.kind == "plan")
+    assert job.status == "done" and job.json_retries == 1, "worker-2 is not on this project's team"
+    async with env() as db:
+        assert (await db.get(Task, job.result["task_ids"][0])).assigned_agent_id == "worker-1"
+        # Without a team the manager still sees every enabled worker.
+        everyone = await runtime._team(db, None)
+    assert {"worker-1", "worker-2"} <= {m["id"] for m in everyone}

@@ -233,11 +233,17 @@ class ManagerArenaRuntime:
         manager = await db.get(Agent, MANAGER_AGENT_ID)
         return (manager.browser_profile_id if manager and manager.browser_profile_id else None) or MANAGER_PROFILE_ID
 
-    async def _team(self, db: AsyncSession) -> list[dict[str, Any]]:
-        workers = (await db.execute(
+    async def _team(self, db: AsyncSession, project_id: str | None = None) -> list[dict[str, Any]]:
+        """The workers the manager may plan for: every enabled worker, or the project's own team when
+        ``project.config["team"]`` lists worker ids (unknown or disabled ids are ignored)."""
+        workers = list((await db.execute(
             select(Agent).where(Agent.role == "worker", Agent.is_enabled.is_(True), Agent.is_emergency_stopped.is_(False))
             .order_by(Agent.created_at, Agent.id)
-        )).scalars()
+        )).scalars())
+        project = await db.get(Project, project_id) if project_id else None
+        team_ids = (project.config or {}).get("team") if project else None
+        if isinstance(team_ids, list) and team_ids:
+            workers = [w for w in workers if w.id in {str(t) for t in team_ids}]
         return [{"id": w.id, "name": w.name, "specialty": w.specialty, "skills": list(w.skills or []),
                  "divisions": list(w.divisions or [])} for w in workers]
 
@@ -551,7 +557,7 @@ class ManagerArenaRuntime:
         project = await db.get(Project, job.project_id) if job.project_id else None
         open_tasks = await self._open_tasks(db, job.project_id)
         prs = [{"number": t["pr_number"], "title": t["title"], "status": t["status"], "url": t["pr_url"]} for t in open_tasks if t["pr_url"]]
-        context = build_manager_context_prompt(project, await self._team(db), open_tasks, prs)
+        context = build_manager_context_prompt(project, await self._team(db, job.project_id), open_tasks, prs)
         reply = await self._exchange(db, session, job, context, kind="context")
         append_event(session, "context_sent", f"{len(context)} chars", reply_chars=len(reply))
         await db.commit()
@@ -648,7 +654,7 @@ class ManagerArenaRuntime:
     # ------------------------------------------------------------------ prompts / parsing
     async def _prompt(self, db: AsyncSession, job: ManagerJob) -> str | None:
         project = await db.get(Project, job.project_id) if job.project_id else None
-        team = await self._team(db)
+        team = await self._team(db, job.project_id)
         if job.kind == "chat":
             return build_manager_chat_prompt(job.request_text, project, team)
         if job.kind == "status":
@@ -686,7 +692,7 @@ class ManagerArenaRuntime:
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
         data = extract_manager_json(reply)
         if job.kind == "plan":
-            known = {m["id"] for m in await self._team(db)}
+            known = {m["id"] for m in await self._team(db, job.project_id)}
             return validate_manager_plan(data, known)
         return validate_manager_review(data)
 
@@ -733,7 +739,7 @@ class ManagerArenaRuntime:
             await self._reply(db, job, plan["summary_ar"] + "\n\nلم تُنشأ المهام: طلب عالي الخطورة ينتظر موافقة المالك.", plan=plan,
                               deferred=gated)
             return
-        team = {m["id"]: m for m in await self._team(db)}
+        team = {m["id"]: m for m in await self._team(db, job.project_id)}
         tasks: list[Task] = []
         for item in plan["tasks"]:
             divisions = team[item["assignee"]].get("divisions") or []
