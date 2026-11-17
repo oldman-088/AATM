@@ -176,6 +176,8 @@ export const en: Translations = {
     presetAnthropic: 'Anthropic Claude API',
     presetOpenAICompatible: 'OpenAI-Compatible (Ollama / OpenRouter / vLLM)',
     presetBridge: 'Arena Local Bridge (with upstream)',
+    presetArenaAgent: 'Arena Agent (browser)',
+    arenaAgentHint: 'No API key: the manager works through the Arena session in its own Chrome profile ("manager"). "Arena Agent Runtime" turns healthy once the manager profile is connected and its Selector test passed. The connection test sends nothing to Arena.',
     unknownCost: 'Unknown cost',
     pricingUnknownBadge: 'Pricing unknown',
   },

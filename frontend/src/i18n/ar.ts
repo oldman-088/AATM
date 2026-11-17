@@ -176,6 +176,8 @@ export const ar: Translations = {
     presetAnthropic: 'Anthropic Claude API',
     presetOpenAICompatible: 'متوافق مع OpenAI (Ollama / OpenRouter / vLLM)',
     presetBridge: 'الجسر المحلي لـ Arena (مع مزود علوي)',
+    presetArenaAgent: 'Arena Agent (المتصفح)',
+    arenaAgentHint: 'بلا مفتاح API: المدير يعمل عبر جلسة Arena في ملف Chrome الخاص به («manager»). يصبح «Arena Agent Runtime» سليمًا عندما يتصل ملف المدير وينجح «اختبار المحددات». اختبار الاتصال لا يرسل أي شيء إلى Arena.',
     unknownCost: 'تكلفة غير معروفة',
     pricingUnknownBadge: 'التسعير غير معروف',
   },

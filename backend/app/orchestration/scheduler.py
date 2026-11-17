@@ -17,6 +17,7 @@ from app.employees.catalog import ensure_employee_workspace
 from app.models import (
     Agent,
     AgentMessage,
+    AIProvider,
     ApprovalRequest,
     AuditLog,
     ChatMessage,
@@ -615,6 +616,7 @@ class TaskScheduler:
         employees: list[Agent],
         base_prompt: str,
         system_prompt: str,
+        preferred_provider_id: str | None = None,
     ) -> tuple[ManagerPlan | None, str]:
         correction_detail: str | None = None
         invalid_response = ""
@@ -640,7 +642,7 @@ class TaskScheduler:
                 response: ProviderResponse = await self.provider_router.route_and_execute(
                     db,
                     request,
-                    preferred_provider_id=manager.provider_id,
+                    preferred_provider_id=preferred_provider_id or manager.provider_id,
                 )
             except asyncio.CancelledError:
                 raise
@@ -765,6 +767,21 @@ class TaskScheduler:
             # Keep approval records if the model is missing, the plan is invalid, or a cycle is rejected.
             await db.commit()
 
+        from app.orchestration.manager_arena import manager_provider_mode
+
+        manager_mode = await manager_provider_mode(db)
+        if manager_mode == "demo":
+            # Labelled demo answer: no model is called and nothing is created or dispatched.
+            actions_taken.append("DEMO: AATM_MANAGER_PROVIDER=demo; no model was called and no tasks were created.")
+            return await self._save_manager_reply(
+                db,
+                project_id,
+                "[وضع تجريبي / DEMO] هذا رد تجريبي من AATM وليس من نموذج حقيقي. لم تُنشأ أي مهام. "
+                "لتشغيل المدير فعليًا اضبط AATM_MANAGER_PROVIDER على arena_agent أو مزود نماذج.",
+                actions_taken,
+                metadata={"demo": True, "manager_provider": "demo"},
+            )
+
         manager = await db.get(Agent, "manager-0")
         if manager is None:
             actions_taken.append("Manager profile is missing; no tasks were created.")
@@ -791,6 +808,15 @@ class TaskScheduler:
                     metadata={"model_status": model_status},
                 )
 
+        preferred_provider_id: str | None = None
+        if manager_mode in {"anthropic_claude", "openai_compatible"}:
+            preferred_provider_id = (
+                await db.execute(
+                    select(AIProvider.id)
+                    .where(AIProvider.provider_type == manager_mode, AIProvider.is_enabled.is_(True))
+                    .order_by(AIProvider.priority.asc(), AIProvider.id.asc())
+                )
+            ).scalars().first()
         employees, context = await self._manager_context(db, project_id)
         prompt = self._manager_user_prompt(content, context)
         plan, error = await self._request_manager_plan(
@@ -799,6 +825,7 @@ class TaskScheduler:
             employees,
             prompt,
             self._manager_system_prompt(gated_categories),
+            preferred_provider_id=preferred_provider_id,
         )
 
         if plan is None:

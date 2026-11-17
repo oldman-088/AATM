@@ -176,6 +176,8 @@ export interface Translations {
     presetAnthropic: string
     presetOpenAICompatible: string
     presetBridge: string
+    presetArenaAgent: string
+    arenaAgentHint: string
     unknownCost: string
     pricingUnknownBadge: string
   }

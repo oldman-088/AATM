@@ -394,7 +394,7 @@ export function ProvidersView({
   const [sessionId, setSessionId] = useState('')
   const [budget, setBudget] = useState<BudgetLimits | null>(null)
   const [wizardPresets, setWizardPresets] = useState<any[]>([])
-  const [wizardType, setWizardType] = useState<'anthropic_claude' | 'openai_compatible' | 'arena_local_bridge'>('anthropic_claude')
+  const [wizardType, setWizardType] = useState<'anthropic_claude' | 'openai_compatible' | 'arena_local_bridge' | 'arena_agent'>('anthropic_claude')
   const [wizardEndpoint, setWizardEndpoint] = useState('https://api.anthropic.com/v1')
   const [wizardCredRef, setWizardCredRef] = useState('env:ANTHROPIC_API_KEY')
   const [wizardModel, setWizardModel] = useState('claude-sonnet-4-5')
@@ -417,7 +417,7 @@ export function ProvidersView({
       .catch(() => setWizardPresets([]))
   }, [])
 
-  const selectWizardPreset = (ptype: 'anthropic_claude' | 'openai_compatible' | 'arena_local_bridge') => {
+  const selectWizardPreset = (ptype: 'anthropic_claude' | 'openai_compatible' | 'arena_local_bridge' | 'arena_agent') => {
     setWizardType(ptype)
     setWizardStatus(null)
     const fromServer = wizardPresets.find((opt) => opt.provider_type === ptype)
@@ -435,6 +435,10 @@ export function ProvidersView({
       setWizardEndpoint('https://openrouter.ai/api/v1')
       setWizardCredRef('env:OPENROUTER_API_KEY')
       setWizardModel('qwen2.5-coder:7b')
+    } else if (ptype === 'arena_agent') {
+      setWizardEndpoint('http://127.0.0.1:4100')
+      setWizardCredRef('env:ARENA_BRIDGE_TOKEN')
+      setWizardModel('arena-agent-orchestrator')
     } else {
       setWizardEndpoint('')
       setWizardCredRef('env:ARENA_BRIDGE_TOKEN')
@@ -540,7 +544,7 @@ export function ProvidersView({
           <p className="text-xs text-slate-400">{t.providers.wizardSubtitle}</p>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <Button
             type="button"
             variant={wizardType === 'anthropic_claude' ? 'primary' : 'secondary'}
@@ -562,7 +566,20 @@ export function ProvidersView({
           >
             {t.providers.presetBridge}
           </Button>
+          <Button
+            type="button"
+            variant={wizardType === 'arena_agent' ? 'primary' : 'secondary'}
+            onClick={() => selectWizardPreset('arena_agent')}
+          >
+            {t.providers.presetArenaAgent}
+          </Button>
         </div>
+
+        {wizardType === 'arena_agent' && (
+          <p data-testid="wizard-arena-agent-hint" className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-2 text-start text-xs text-indigo-200">
+            {t.providers.arenaAgentHint}
+          </p>
+        )}
 
         {wizardType === 'openai_compatible' && Array.isArray(activePreset?.sub_presets) && (
           <div className="flex flex-wrap gap-2">

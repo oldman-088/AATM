@@ -8,7 +8,16 @@ from app.browser.engines import BROWSER_ENGINE_REGISTRY
 from app.browser.manager import browser_manager, detect_playwright_capabilities
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Agent, AIProvider, AuditLog, BrowserProfile, BrowserSession, ProviderUsageLog, User
+from app.models import (
+    Agent,
+    AIProvider,
+    AuditLog,
+    BrowserProfile,
+    BrowserSession,
+    ProviderUsageLog,
+    SystemSetting,
+    User,
+)
 from app.providers.adapters import build_adapter
 from app.providers.base import ProviderRequest
 from app.providers.base import validate_credential_ref as validate_provider_credential_ref
@@ -254,6 +263,17 @@ async def get_provider_wizard_presets(db: AsyncSession = Depends(get_db)):
                 "default_model": "arena-bridge-default",
                 "suggested_models": ["arena-bridge-default", "arena-reasoning-pro", "arena-fast"],
             },
+            {
+                # R7: the manager (and workers) run through their own Arena Agent browser sessions.
+                "id": "arena-agent",
+                "provider_type": "arena_agent",
+                "title": "Arena Agent (browser)",
+                "endpoint_url": settings.ARENA_BRIDGE_URL,
+                "credential_ref": "env:ARENA_BRIDGE_TOKEN",
+                "default_model": "arena-agent-orchestrator",
+                "suggested_models": ["arena-agent-orchestrator", "arena-agent-coder"],
+                "requires_api_key": False,
+            },
         ],
     }
 
@@ -286,6 +306,34 @@ async def test_provider_wizard_connection(
         )
         await db.commit()
         raise
+
+    if body.provider_type == "arena_agent":
+        # Nothing is sent to Arena: the check is the manager profile's connection + Selector test.
+        from app.orchestration.manager_arena import manager_readiness
+
+        ready = await manager_readiness()
+        db.add(
+            AuditLog(
+                actor=user.email,
+                action="provider.test_connection",
+                resource_type="ai_provider",
+                resource_id="wizard-arena_agent",
+                details=audit_details(body.provider_type, endpoint_url, credential_ref, role=user.role, model=body.model,
+                                      success=ready["ready"], code=ready["code"]),
+            )
+        )
+        await db.commit()
+        return {
+            "success": ready["ready"],
+            "provider_type": body.provider_type,
+            "model": body.model,
+            "latency_ms": 0.0,
+            "pricing_known": True,
+            "detail": ready["reason_ar"],
+            "error_message": None if ready["ready"] else ready["reason_ar"],
+            "response_excerpt": "",
+            "manager_readiness": ready,
+        }
 
     adapter = build_adapter(
         body.provider_type,
@@ -353,19 +401,24 @@ async def configure_provider_wizard(
         "anthropic_claude": "anthropic-claude",
         "openai_compatible": "openai-compatible",
         "arena_local_bridge": "arena-local-bridge",
+        "arena_agent": "arena-agent",
     }
     default_names = {
         "anthropic_claude": "Anthropic Claude API",
         "openai_compatible": "OpenAI-Compatible Provider",
         "arena_local_bridge": "Arena Local Bridge",
+        "arena_agent": "Arena Agent Runtime",
     }
+    # Arena Agent answers only for employees driving their own Arena session, so it never becomes the
+    # router's first choice for everyone else; it keeps its priority.
+    takes_priority = body.provider_type != "arena_agent"
     pid = body.id or default_ids[body.provider_type]
     name = (body.name or "").strip() or default_names[body.provider_type]
     models = list(dict.fromkeys([body.default_model, *(body.available_models or [])]))
 
     existing_all = list((await db.execute(select(AIProvider))).scalars().all())
     for item in existing_all:
-        if item.id != pid and item.priority <= 1:
+        if takes_priority and item.id != pid and item.priority <= 1:
             item.priority = max(2, item.priority + 1)
 
     provider = await db.get(AIProvider, pid)
@@ -378,7 +431,7 @@ async def configure_provider_wizard(
             credential_ref=credential_ref,
             default_model=body.default_model,
             available_models=models,
-            priority=1,
+            priority=1 if takes_priority else 2,
             is_enabled=True,
             daily_limit_usd=body.daily_limit_usd,
         )
@@ -390,7 +443,8 @@ async def configure_provider_wizard(
         provider.credential_ref = credential_ref
         provider.default_model = body.default_model
         provider.available_models = models
-        provider.priority = 1
+        if takes_priority:
+            provider.priority = 1
         provider.is_enabled = True
         provider.daily_limit_usd = body.daily_limit_usd
 
@@ -405,6 +459,15 @@ async def configure_provider_wizard(
                 ag.provider_id = provider.id
                 ag.model_name = body.default_model
                 updated_agents.append(ag.id)
+    if body.assign_to_manager:
+        # R7: remember which runtime answers as manager-0 (AATM_MANAGER_PROVIDER in .env overrides it).
+        from app.orchestration.manager_arena import MANAGER_PROVIDER_SETTING
+
+        row = await db.get(SystemSetting, MANAGER_PROVIDER_SETTING)
+        if row is None:
+            row = SystemSetting(key=MANAGER_PROVIDER_SETTING, value={}, description="Runtime that answers as manager-0 (R7).")
+            db.add(row)
+        row.value = {"provider_type": body.provider_type, "provider_id": provider.id, "set_by": user.email}
 
     db.add(
         AuditLog(
@@ -436,6 +499,7 @@ async def configure_provider_wizard(
         },
         "model_status": model_status,
         "updated_agents": updated_agents,
+        "manager_provider": body.provider_type if body.assign_to_manager else None,
     }
 
 

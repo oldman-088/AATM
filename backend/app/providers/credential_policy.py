@@ -42,9 +42,9 @@ _PROVIDER_KEYS_IN_SANDBOX_DENYLIST = frozenset({"ANTHROPIC_API_KEY"})
 
 BOUND_CREDENTIAL_ENVS: dict[str, str] = {"ARENA_BRIDGE_TOKEN": "arena_local_bridge"}
 # Provider types that may carry a bound credential (Phase 6: the Arena browser connector also
-# talks only to the same local bridge).
+# talks only to the same local bridge; R7: so does the Arena Agent runtime).
 BOUND_CREDENTIAL_PROVIDER_TYPES: dict[str, frozenset[str]] = {
-    "ARENA_BRIDGE_TOKEN": frozenset({"arena_local_bridge", "arena_browser"}),
+    "ARENA_BRIDGE_TOKEN": frozenset({"arena_local_bridge", "arena_browser", "arena_agent"}),
 }
 
 SERVER_SECRET_ENV_DENYLIST: frozenset[str] = frozenset(
@@ -226,6 +226,8 @@ def official_preset_endpoints() -> list[PresetEndpoint]:
         PresetEndpoint("openai_compatible", "http://127.0.0.1:4000/v1", "env:LITELLM_API_KEY"),
         PresetEndpoint("openai_compatible", "http://127.0.0.1:1234/v1", "env:OPENAI_API_KEY"),
         PresetEndpoint("arena_local_bridge", settings.ARENA_BRIDGE_URL, "env:ARENA_BRIDGE_TOKEN"),
+        # R7: Arena Agent (browser) — talks only to the same local bridge; no model API key.
+        PresetEndpoint("arena_agent", settings.ARENA_BRIDGE_URL, "env:ARENA_BRIDGE_TOKEN"),
     ]
 
 

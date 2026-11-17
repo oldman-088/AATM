@@ -137,12 +137,18 @@ class ArenaAgentAdapter(BaseProviderAdapter):
 
     # ------------------------------------------------------------------ provider API
     async def health_check(self) -> ProviderHealth:
+        """R7: healthy only when the manager's Arena profile is connected and its Selector test passed.
+
+        Otherwise the card is degraded and says why, in Arabic. Worker profiles are reported too.
+        """
         from app.browser.arena_connector import NOT_ENABLED_MESSAGE, arena_gate, bridge_call
+        from app.orchestration.manager_arena import manager_readiness
 
         t0 = time.perf_counter()
         gate = arena_gate()
         if not gate["enabled"]:
-            return ProviderHealth(self.provider_id, "degraded", 0.0, f"not_enabled: {NOT_ENABLED_MESSAGE}",
+            ready = await manager_readiness()
+            return ProviderHealth(self.provider_id, "degraded", 0.0, f"not_enabled: {NOT_ENABLED_MESSAGE} — {ready['reason_ar']}",
                                   credentials_configured=bool(self.resolve_credential()))
         res = await bridge_call("GET", "/v1/connector/profiles")
         latency = round((time.perf_counter() - t0) * 1000, 2)
@@ -151,11 +157,12 @@ class ArenaAgentAdapter(BaseProviderAdapter):
                                   credentials_configured=bool(self.resolve_credential()))
         agents = [p for p in res.get("profiles", []) if p.get("mode") == "agent"]
         connected = [p for p in agents if p.get("connected") and p.get("status") != "needs_human"]
+        ready = await manager_readiness()
         return ProviderHealth(
             self.provider_id,
-            "healthy" if connected else "degraded",
+            "healthy" if ready["ready"] else "degraded",
             latency,
-            f"{gate['mode']} mode, {len(connected)}/{len(agents)} Arena Agent profiles connected",
+            f"{ready['reason_ar']} ({gate['mode']} mode, {len(connected)}/{len(agents)} Arena Agent profiles connected)",
             credentials_configured=bool(self.resolve_credential()),
         )
 

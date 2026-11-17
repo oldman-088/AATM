@@ -59,7 +59,7 @@ async def test_health_and_dashboard_overview(client: AsyncClient, auth_headers):
     assert data["kpis"]["total_agents"] == 5
     assert len(data["divisions"]) == 12
     assert data["kpis"]["total_providers"] == 3
-    assert data["kpis"]["total_browsers"] == 4
+    assert data["kpis"]["total_browsers"] == 5  # 4 worker profiles + the manager's own Arena profile (R7)
 
 
 async def test_multilingual_preferences_and_auth_guard(client: AsyncClient, auth_headers):

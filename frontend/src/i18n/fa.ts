@@ -176,6 +176,8 @@ export const fa: Translations = {
     presetAnthropic: 'Anthropic Claude API',
     presetOpenAICompatible: 'سازگار با OpenAI (Ollama / OpenRouter / vLLM)',
     presetBridge: 'پل محلی Arena (با بالادست)',
+    presetArenaAgent: 'Arena Agent (مرورگر)',
+    arenaAgentHint: 'بدون کلید API: مدیر از طریق جلسه Arena در پروفایل Chrome خودش («manager») کار می‌کند. «Arena Agent Runtime» وقتی سالم می‌شود که پروفایل مدیر متصل باشد و آزمون انتخابگرها موفق شود. آزمون اتصال چیزی به Arena نمی‌فرستد.',
     unknownCost: 'هزینه نامشخص',
     pricingUnknownBadge: 'تعرفه نامشخص',
   },

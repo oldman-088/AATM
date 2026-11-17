@@ -189,7 +189,7 @@ class ProviderUsageLogEntry(BaseModel):
 
 
 class ProviderWizardTestRequest(BaseModel):
-    provider_type: str = Field(pattern="^(anthropic_claude|openai_compatible|arena_local_bridge)$")
+    provider_type: str = Field(pattern="^(anthropic_claude|openai_compatible|arena_local_bridge|arena_agent)$")
     endpoint_url: str | None = None
     credential_ref: str = Field(
         description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",
@@ -200,7 +200,7 @@ class ProviderWizardTestRequest(BaseModel):
 class ProviderWizardConfigureRequest(BaseModel):
     id: str | None = None
     name: str | None = None
-    provider_type: str = Field(pattern="^(anthropic_claude|openai_compatible|arena_local_bridge)$")
+    provider_type: str = Field(pattern="^(anthropic_claude|openai_compatible|arena_local_bridge|arena_agent)$")
     endpoint_url: str | None = None
     credential_ref: str = Field(
         description="Environment-variable reference in env:NAME form; inline credentials are not accepted.",

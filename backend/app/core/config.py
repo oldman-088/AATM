@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     # Local mock Arena page for end-to-end testing at any time (e.g. http://127.0.0.1:4100/mock-arena/).
     ARENA_MOCK_URL: str = ""
     ARENA_REPLY_TIMEOUT_SECONDS: float = Field(default=600.0, gt=0)
+    # R7: which runtime answers as manager-0. arena_agent = the manager's own Arena session (no API key);
+    # anthropic_claude / openai_compatible = the first enabled provider of that type; demo = labelled
+    # demo replies that never create tasks. Empty = the provider assigned to manager-0 (wizard / DB).
+    AATM_MANAGER_PROVIDER: str = Field(default="", pattern="^(|arena_agent|anthropic_claude|openai_compatible|demo)$")
     # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
     ARENA_DOM_SELECTORS: str = ""
     # Phase 5 - True parallelism / autoscaling
