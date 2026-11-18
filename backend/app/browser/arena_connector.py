@@ -28,7 +28,7 @@ import httpx
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
-SCRIPT_VERSION = "2.1.0"
+SCRIPT_VERSION = "2.2.0"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
 # R7: the manager's own Arena profile (Chrome --user-data-dir=$HOME/.aatm-profiles/manager).
@@ -227,6 +227,7 @@ USERSCRIPT_BODY = r"""(function () {
   var closed = false;
   var timers = [];
   var observer = null;
+  var TOOL_LIMIT_SETTLE_MS = 15000;
   var IDLE_MS = 5000;    // "idle" = no Stop button for five seconds after generating
   var mon = { state: null, reason: null, busyVisible: false, lastBusyAt: 0, submittedAt: 0, prevTick: 0, dirty: false, newSessionAt: 0 };
 
@@ -454,12 +455,64 @@ USERSCRIPT_BODY = r"""(function () {
       if (isTermsPhrase(phrase)) {
         // A "Terms of Use" link row is on every Arena page; only a real terms prompt stops the session.
         if (text.indexOf(phrase) !== -1 && termsPromptShown(phrase)) return "page shows: " + phrase;
-      } else if (text.indexOf(phrase) !== -1) {
+      } else if (text.indexOf(phrase) !== -1 && noticeShown(phrase)) {
         return "page shows: " + phrase;
       }
     }
     return null;
   }
+
+  // ---- other phrases: words on the page are not a check. The agent's tool output, file names and chat
+  // titles can say "rate limit"; only a full-page block, a dialog / alert, or a short notice counts.
+  var NOTICE_CONTAINER = "[role='alert'], [role='alertdialog'], [role='dialog'], [aria-modal='true'], dialog[open], [data-sonner-toast], [class*='toast' i]";
+  var NOT_A_NOTICE = "pre, code, nav, aside, [class*='tool' i]";
+  var RATE_PHRASE = /rate limit|too many requests|unusual traffic/;
+  var RATE_WORDING = /\b(hit|reached|exceeded|try again|slow down|please wait|detected)\b/i;
+  var NOTICE_MAX_CHARS = 300;
+
+  function isBlockingPage() { return !findInput() && !findNewButton() && !findFeedbackPanel(); }
+
+  function phraseElements(phrase) {  // the smallest visible elements holding the phrase, outside the transcript
+    var skip = transcriptText().concat([findInput()]).filter(Boolean);
+    var needle = phrase.split(" ")[0];
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var seen = [];
+    for (var n = walker.nextNode(); n; n = walker.nextNode()) {
+      if ((n.nodeValue || "").toLowerCase().indexOf(needle) === -1) continue;
+      var el = n.parentElement;
+      // The parent's text, so a phrase split across tags ("terms of <b>use</b>") still matches.
+      while (el && el !== document.body && (el.textContent || "").toLowerCase().replace(/\s+/g, " ").indexOf(phrase) === -1) el = el.parentElement;
+      if (!el || el === document.body || seen.indexOf(el) !== -1) continue;
+      seen.push(el);
+    }
+    return seen.filter(function (el) {
+      return isVisible(el) && !skip.some(function (s) { return s.contains(el); });  // not the agent's own words
+    });
+  }
+
+  function insideModal(el) {
+    for (var a = el; a && a !== document.body; a = a.parentElement) { if (isModalContainer(a)) return true; }
+    return false;
+  }
+
+  function noticeShown(phrase) {
+    if (isBlockingPage()) return true;
+    var els = phraseElements(phrase);
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.closest(NOTICE_CONTAINER) || insideModal(el)) return true;
+      if (el.closest(NOT_A_NOTICE)) continue;
+      var block = textOf(el).length > NOTICE_MAX_CHARS || !el.parentElement ? el : el.parentElement;
+      var words = textOf(block);
+      if (words.length > NOTICE_MAX_CHARS) words = textOf(el);
+      if (words.length > NOTICE_MAX_CHARS) continue;
+      if (!RATE_PHRASE.test(phrase) || RATE_WORDING.test(words)) return true;
+    }
+    return false;
+  }
+
+  // Arena's normal pause: not a human check. AATM's backend decides whether to send a message.
+  function toolCallLimitShown() { return /tool[-\s]?call limit for this turn/.test(pageTextWithoutTranscript()); }
 
   // ---- terms prompts: the phrase counts only inside a dialog / modal / full-screen overlay, or next to
   // an Accept / Agree button. A plain "Terms of Use" link (a footer-style link row) is not a prompt.
@@ -492,22 +545,9 @@ USERSCRIPT_BODY = r"""(function () {
   }
 
   function termsPromptShown(phrase) {
-    var skip = transcriptText().concat([findInput()]).filter(Boolean);
-    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-    var seen = [];
-    for (var n = walker.nextNode(); n; n = walker.nextNode()) {
-      if ((n.nodeValue || "").toLowerCase().indexOf("terms") === -1) continue;
-      var el = n.parentElement;
-      // The parent's text, so a phrase split across tags ("terms of <b>use</b>") still matches.
-      while (el && el !== document.body && (el.textContent || "").toLowerCase().replace(/\s+/g, " ").indexOf(phrase) === -1) el = el.parentElement;
-      if (!el || el === document.body || seen.indexOf(el) !== -1) continue;
-      seen.push(el);
-      if (!isVisible(el)) continue;
-      if (skip.some(function (s) { return s.contains(el); })) continue;  // the agent's own words
-      for (var a = el; a && a !== document.body; a = a.parentElement) {
-        if (isModalContainer(a)) return true;
-      }
-      if (acceptButtonNear(el)) return true;
+    var els = phraseElements(phrase);
+    for (var i = 0; i < els.length; i++) {
+      if (insideModal(els[i]) || acceptButtonNear(els[i])) return true;
     }
     return false;
   }
@@ -553,6 +593,9 @@ USERSCRIPT_BODY = r"""(function () {
     if (human) return { state: "needs_human", reason: human };
     var off = offlineReason();
     if (off) return { state: "offline", reason: off };
+    // Right after a message the old notice may still be on the page: do not report it again yet.
+    var settled = Date.now() - mon.submittedAt >= TOOL_LIMIT_SETTLE_MS;
+    if (settled && !hasStopButton() && toolCallLimitShown()) return { state: "tool_call_limit", reason: null };
     if (findKeepWorking()) return { state: "keep_working_visible", reason: null };
     var now = Date.now();
     if (hasStopButton()) { mon.busyVisible = true; mon.lastBusyAt = now; return { state: "generating", reason: null }; }
