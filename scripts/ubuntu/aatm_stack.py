@@ -98,6 +98,12 @@ def enabled_windows() -> list[Window]:
         connection.close()
 
 
+def command_line_args(raw: bytes) -> list[str]:
+    """Process arguments. Chrome rewrites its command line as one space-separated string."""
+    args = [part for part in raw.decode("utf-8", "replace").split("\0") if part]
+    return args[0].split(" ") if len(args) == 1 else args
+
+
 def chrome_main_processes(directory: str | None = None) -> dict[int, str]:
     """Main Chrome processes that use an AATM profile (helpers carry --type= and exit with them)."""
     prefix = f"--user-data-dir={profiles_home()}/"
@@ -106,7 +112,7 @@ def chrome_main_processes(directory: str | None = None) -> dict[int, str]:
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
-            argv = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+            argv = command_line_args((entry / "cmdline").read_bytes())
         except OSError:
             continue
         if any(arg.startswith("--type=") for arg in argv):

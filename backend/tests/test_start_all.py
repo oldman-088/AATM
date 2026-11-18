@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import stat
+import importlib.util
 import subprocess
 import sys
 import threading
@@ -167,3 +168,19 @@ def test_stop_all_closes_only_aatm_windows_and_containers_only_on_request(stack,
 def test_stop_scripts_never_force_kill_and_frontend_pid_is_the_real_server():
     assert "kill -9" not in (SCRIPTS / "stop.sh").read_text() and "kill -9" not in (SCRIPTS / "stop-all.sh").read_text()
     assert "./node_modules/.bin/vite" in (SCRIPTS / "start.sh").read_text()
+
+
+def _stack_module():
+    spec = importlib.util.spec_from_file_location("aatm_stack_under_test", SCRIPTS / "aatm_stack.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_chrome_rewritten_command_line_is_recognized_but_shell_text_is_not():
+    stack_module = _stack_module()
+    rewritten = b"/opt/google/chrome/chrome --user-data-dir=/h/.aatm-profiles/worker-1 --window-name=Worker 1 https://arena.ai/agent\0"
+    assert "--user-data-dir=/h/.aatm-profiles/worker-1" in stack_module.command_line_args(rewritten)
+    shell = b"bash\0-c\0echo --user-data-dir=/h/.aatm-profiles/worker-1\0"
+    assert "--user-data-dir=/h/.aatm-profiles/worker-1" not in stack_module.command_line_args(shell)
