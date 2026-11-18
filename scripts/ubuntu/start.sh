@@ -138,16 +138,19 @@ if [[ $backend_ready -ne 1 ]]; then
 fi
 echo "[AATM] Backend healthy: http://localhost:${BACKEND_PORT}/api/health"
 
-if command -v npm >/dev/null 2>&1 && [[ -d frontend ]]; then
+if [[ -x frontend/node_modules/.bin/vite ]]; then
   if [[ -f logs/frontend.pid ]] && kill -0 "$(cat logs/frontend.pid)" 2>/dev/null; then
     echo "[AATM] Frontend already running (PID $(cat logs/frontend.pid))."
+  elif bridge_port_open "$FRONTEND_PORT"; then
+    echo "[AATM] Port ${FRONTEND_PORT} is already serving; not starting another frontend."
   else
     echo "[AATM] Starting Frontend Dev Server on 0.0.0.0:${FRONTEND_PORT}..."
-    (cd frontend && nohup npm run --silent dev -- --port "$FRONTEND_PORT" \
-      > "$ROOT_DIR/logs/frontend.log" 2>&1 & echo $! > "$ROOT_DIR/logs/frontend.pid")
+    # Start vite directly so the PID file names the real server and stop.sh can stop it.
+    (cd frontend; nohup ./node_modules/.bin/vite --host 0.0.0.0 --port "$FRONTEND_PORT" --strictPort \
+      > "$ROOT_DIR/logs/frontend.log" 2>&1 < /dev/null & echo $! > "$ROOT_DIR/logs/frontend.pid")
   fi
 else
-  echo "[AATM] Frontend skipped (npm not available or frontend/ missing)."
+  echo "[AATM] Frontend skipped (frontend/node_modules is missing)."
 fi
 
 # Read-only watchdog (notifications + logs/watchdog.log). It never restarts or changes anything.
