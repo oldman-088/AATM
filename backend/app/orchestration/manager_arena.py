@@ -118,7 +118,7 @@ async def manager_readiness(profile_id: str = MANAGER_PROFILE_ID) -> dict[str, A
 
 # =========================================================================== runtime
 STALL_MINUTES = 20
-QUIET_STATES = {"idle", "ready"}
+QUIET_STATES = {"idle", "ready", "pr_ready"}
 BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}

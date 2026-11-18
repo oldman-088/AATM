@@ -56,9 +56,9 @@ async def open_page():
         await context.add_init_script(FAKE_SOCKET + f"window.__config = {json.dumps(config)};")
         await context.add_init_script(script)
 
-        async def _open(query: str):
+        async def _open(query: str, path: str = "/mock-arena/"):
             page = await context.new_page()
-            await page.goto(f"{ORIGIN}/mock-arena/?{query}")
+            await page.goto(f"{ORIGIN}{path}?{query}")
             await page.wait_for_function("window.__sent.some(m => m.type === 'state' || m.type === 'needs_human')")
             return page
 
@@ -116,7 +116,7 @@ async def test_captcha_wins_over_tool_call_limit_and_blocks_sending(open_page):
 
 
 async def _command(page, command: str, args: dict | None = None) -> dict:
-    request_id = f"r-{command}"
+    request_id = f"r-{command}-{await page.evaluate('window.__sent.length')}"
     message = json.dumps({"type": "command", "request_id": request_id, "command": command, "args": args or {}})
     await page.evaluate("raw => window.__socket.onmessage({ data: raw })", message)
     await page.wait_for_function("id => window.__sent.some(m => m.type === 'result' && m.request_id === id)", arg=request_id)
