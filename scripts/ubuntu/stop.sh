@@ -53,6 +53,7 @@ stop_service() {
   rm -f "$pid_file"
 }
 
+stop_service watchdog "watchdog.py"
 stop_service backend "uvicorn"
 stop_service frontend "vite"
 stop_service bridge "bridge.server"

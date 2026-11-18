@@ -149,4 +149,15 @@ else
   echo "[AATM] Frontend skipped (npm not available or frontend/ missing)."
 fi
 
+# Read-only watchdog (notifications + logs/watchdog.log). It never restarts or changes anything.
+if [[ "${WATCHDOG_AUTOSTART:-true}" == "true" ]]; then
+  if [[ -f logs/watchdog.pid ]] && kill -0 "$(cat logs/watchdog.pid)" 2>/dev/null; then
+    echo "[AATM] Watchdog already running (PID $(cat logs/watchdog.pid))."
+  else
+    echo "[AATM] Starting watchdog (log: logs/watchdog.log)..."
+    nohup "$ROOT_DIR/scripts/ubuntu/watchdog.sh" >> "$ROOT_DIR/logs/watchdog.out" 2>&1 &
+    echo $! > "$ROOT_DIR/logs/watchdog.pid"
+  fi
+fi
+
 echo "[AATM] Started! UI: http://localhost:${FRONTEND_PORT} | API: http://localhost:${BACKEND_PORT}/api/health"

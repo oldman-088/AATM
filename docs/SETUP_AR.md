@@ -224,3 +224,20 @@ cd ~/AATM && ./scripts/ubuntu/install.sh && ./scripts/ubuntu/start.sh
 ```
 
 النسخ الاحتياطية تحتوي `.env` وتسجيلات دخول Arena والرموز: احفظها بصلاحية `600`، ولا ترفعها إلى Git أو أي خدمة.
+
+## 12. المراقب (Watchdog)
+
+مراقب خفيف **للقراءة فقط**: لا يعيد تشغيل أي شيء ولا يغيّر ولا يصلح أي شيء، بل ينبّهك فقط.
+
+- يبدأ تلقائياً في الخلفية مع `scripts/ubuntu/start.sh` ويتوقف مع `scripts/ubuntu/stop.sh` (ملف PID: `logs/watchdog.pid`). لتعطيله: `WATCHDOG_AUTOSTART=false scripts/ubuntu/start.sh`.
+- كل 60 ثانية (`WATCHDOG_INTERVAL`) يتحقق من: صحة الخادم الخلفي `/api/health`، الجسر على 4100، الواجهة على 5173، حاويتي `aatm-redis` و`aatm-rabbitmq`، حالة كل ملف Arena (انقطاع الاتصال أو `needs_human` مع السبب)، الأسطر الجديدة في `logs/backend.log` و`logs/bridge.log` التي تحتوي Traceback أو ERROR أو 401 أو 500 أو فشل التنسيق، وأي مهمة بلا تقدم لأكثر من 20 دقيقة.
+- كل مشكلة جديدة تظهر كإشعار سطح مكتب بعنوان «AATM — تنبيه» وتُسجَّل مع الوقت في `logs/watchdog.log`. لا يتكرر التنبيه نفسه أكثر من مرة كل 10 دقائق، ويصلك إشعار واحد «عاد للعمل» عند زوال المشكلة.
+- رمز الجسر يُقرأ من `.env` ولا يُطبع أبداً.
+
+```bash
+scripts/ubuntu/watchdog.sh --test-notify   # إشعار تجريبي
+scripts/ubuntu/watchdog.sh --once          # دورة فحص واحدة
+tail -f logs/watchdog.log                  # متابعة التنبيهات
+```
+
+إذا لم تظهر الإشعارات فتأكد أن `start.sh` شُغّل من جلسة سطح المكتب (وليس عبر SSH) وأن `notify-send` مثبت (`sudo apt install libnotify-bin`).
