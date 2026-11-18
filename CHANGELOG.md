@@ -2,6 +2,34 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.5.0] — 2026-11-18
+
+First full end-to-end run on Arena: goal → manager plan → 3 parallel workers → 3 PRs → manager review →
+owner approval → merge → project completed, on the test repository
+[oldman-088/aatm-e2e-2026-11-18](https://github.com/oldman-088/aatm-e2e-2026-11-18).
+
+### Added
+- **Task repository selection (userscript 2.1.0)**: every new worker chat selects the task's repository in
+  Arena's picker. The script refuses to type or send a task prompt unless that repository is confirmed,
+  and the bridge refuses repository-checked commands from older scripts. **Userscript 2.1.0 must be
+  installed in every profile.**
+- **Per-project team API**: `PATCH /projects/{id}` accepts `team` and `test_command`; unknown workers get 422.
+- **Read-only watchdog**: started and stopped with AATM; desktop notifications and `logs/watchdog.log`.
+- **Missing GitHub access is reported**: workers answer `AATM_BLOCKED: GITHUB_ACCESS` and the session goes
+  to a human instead of stalling.
+
+### Changed
+- `scripts/ubuntu/start.sh` starts Redis and RabbitMQ through Docker Compose (`AATM_INFRA_AUTOSTART=false` skips it).
+- `APP_VERSION`, the frontend package and the README now carry the release version (they had stayed at 3.2.0).
+
+### Fixed
+- **Feedback panel**: "Was this task successful?" is closed with its X or Escape. Yes and No are never clicked.
+- **Late repository picker**: selection waits and retries on a freshly loaded page.
+- **Stale replies**: a real Arena new session is a full page load, so old chat text is not read as the reply.
+- **`reset-admin-password.sh`**: hidden prompt, checks it targets the database the backend uses, verifies
+  the result and prints a clear success or failure.
+- The parallel-workers test no longer depends on machine load.
+
 ## [3.4.1] — 2026-11-17
 
 ### Fixed
