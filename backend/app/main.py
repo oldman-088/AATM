@@ -45,11 +45,27 @@ WS_AUTH_TIMEOUT_SECONDS = 5.0
 
 logger = logging.getLogger(__name__)
 
+async def recover_interrupted_work() -> None:
+    """Pick up Arena tasks and manager jobs that a shutdown or restart interrupted."""
+    from app.orchestration.arena_runner import arena_runner
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    try:
+        async with AsyncSessionLocal() as db:
+            tasks = await arena_runner.recover_after_restart(db)
+            jobs = await manager_arena_runtime.recover_after_restart(db)
+        logger.info("restart recovery: sessions=%s manager_jobs=%s", tasks, jobs)
+    except Exception as exc:  # noqa: BLE001 - recovery must not stop the application from starting
+        logger.warning("restart recovery failed: %s", type(exc).__name__, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_security(get_settings())
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
+
+    await recover_interrupted_work()
 
     from app.runtime.background_scheduler import BackgroundScheduler
 
