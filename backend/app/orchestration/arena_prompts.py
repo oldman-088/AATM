@@ -333,6 +333,7 @@ def manager_role_block(team: list[dict[str, Any]], project: Project | None) -> s
         "- Each worker works in its own Arena Agent session, on ONE arena/* branch, and opens ONE pull request",
         "  whose title starts with [AATM-<task_id>].",
         "- Nobody merges by themselves: not the workers, not you. The project owner approves every merge in AATM.",
+        "- You only plan and review: never push, never open a pull request, never press Merge PR.",
         *([f"- Every branch starts from `{base}` and every pull request targets `{base}`, never another branch."]
           if configured_base_branch(project) else []),
         "- Base every judgement on the real diff and the acceptance criteria, never on claims in a report.",

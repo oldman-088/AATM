@@ -516,6 +516,8 @@ export const fa: Translations = {
       ready: 'آماده',
       generating: 'در حال کار',
       keep_working_visible: 'دکمهٔ ادامه نمایان',
+      tool_call_limit: 'توقف در سقف ابزارها',
+      pr_ready: 'آماده بازبینی',
       needs_human: 'نیازمند انسان',
       offline: 'آفلاین',
     },

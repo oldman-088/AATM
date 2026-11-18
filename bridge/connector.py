@@ -53,10 +53,11 @@ MAX_ANSWER_CHARS = 200_000
 MAX_PROMPT_CHARS = 120_000
 MAX_EVENTS = 50
 
-AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "needs_human", "offline")
+AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "tool_call_limit", "pr_ready", "needs_human", "offline")
 # Commands the bridge may send to an Arena Agent page. Anything else is refused before it
 # reaches the browser. Read-only commands still run while the profile waits for a human.
-AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo")
+AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo",
+                  "create_pr", "close_feedback")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REPO_CHECK_MIN_SCRIPT = (2, 1, 0)  # older scripts ignore the repository check
 READ_ONLY_COMMANDS = ("read_last_reply", "selector_test")

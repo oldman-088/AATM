@@ -64,12 +64,72 @@
     document.querySelector("main").prepend(box);
   }
 
+  // Page states seen on the real Arena Agent page, switched on by URL parameters.
+  var extras = [];
+  function extra(html) {
+    var box = document.createElement("div");
+    box.innerHTML = html;
+    document.querySelector("main").appendChild(box);
+    extras.push(box);
+  }
+  var feedback = '<div data-feedback-panel><p>Was this task successful?</p><button type="button">Yes</button><button type="button">No</button>' +
+                 '<button type="button" aria-label="Close" data-close-feedback>×</button></div>';
+  document.addEventListener("click", function (ev) {
+    if (!ev.target.closest("[data-close-feedback]")) return;
+    var panel = ev.target.closest("[data-feedback-panel]");
+    if (panel) panel.remove();
+  });
+  if (params.get("feedback")) extra(feedback);
+  if (params.get("tool_limit")) {
+    extra('<p>The agent reached the tool-call limit for this turn. Send a message to continue where it left off.</p>' +
+          '<button type="button">Keep working</button>' + feedback);
+  }
+  if (params.get("rate_text")) {
+    extra('<aside><a href="#">Fix rate limit handling</a></aside><div class="tool-output">429: rate limit exceeded in test fixture</div>' +
+          '<pre>too many requests: try again</pre>');
+  }
+  if (params.get("rate_notice")) extra('<div role="alert">Rate limit reached. Try again in 5 minutes.</div>');
+  if (params.get("rate_inline")) extra('<div><span>You have hit the rate limit.</span></div>');
+  if (params.get("terms_link")) extra('<footer><a href="#">Terms of Service</a> <a href="#">Terms of Use</a></footer>');
+  if (params.get("terms_dialog")) extra('<div role="dialog"><p>Please accept the Terms of Service.</p><button type="button">Accept</button></div>');
+  if (params.get("captcha")) showHumanCheck();
+  var form = document.getElementById("composer");
+  function formExtra(html) {
+    var box = document.createElement("span");
+    box.innerHTML = html;
+    form.appendChild(box);
+  }
+  window.__mergeClicks = 0;
+  window.__createClicks = 0;
+  document.addEventListener("click", function (ev) {
+    if (ev.target.closest("[data-merge]")) window.__mergeClicks += 1;
+    if (ev.target.closest("[data-create-pr]")) window.__createClicks += 1;
+  });
+  if (params.get("diff")) formExtra('<button type="button">+91</button>');
+  if (params.get("create_pr")) formExtra('<button type="button" data-create-pr>Create PR</button>');
+  if (params.get("merge_pr")) formExtra('<button type="button" data-merge>Merge PR</button>');
+  if (params.get("no_send")) document.getElementById("send").remove();
+  if (params.get("reply")) add("assistant", params.get("reply"));
+  if (params.get("suggestions")) {
+    window.__chipClicks = 0;
+    extra('<div role="radiogroup">' +
+          '<button type="button" role="radio" data-chip><span data-role="assistant">خطة الموجات 2-4</span></button>' +
+          '<button type="button" role="radio" data-chip>Handle the rate limit: try again</button>' +
+          '<button type="button" role="radio" data-chip aria-label="Send this option">مراجعة</button>' +
+          '<button type="button">Skip</button>' +
+          '<textarea id="revise" placeholder="Revise options or write your own…"></textarea></div>');
+    document.addEventListener("click", function (ev) {
+      if (ev.target.closest("[data-chip]")) window.__chipClicks += 1;
+    });
+  }
+
   document.getElementById("composer").addEventListener("submit", function (ev) {
     ev.preventDefault();
     var input = document.getElementById("prompt");
     var text = input.value;
     if (!text) return;
     input.value = "";
+    extras.splice(0).forEach(function (box) { box.remove(); });
     add("user", text);
     sent += 1;
     if (checkAfter >= 0 && sent > checkAfter) { showHumanCheck(); return; }

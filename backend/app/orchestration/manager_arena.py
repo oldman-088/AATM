@@ -118,8 +118,8 @@ async def manager_readiness(profile_id: str = MANAGER_PROFILE_ID) -> dict[str, A
 
 # =========================================================================== runtime
 STALL_MINUTES = 20
-QUIET_STATES = {"idle", "ready"}
-BUSY_STATES = {"generating", "keep_working_visible"}
+QUIET_STATES = {"idle", "ready", "pr_ready"}
+BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
@@ -573,7 +573,7 @@ class ManagerArenaRuntime:
 
     async def _exchange(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str, *, kind: str | None = None) -> str:
         """Submit one prompt (shared submit path), follow the page until it is quiet, read the reply."""
-        from app.providers.adapters.arena_agent import ArenaAgentError, keep_working_allowed
+        from app.providers.adapters.arena_agent import TOOL_LIMIT_CONTINUE, ArenaAgentError, keep_working_allowed
 
         before = await self.adapter.state(session.profile_id)
         before_since = str(before.get("agent_state_since") or "")
@@ -643,6 +643,15 @@ class ManagerArenaRuntime:
                         append_event(session, "keep_working_limit", f"limit {session.keep_working_count} reached")
                         await db.commit()
                         break
+            elif current == "tool_call_limit":
+                if not keep_working_allowed(session.keep_working_count):
+                    reason = f"Arena tool-call limit: all {session.keep_working_count} automatic continues were used"
+                    await self._session_needs_human(db, session, reason)
+                    raise ManagerArenaError("needs_human", reason)
+                await self.adapter.submit(session.profile_id, TOOL_LIMIT_CONTINUE, source="manager")
+                session.keep_working_count += 1
+                append_event(session, "tool_limit_continue", f"#{session.keep_working_count}")
+                await db.commit()
             elif current in QUIET_STATES and (seen_busy or (since and since != before_since)
                                               or time.monotonic() - started > self.start_grace_seconds):
                 break

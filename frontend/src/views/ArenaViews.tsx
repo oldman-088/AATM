@@ -87,7 +87,7 @@ export function ArenaConnectorPanel() {
 // ----------------------------------------------------------------------------- R5 Arena Agent dashboard
 
 const PAGE_TONE: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'neutral'> = {
-  ready: 'success', idle: 'success', generating: 'info', keep_working_visible: 'warning', needs_human: 'danger', offline: 'neutral',
+  ready: 'success', idle: 'success', generating: 'info', keep_working_visible: 'warning', tool_call_limit: 'warning', pr_ready: 'success', needs_human: 'danger', offline: 'neutral',
 }
 const MAX_LIVE_FRAMES = 40
 

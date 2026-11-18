@@ -516,6 +516,8 @@ export const en: Translations = {
       ready: 'Ready',
       generating: 'Working',
       keep_working_visible: 'Keep working shown',
+      tool_call_limit: 'Tool-call limit pause',
+      pr_ready: 'PR ready for review',
       needs_human: 'Needs a human',
       offline: 'Offline',
     },
