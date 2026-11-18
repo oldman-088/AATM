@@ -34,7 +34,11 @@ GITHUB_BLOCKED_MARKER = "AATM_BLOCKED: GITHUB_ACCESS"
 _GITHUB_BLOCKED_LINE = re.compile(rf"^[\s>*`_-]*{re.escape(GITHUB_BLOCKED_MARKER)}\b", re.MULTILINE)
 
 
-_REPORT_HEADING_LINE = re.compile(rf"^[\s>*_-]*{re.escape(REPORT_HEADING)}\b", re.MULTILINE | re.IGNORECASE)
+# The Arena page renders Markdown, so the "##" of the heading is usually gone from the text AATM reads.
+_REPORT_TITLE = REPORT_HEADING.lstrip("# ")
+_REPORT_HEADING_LINE = re.compile(
+    rf"^[ \t>*_-]*(?:{re.escape(REPORT_HEADING)}\b|{re.escape(_REPORT_TITLE)}[ \t*_:]*$)", re.MULTILINE | re.IGNORECASE,
+)
 
 
 def reply_has_final_report(reply: str) -> bool:
@@ -241,7 +245,7 @@ def build_correction_prompt(task: Task, *, review_comments: str, discrepancies: 
 
 def report_is_complete(text: str) -> bool:
     lowered = (text or "").lower()
-    if REPORT_HEADING.lower() not in lowered:
+    if not reply_has_final_report(text):
         return False
     return sum(1 for name in REPORT_SECTIONS if name.lower() in lowered) >= 4
 

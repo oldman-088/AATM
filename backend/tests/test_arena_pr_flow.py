@@ -11,12 +11,28 @@ from bridge.connector import AGENT_COMMANDS
 
 from app.git_workflows.manager import git_workflow_manager
 from app.orchestration import arena_runner
+from app.orchestration.arena_prompts import reply_has_final_report, report_is_complete
 from app.orchestration.arena_runner import ArenaAgentRunner
 from tests.test_arena_page_states import _command, _report, needs_chromium, open_page  # noqa: F401
 
 CHAT = "/agent/01a1ef92-abcd1234"
 BRANCH = "arena/abcd1234-aatm"
 TASK = "bf794110-4c88-439b-a2bb-9e20e7b19a0f"
+
+
+@pytest.mark.parametrize("text", ["## AATM REPORT\nDone", "Finished.\n\nAATM REPORT\n\nTask: x", "**AATM REPORT**\nDone"])
+def test_final_report_is_found_with_or_without_rendered_markdown(text):
+    assert reply_has_final_report(text)
+
+
+@pytest.mark.parametrize("text", ["Start your reply with AATM REPORT later", "AATM REPORT format is required below", "working"])
+def test_mentioning_the_report_is_not_a_report(text):
+    assert not reply_has_final_report(text)
+
+
+def test_rendered_report_counts_as_complete():
+    sections = "Implementation summary\nModified files\nCompleted requirements\nTests performed\n"
+    assert report_is_complete(f"AATM REPORT\n{sections}") and not report_is_complete(f"Notes\n{sections}")
 
 
 def test_the_bridge_has_no_merge_command():
@@ -62,7 +78,8 @@ case "$1 $2" in
   "api repos/"*) echo "{{\\"ahead_by\\": $FAKE_AHEAD}}" ;;
   "pr list") cat "{tmp_path}/prs.json" ;;
   "pr create") echo https://github.test/o/r/pull/9 ;;
-  "pr edit") if [[ "$*" == *--base* && -n "${{FAKE_EDIT_FAILS:-}}" ]]; then echo refused >&2; exit 1; fi ;;
+  "api -X") if [[ "$*" == *base=* && -n "${{FAKE_EDIT_FAILS:-}}" ]]; then echo refused >&2; exit 1; fi ;;
+  "pr edit") echo "GraphQL: Projects (classic) is being deprecated" >&2; exit 1 ;;
 esac
 ''')
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
@@ -86,7 +103,7 @@ async def test_pr_into_main_is_moved_to_the_base_branch_and_titled(fake_gh):
     result = await _ensure(cwd)
     calls = log.read_text()
     assert result["ok"] and result["actions"] == ["retargeted #7", "renamed"]
-    assert "pr edit 7 --repo o/r --base r8-aatm" in calls and f"--title [AATM-{TASK}] W1-T3 start-all" in calls
+    assert "api -X PATCH repos/o/r/pulls/7 -f base=r8-aatm" in calls and f"-f title=[AATM-{TASK}] W1-T3 start-all" in calls
     assert "merge" not in calls
 
 

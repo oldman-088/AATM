@@ -981,6 +981,7 @@ class GitWorkflowManager:
         actions: list[str] = []
         kept: dict[str, Any] | None = None
 
+        # Pull request edits use the REST API: `gh pr edit` fails on repositories it cannot read classic Projects for.
         async def gh(*args: str) -> tuple[int, str]:
             rc, out, error = await self._exec(["gh", *args], Path(cwd))
             return rc, out or error
@@ -988,7 +989,7 @@ class GitWorkflowManager:
         for pr in sorted((p for p in data or [] if isinstance(p, dict)), key=lambda p: p.get("baseRefName") != base):
             number = str(pr.get("number"))
             if pr.get("baseRefName") != base:
-                rc, _ = await gh("pr", "edit", number, *repo_args, "--base", base)
+                rc, _ = await gh("api", "-X", "PATCH", f"repos/{repo_slug}/pulls/{number}", "-f", f"base={base}")
                 if rc == 0 and kept is None:
                     actions.append(f"retargeted #{number}")
                 else:  # a PR into another branch must not stay open
@@ -1007,7 +1008,7 @@ class GitWorkflowManager:
             actions.append("created")
             return {"ok": True, "url": output.strip().splitlines()[-1] if output.strip() else None, "actions": actions}
         if not str(kept.get("title") or "").startswith(prefix):
-            rc, output = await gh("pr", "edit", str(kept.get("number")), *repo_args, "--title", wanted_title)
+            rc, output = await gh("api", "-X", "PATCH", f"repos/{repo_slug}/pulls/{kept.get('number')}", "-f", f"title={wanted_title}")
             if rc != 0:
                 return {"ok": False, "code": "github", "error": sanitize_cli_output(output)[:300], "actions": actions}
             actions.append("renamed")
