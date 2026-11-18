@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import signal
 import sqlite3
 import stat
-import importlib.util
 import subprocess
 import sys
 import threading
@@ -88,6 +88,7 @@ if [[ "$1" == inspect ]]; then echo false; fi''')
                "AATM_PYTHON": sys.executable, "AATM_DB_PATH": str(db), "AATM_CHROME_BIN": str(bin_dir / "chrome"),
                "AATM_START_SCRIPT": str(bin_dir / "fake-start"), "AATM_STOP_SCRIPT": str(bin_dir / "fake-stop"),
                "AATM_ENV_FILE": str(tmp_path / "missing.env"), "AATM_READY_TIMEOUT": "0", "AATM_READY_POLL_SECONDS": "0.05",
+               "AATM_WINDOW_SETTLE_SECONDS": "0", "AATM_WINDOW_RETRY_SECONDS": "0",
                "AATM_BACKEND_URL": f"http://127.0.0.1:{services.port}", "FRONTEND_PORT": str(services.port),
                "ARENA_BRIDGE_URL": f"http://127.0.0.1:{services.port}", "ARENA_BRIDGE_TOKEN": BRIDGE_TOKEN}
         return env, log
@@ -115,7 +116,7 @@ def test_disabled_profiles_stay_closed_and_at_most_four_windows_open(stack):
     env, log = stack(workers, {f"profile-{a}" for a in ("manager-0", "worker-1", "worker-2", "worker-3")})
     assert _run("start-all.sh", env).returncode == 0
     opened = [line for line in log.read_text().splitlines() if line.startswith("chrome ")]
-    assert len(opened) == 4 and not any("worker-4" in line or "worker-5" in line or "worker-6" in line for line in opened)
+    assert sum(line.endswith("about:blank") for line in opened) == 4 and not any("worker-4" in line or "worker-5" in line or "worker-6" in line for line in opened)
 
 
 def test_missing_connection_is_named_in_terminal_and_notification(stack):
@@ -184,3 +185,20 @@ def test_chrome_rewritten_command_line_is_recognized_but_shell_text_is_not():
     assert "--user-data-dir=/h/.aatm-profiles/worker-1" in stack_module.command_line_args(rewritten)
     shell = b"bash\0-c\0echo --user-data-dir=/h/.aatm-profiles/worker-1\0"
     assert "--user-data-dir=/h/.aatm-profiles/worker-1" not in stack_module.command_line_args(shell)
+
+
+def test_arena_loads_only_after_every_window_has_started(stack):
+    env, log = stack({"manager-0": True, "worker-1": True}, {"profile-manager-0", "profile-worker-1"})
+    assert _run("start-all.sh", env).returncode == 0
+    targets = [line.rsplit(" ", 1)[-1] for line in log.read_text().splitlines() if line.startswith("chrome ")]
+    assert targets == ["about:blank", "about:blank", "https://arena.ai/agent", "https://arena.ai/agent"]
+
+
+def test_unconnected_window_is_loaded_again_only_once(stack):
+    env, log = stack({"manager-0": True, "worker-1": True}, {"profile-manager-0"})
+    env["AATM_READY_TIMEOUT"] = "0.5"
+    assert _run("start-all.sh", env).returncode == 1
+    worker = [line for line in log.read_text().splitlines() if line.startswith("chrome ") and "worker-1" in line]
+    assert [line.rsplit(" ", 1)[-1] for line in worker] == ["about:blank", "https://arena.ai/agent", "https://arena.ai/agent"]
+    manager = [line for line in log.read_text().splitlines() if line.startswith("chrome ") and "/manager " in line]
+    assert len(manager) == 2
