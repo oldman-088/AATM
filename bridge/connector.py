@@ -53,7 +53,7 @@ MAX_ANSWER_CHARS = 200_000
 MAX_PROMPT_CHARS = 120_000
 MAX_EVENTS = 50
 
-AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "needs_human", "offline")
+AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "tool_call_limit", "needs_human", "offline")
 # Commands the bridge may send to an Arena Agent page. Anything else is refused before it
 # reaches the browser. Read-only commands still run while the profile waits for a human.
 AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo")

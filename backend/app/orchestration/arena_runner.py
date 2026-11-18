@@ -59,7 +59,12 @@ from app.orchestration.arena_prompts import (
     report_is_complete,
     reports_github_blocked,
 )
-from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError, keep_working_allowed
+from app.providers.adapters.arena_agent import (
+    TOOL_LIMIT_CONTINUE,
+    ArenaAgentAdapter,
+    ArenaAgentError,
+    keep_working_allowed,
+)
 from app.runtime.agent_protocol import redact_secrets
 from app.runtime.temporal import to_naive_utc
 
@@ -511,7 +516,7 @@ class ArenaAgentRunner:
 
         # The agent says it cannot reach GitHub: Keep working or nudges cannot help, a human must connect it.
         if not session.pr_number and session.submitted_at is not None and (
-            page == "keep_working_visible" or (changed and page in {"idle", "ready"})
+            page in {"keep_working_visible", "tool_call_limit"} or (changed and page in {"idle", "ready"})
         ) and await self._reports_github_blocked(session):
             slug = repo_slug(project) or "the project repository"
             await self._block_needs_human(db, session, active, f"Arena agent has no GitHub access to {slug}: connect GitHub for this account")
@@ -523,6 +528,10 @@ class ArenaAgentRunner:
             return {"phase": session.phase, "stalled": True}
 
         github: dict[str, Any] = {}
+        if page == "tool_call_limit":
+            handled, github = await self._handle_tool_call_limit(db, session, parent, active, project)
+            if handled is not None:
+                return handled
         if page == "keep_working_visible":
             # Arena shows this option after every reply, so its presence does not mean the agent stopped early.
             decision, github = await self._keep_working_decision(db, session, parent, project)
@@ -551,7 +560,7 @@ class ArenaAgentRunner:
                     append_event(session, "keep_working_skipped", decision)
 
         # Quiet = the agent stopped: idle, or Keep working shown when it must not be pressed.
-        quiet = page in {"idle", "ready", "keep_working_visible"}
+        quiet = page in {"idle", "ready", "keep_working_visible", "tool_call_limit"}
         if not github and session.submitted_at is not None and self._github_due(session, force=quiet and changed):
             github = await self._poll_github(db, session, parent, project)
             if github.get("merged_outside"):
@@ -610,6 +619,29 @@ class ArenaAgentRunner:
         if not github.get("ok") and repo_slug(project):
             return "github_unknown", github
         return "press", github
+
+    async def _handle_tool_call_limit(self, db: AsyncSession, session: ArenaSession, parent: Task, active: Task,
+                                      project: Project | None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Arena paused the agent mid-turn: continue it under the Keep working safeguards."""
+        decision, github = await self._keep_working_decision(db, session, parent, project)
+        if decision == "merged_outside":
+            return {"phase": session.phase}, github
+        if decision == "press":
+            if await self._follow_up(db, session, "tool_limit_continue", TOOL_LIMIT_CONTINUE):
+                session.keep_working_count += 1
+                await db.commit()
+            return {"phase": session.phase, "keep_working": session.keep_working_count}, github
+        if decision == "limit":
+            await self._block_needs_human(
+                db, session, active,
+                f"Arena tool-call limit: the task is not finished and all {session.keep_working_count} "
+                "automatic continues were used",
+            )
+            return {"phase": session.phase, "limit": True}, github
+        skipped = [e for e in session.events or [] if e.get("kind") == "tool_limit_skipped"]
+        if not skipped or skipped[-1].get("detail") != decision:
+            append_event(session, "tool_limit_skipped", decision)
+        return None, github
 
     async def _reports_github_blocked(self, session: ArenaSession) -> bool:
         try:

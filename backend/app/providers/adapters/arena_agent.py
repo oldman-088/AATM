@@ -85,6 +85,9 @@ class ArenaAgentError(Exception):
         self.message = message
 
 
+TOOL_LIMIT_CONTINUE = "continue"  # Arena's tool-call limit pause resumes only on a new message
+
+
 def keep_working_allowed(count: int) -> bool:
     """``ARENA_AGENT_MAX_KEEP_WORKING`` = 0 means unlimited continuation."""
     limit = get_settings().ARENA_AGENT_MAX_KEEP_WORKING
@@ -201,6 +204,11 @@ class ArenaAgentAdapter(BaseProviderAdapter):
                     return {"state": current, "keep_working": continued, "limit_reached": True}
                 clicked = await self.keep_working(profile_id)
                 continued += 1 if clicked.get("clicked") else 0
+            elif current == "tool_call_limit":
+                if not keep_working_allowed(keep_working_used + continued):
+                    return {"state": current, "keep_working": continued, "limit_reached": True}
+                await self.submit(profile_id, TOOL_LIMIT_CONTINUE)
+                continued += 1
             elif current == "idle":
                 return {"state": current, "keep_working": continued, "limit_reached": False}
             await asyncio.sleep(poll)
