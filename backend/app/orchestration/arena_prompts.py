@@ -103,9 +103,31 @@ def base_branch_rules(project: Project | None) -> list[str]:
         return []
     return [
         "",
-        f"Start your branch from the latest `origin/{base}`, not from `{project.default_branch}`.",
+        f"Start your branch from the latest `origin/{base}`, not from `{project.default_branch}`. Arena may create your "
+        f"branch from `{project.default_branch}`, so before you change anything run `git fetch origin {base} && git rebase origin/{base}`.",
         "",
         f"Open the pull request against `{base}`. Never target `{project.default_branch}` or any other branch.",
+        "",
+        *base_branch_publish_steps(project),
+    ]
+
+
+def base_branch_publish_steps(project: Project | None) -> list[str]:
+    """How to get the work onto GitHub on top of the current base branch, with checks the agent must pass."""
+    base = configured_base_branch(project)
+    if not base:
+        return []
+    return [
+        "Before you open the pull request, publish your work and verify it:",
+        "1. Commit all of your changes. Changes shown only in the Arena diff are not on GitHub.",
+        f"2. Run `git fetch origin {base} && git rebase origin/{base}`.",
+        "3. Run `git push -u origin HEAD`. Push only your own arena/* branch. If the rebase rewrote commits you already "
+        f"pushed, use `--force-with-lease` on that branch only. Never push to `{base}` or `{project.default_branch}`.",
+        f"4. `git rev-list --count origin/{base}..HEAD` must be greater than 0, and `git rev-parse HEAD` must equal the "
+        "commit shown by `git ls-remote origin refs/heads/$(git branch --show-current)`.",
+        f"5. Open the pull request with base `{base}`.",
+        "If GitHub answers \"No commits between\", your commits are not on the remote branch: repeat these steps. "
+        "Do not report the work as pushed until step 4 passes.",
     ]
 
 
