@@ -11,7 +11,7 @@ from bridge.connector import AGENT_COMMANDS
 
 from app.git_workflows.manager import git_workflow_manager
 from app.orchestration import arena_runner
-from app.orchestration.arena_prompts import report_is_complete, reply_has_final_report
+from app.orchestration.arena_prompts import reply_has_final_report, report_is_complete
 from app.orchestration.arena_runner import ArenaAgentRunner
 from tests.test_arena_page_states import _command, _report, needs_chromium, open_page  # noqa: F401
 
