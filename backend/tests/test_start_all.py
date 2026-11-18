@@ -89,6 +89,7 @@ if [[ "$1" == inspect ]]; then echo false; fi''')
                "AATM_START_SCRIPT": str(bin_dir / "fake-start"), "AATM_STOP_SCRIPT": str(bin_dir / "fake-stop"),
                "AATM_ENV_FILE": str(tmp_path / "missing.env"), "AATM_READY_TIMEOUT": "0", "AATM_READY_POLL_SECONDS": "0.05",
                "AATM_WINDOW_SETTLE_SECONDS": "0", "AATM_WINDOW_RETRY_SECONDS": "0",
+               "AATM_READY_FILE": str(tmp_path / "ready-status.json"),
                "AATM_BACKEND_URL": f"http://127.0.0.1:{services.port}", "FRONTEND_PORT": str(services.port),
                "ARENA_BRIDGE_URL": f"http://127.0.0.1:{services.port}", "ARENA_BRIDGE_TOKEN": BRIDGE_TOKEN}
         return env, log

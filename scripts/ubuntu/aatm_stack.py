@@ -234,6 +234,20 @@ def readiness() -> tuple[int, int, list[str], list[Window]]:
     return connected, len(windows), problems, missing
 
 
+def ready_file() -> Path:
+    return Path(os.environ.get("AATM_READY_FILE", ROOT / "logs" / "ready-status.json"))
+
+
+def record_ready(title: str, problems: list[str]) -> None:
+    """Leaves the start result for the optional Telegram alert service."""
+    path = ready_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ts": time.time(), "title": title, "problems": problems}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        print("[AATM] WARNING: could not record the start result.", file=sys.stderr)
+
+
 def notify(title: str, body: str = "") -> None:
     sender = shutil.which("notify-send")
     if sender:
@@ -251,6 +265,7 @@ def wait_ready(timeout: float) -> int:
             title = f"AATM جاهز ✅ ({connected}/{total} متصلين)"
             print(f"[AATM] {title}")
             notify(title)
+            record_ready(title, [])
             return 0
         now = time.monotonic()
         if now >= deadline:
@@ -268,6 +283,7 @@ def wait_ready(timeout: float) -> int:
     for problem in problems:
         print(f"  - {problem}")
     notify(title, "\n".join(problems))
+    record_ready(title, problems)
     return 1
 
 

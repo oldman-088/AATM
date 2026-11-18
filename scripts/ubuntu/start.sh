@@ -164,4 +164,15 @@ if [[ "${WATCHDOG_AUTOSTART:-true}" == "true" ]]; then
   fi
 fi
 
+# Optional send-only Telegram alerts (TELEGRAM_BOT_ENABLED=true in .env). No webhook and no open port.
+if "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/ubuntu/telegram_alerts.py" --check-enabled; then
+  if [[ -f logs/telegram.pid ]] && kill -0 "$(cat logs/telegram.pid)" 2>/dev/null; then
+    echo "[AATM] Telegram alerts already running (PID $(cat logs/telegram.pid))."
+  else
+    echo "[AATM] Starting Telegram alerts (log: logs/telegram.log)..."
+    nohup "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/ubuntu/telegram_alerts.py" >> "$ROOT_DIR/logs/telegram.log" 2>&1 < /dev/null &
+    echo $! > "$ROOT_DIR/logs/telegram.pid"
+  fi
+fi
+
 echo "[AATM] Started! UI: http://localhost:${FRONTEND_PORT} | API: http://localhost:${BACKEND_PORT}/api/health"

@@ -55,6 +55,7 @@ stop_service() {
   rm -f "$pid_file"
 }
 
+stop_service telegram "telegram_alerts.py"
 stop_service watchdog "watchdog.py"
 stop_service backend "uvicorn"
 stop_service frontend "vite"
