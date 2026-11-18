@@ -178,3 +178,17 @@ async def test_finished_task_with_merge_button_goes_to_review_without_continuing
     monkeypatch.setattr(arena_runner, "append_event", lambda s, kind, *_a, **_k: s.events.append({"kind": kind}))
     assert await runner._tick_session(_Db(), session) == {"phase": "reviewing"}
     assert reviewed == [True] and runner.adapter.closed == 1 and runner.adapter.forbidden == []
+
+
+async def test_long_generation_counts_as_progress_only_while_the_transcript_changes():
+    runner = ArenaAgentRunner.__new__(ArenaAgentRunner)
+    pages = [(5, 10), (6, 10), (6, 10)]
+
+    class Adapter:
+        async def selector_test(self, _profile):
+            count, chars = pages.pop(0)
+            return {"latest_reply": {"count": count, "chars": chars}}
+
+    runner.adapter = Adapter()
+    session = SimpleNamespace(id="s", profile_id="p", events=[])
+    assert [await runner._page_progressed(session) for _ in range(3)] == [True, True, False]
