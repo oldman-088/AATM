@@ -28,10 +28,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 TITLE = "AATM — تنبيه"
@@ -40,10 +40,12 @@ DEDUP_SECONDS = 600
 STUCK_SECONDS = 20 * 60
 ACTIVE_TASK_STATUSES = ("in_progress", "running", "working")
 CONTAINERS = ("aatm-redis", "aatm-rabbitmq")
-LOG_PATTERNS = re.compile(
-    r"Traceback|\bERROR\b|\b401\b|\b500\b|orchestration[^\n]*fail|tick failed|job \S+ failed",
-    re.IGNORECASE,
-)
+SERVICE_GRACE_SECONDS = 90.0   # a normal restart finishes within this time
+PROFILE_GRACE_SECONDS = 180.0  # Arena windows reconnect by themselves within this time
+LOG_PATTERNS = re.compile(r"(?:^|\s)ERROR[:\s]|(?i:orchestration[^\n]*fail|tick failed|job \S+ failed)")
+ACCESS_LINE = re.compile(r'"[A-Z]+ \S+ HTTP/[\d.]+" (\d{3})')
+SHUTDOWN_ERRORS = re.compile(r"^(?:asyncio\.(?:exceptions\.)?)?CancelledError|^KeyboardInterrupt|^SystemExit|ConnectionClosed")
+TRACEBACK_LINKS = ("During handling of the above exception", "The above exception was the direct cause")
 _VOLATILE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|0x[0-9a-f]+|\d+(?:\.\d+)?", re.IGNORECASE)
 
 
@@ -124,7 +126,7 @@ def http_get(url: str, token: str | None = None, timeout: float = 4.0) -> tuple[
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - loopback only
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, b""
@@ -154,13 +156,17 @@ class LogTail:
         except OSError:
             self.offset = 0
 
+    restarted = False
+
     def new_lines(self) -> list[str]:
+        self.restarted = False
         try:
             size = self.path.stat().st_size
         except OSError:
             return []
         if size < self.offset:  # the log was truncated (service restarted by start.sh)
             self.offset = 0
+            self.restarted = True
         if size == self.offset:
             return []
         with self.path.open("rb") as fh:
@@ -168,6 +174,50 @@ class LogTail:
             data = fh.read(min(size - self.offset, 2_000_000))
         self.offset += len(data)
         return data.decode("utf-8", "replace").splitlines()
+
+
+class LogScanner:
+    """Turns new log lines into alerts: one per traceback (its final error), none for normal traffic."""
+
+    def __init__(self) -> None:
+        self.in_traceback = False
+        self.pending: str | None = None
+
+    def _flush(self, out: list[str]) -> None:
+        if self.pending is not None and not SHUTDOWN_ERRORS.search(self.pending):
+            out.append(self.pending)
+        self.pending = None
+
+    def feed(self, lines: list[str]) -> list[str]:
+        out: list[str] = []
+        for line in lines:
+            text = line.strip()
+            if text.startswith(TRACEBACK_LINKS):
+                self.pending = None  # a chained error: the last one in the chain is reported
+                continue
+            if text.startswith("Traceback (most recent call last)"):
+                self.pending = None
+                self.in_traceback = True
+                continue
+            if self.in_traceback:
+                if not text or line[:1] in " \t":
+                    continue
+                self.in_traceback = False
+                self.pending = text
+                continue
+            if self.pending is not None:
+                if not text:
+                    continue
+                self._flush(out)
+            access = ACCESS_LINE.search(line)
+            if access:
+                if int(access.group(1)) >= 500:
+                    out.append(text)
+            elif LOG_PATTERNS.search(line) and "Exception in ASGI application" not in line:
+                out.append(text)
+        if not lines:
+            self._flush(out)
+        return out
 
 
 def log_key(line: str) -> str:
@@ -215,7 +265,7 @@ def stuck_tasks(db_path: Path, now_utc: datetime, stuck_seconds: float = STUCK_S
         except ValueError:
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)  # the backend stores UTC
+            ts = ts.replace(tzinfo=UTC)  # the backend stores UTC
         age = (now_utc - ts).total_seconds()
         if age > stuck_seconds:
             found[str(task_id)] = (
@@ -237,6 +287,18 @@ class Watchdog:
             name: LogTail(ROOT_DIR / "logs" / f"{name}.log") for name in ("backend", "bridge")
         }
         self.seen_connected: set[str] = set()
+        self.scanners = {name: LogScanner() for name in self.logs}
+        self.quiet_until: dict[str, float] = {}
+        self.first_seen: dict[str, float] = {}
+
+    def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
+        """Only problems that outlasted a normal restart or reconnect are reported."""
+        now = self.alerter.clock()
+        keys = {f"{group}:{key}" for key in problems}
+        self.first_seen = {k: v for k, v in self.first_seen.items() if not k.startswith(group + ":") or k in keys}
+        for key in keys:
+            self.first_seen.setdefault(key, now)
+        return {key: text for key, text in problems.items() if now - self.first_seen[f"{group}:{key}"] >= grace}
 
     @property
     def _token(self) -> str:
@@ -257,7 +319,7 @@ class Watchdog:
                 problems["docker"] = "تعذّر تشغيل docker للتحقق من الحاويات"
             elif not running:
                 problems[name] = f"الحاوية {name} لا تعمل"
-        self.alerter.set_problems("service", problems)
+        self.alerter.set_problems("service", self._settled("service", problems, SERVICE_GRACE_SECONDS))
 
     def check_profiles(self) -> None:
         token = self._token
@@ -284,16 +346,25 @@ class Watchdog:
                     problems[f"{pid}:offline"] = f"انقطع اتصال الملف {pid} (السبب: {reason})"
         elif status:
             problems["api"] = f"واجهة ملفات الجسر أعادت {status}"
+        offline = {k: v for k, v in problems.items() if k.endswith(":offline")}
+        settled = self._settled("profile", offline, PROFILE_GRACE_SECONDS)
+        problems = {k: v for k, v in problems.items() if k not in offline or k in settled}
         self.alerter.set_problems("profile", problems)
 
     def check_logs(self) -> None:
+        now = self.alerter.clock()
         for name, tail in self.logs.items():
-            for line in tail.new_lines():
-                if LOG_PATTERNS.search(line):
-                    self.alerter.event(f"{name}:{log_key(line)}", f"{name}.log: {line.strip()[:200]}")
+            lines = tail.new_lines()
+            if tail.restarted:
+                self.quiet_until[name] = now + SERVICE_GRACE_SECONDS
+            alerts = self.scanners[name].feed(lines)
+            if now < self.quiet_until.get(name, 0.0):
+                continue  # messages from a normal restart
+            for line in alerts:
+                self.alerter.event(f"{name}:{log_key(line)}", f"{name}.log: {line[:200]}")
 
     def check_tasks(self) -> None:
-        self.alerter.set_problems("task", stuck_tasks(self.db_path, datetime.now(timezone.utc)))
+        self.alerter.set_problems("task", stuck_tasks(self.db_path, datetime.now(UTC)))
 
     def cycle(self) -> None:
         for check in (self.check_services, self.check_profiles, self.check_logs, self.check_tasks):
