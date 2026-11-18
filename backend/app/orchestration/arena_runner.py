@@ -74,6 +74,7 @@ MONITORED_PHASES = {"working", "correcting", "reporting"}
 RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starting", "submitting", "needs_human"}
 STALL_MINUTES = 20
 NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is escalated to the owner
+AGENT_ACTIVE_STATES = {"generating", "keep_working_visible", "tool_call_limit", "pr_ready"}
 CREATE_PR_WAIT_MINUTES = 5  # after pressing Arena's Create PR, before falling back to asking the agent
 NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
@@ -227,6 +228,11 @@ class ArenaAgentRunner:
             raise ArenaRunnerError(str(exc)) from exc
         session.active_task_id = task.id
         profile_id = session.profile_id
+        if fresh and session.phase == "submitting" and await self._submit_landed(session):
+            # Restarted right after sending: the page has the prompt, so it must not be sent again.
+            session.submitted_at = _now()
+            append_event(session, "submit_recovered")
+            fresh = False
         try:
             if fresh:
                 session.phase = "starting"
@@ -241,6 +247,7 @@ class ArenaAgentRunner:
                 append_event(session, "repo_selected", repo)
                 prompt = build_task_prompt(task, project, agent)
                 session.phase = "submitting"
+                append_event(session, "submit_started", (await self.adapter.transcript_mark(profile_id)).get("mark"))
                 await db.commit()
                 await self.adapter.submit(profile_id, prompt, repo=repo)
                 session.submitted_at = _now()
@@ -276,6 +283,45 @@ class ArenaAgentRunner:
         ]
         await db.commit()
         await event_bus.emit("arena.session", {"session_id": session.id, "agent_id": agent.id, "task_id": task.id, "phase": session.phase})
+
+    async def _submit_landed(self, session: ArenaSession) -> bool:
+        started = [e for e in session.events or [] if e.get("kind") == "submit_started"]
+        if not started:
+            return False
+        try:
+            page = await self.adapter.transcript_mark(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "submit_check_failed", exc.code)
+            return False
+        return page.get("state") in AGENT_ACTIVE_STATES or page.get("mark") != started[-1].get("detail")
+
+    async def recover_after_restart(self, db: AsyncSession) -> dict[str, int]:
+        """Called once at startup: downtime is not a stall, and unfinished sends are checked again."""
+        sessions = list((await db.execute(select(ArenaSession).where(
+            ArenaSession.is_open.is_(True), ArenaSession.kind != "manager",
+            ArenaSession.phase.in_(MONITORED_PHASES | {"starting", "submitting"}),
+        ))).scalars())
+        monitored = requeued = 0
+        for session in sessions:
+            task = await db.get(Task, session.active_task_id or session.task_id) if session.task_id else None
+            if task is None:
+                continue
+            if session.phase in MONITORED_PHASES:
+                session.last_state_change_at = _now()
+                task.updated_at = _now()  # self-healing must not treat the downtime as a dead task
+                append_event(session, "monitoring_restored")
+                monitored += 1
+            elif task.status == "in_progress":
+                task.status = "queued"
+                task.lock_owner = None
+                running = (await db.execute(select(AgentMessage).where(
+                    AgentMessage.task_id == task.id, AgentMessage.execution_status == "running"))).scalars()
+                for message in running:
+                    message.execution_status = "cancelled"
+                append_event(session, "requeued_after_restart")
+                requeued += 1
+        await db.commit()
+        return {"monitored": monitored, "requeued": requeued}
 
     async def _start_correction(self, db: AsyncSession, message: AgentMessage, follow_up: Task, agent: Agent) -> None:
         from app.runtime.loop.common import NeedsHumanError

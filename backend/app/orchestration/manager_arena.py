@@ -482,6 +482,12 @@ class ManagerArenaRuntime:
         try:
             session = await self._ensure_session(db, job, profile_id)
             job.session_id = session.id
+            resume = False
+            if (job.context or {}).get("interrupted"):
+                job.context = {k: v for k, v in job.context.items() if k != "interrupted"}
+                resume = await self._interrupted_prompt_sent(session, job)
+                append_event(session, "job_resumed", "waiting for the reply" if resume else "prompt was not sent", job_id=job.id)
+                await db.commit()
             if job.kind == "context":
                 await self._finish(db, job, result={"session_id": session.id})
                 return {"job_id": job.id, "status": job.status}
@@ -489,7 +495,7 @@ class ManagerArenaRuntime:
             if prompt is None:
                 await self._finish(db, job, status="failed", error="The job's task or project no longer exists.")
                 return {"job_id": job.id, "status": job.status}
-            reply = await self._exchange(db, session, job, prompt)
+            reply = await self._exchange(db, session, job, prompt, resume=resume)
             if job.kind in {"plan", "review"}:
                 parsed, error = await self._parse(db, job, reply)
                 if parsed is None:
@@ -526,6 +532,37 @@ class ManagerArenaRuntime:
         finally:
             await self._set_manager_status(db, "idle")
             await db.commit()
+
+    # ------------------------------------------------------------------ restart
+    async def recover_after_restart(self, db: AsyncSession) -> int:
+        """Called once at startup: a job left running goes back to the queue and is checked before sending."""
+        jobs = list((await db.execute(select(ManagerJob).where(ManagerJob.status == "running"))).scalars())
+        for job in jobs:
+            job.status = "queued"
+            job.error = None
+            job.context = {**(job.context or {}), "interrupted": True}
+        if jobs:
+            await self._set_manager_status(db, "idle")
+        await db.commit()
+        return len(jobs)
+
+    async def _interrupted_prompt_sent(self, session: ArenaSession, job: ManagerJob) -> bool:
+        from app.providers.adapters.arena_agent import ArenaAgentError
+
+        events = [e for e in session.events or [] if e.get("job_id") == job.id
+                  and e.get("kind") in {"submit_started", "submitted", "submit_failed"}]
+        if not events or events[-1]["kind"] == "submit_failed":
+            return False
+        last = events[-1]
+        if last["kind"] == "submitted":
+            return not str(last.get("detail") or "").startswith("context:")
+        if last.get("exchange") == "context":
+            return False
+        try:
+            page = await self.adapter.transcript_mark(session.profile_id)
+        except ArenaAgentError:
+            return False
+        return page.get("state") in BUSY_STATES or page.get("mark") != last.get("detail")
 
     # ------------------------------------------------------------------ session
     async def _open_session(self, db: AsyncSession) -> ArenaSession | None:
@@ -571,7 +608,8 @@ class ManagerArenaRuntime:
         await db.commit()
         return session
 
-    async def _exchange(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str, *, kind: str | None = None) -> str:
+    async def _exchange(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str, *, kind: str | None = None,
+                        resume: bool = False) -> str:
         """Submit one prompt (shared submit path), follow the page until it is quiet, read the reply."""
         from app.providers.adapters.arena_agent import TOOL_LIMIT_CONTINUE, ArenaAgentError, keep_working_allowed
 
@@ -580,24 +618,28 @@ class ManagerArenaRuntime:
         before_state = str(before.get("agent_state") or "")
         expects_json = kind != "context" and job.kind in {"plan", "review"}
         pressed_on: str | None = None
-        try:
-            await self.adapter.submit(session.profile_id, text, source="manager")
-        except ArenaAgentError as exc:
-            append_event(session, "submit_failed", f"{exc.code}: {exc.message}")
+        if not resume:  # after a restart the prompt may already be on the page: then only the reply is awaited
+            mark = (await self.adapter.transcript_mark(session.profile_id)).get("mark")
+            append_event(session, "submit_started", mark, job_id=job.id, exchange=kind or job.kind)
             await db.commit()
-            raise
-        session.exchange_count += 1
-        session.submitted_at = _now()
-        session.last_state_change_at = session.submitted_at
-        session.phase = "manager_busy"
-        append_event(session, "submitted", f"{kind or job.kind}: {len(text)} chars", job_id=job.id)
-        await db.commit()
-        await event_bus.emit("manager.activity", {**(_job_dict(job) or {}), "exchange": session.exchange_count})
+            try:
+                await self.adapter.submit(session.profile_id, text, source="manager")
+            except ArenaAgentError as exc:
+                append_event(session, "submit_failed", f"{exc.code}: {exc.message}", job_id=job.id)
+                await db.commit()
+                raise
+            session.exchange_count += 1
+            session.submitted_at = _now()
+            session.last_state_change_at = session.submitted_at
+            session.phase = "manager_busy"
+            append_event(session, "submitted", f"{kind or job.kind}: {len(text)} chars", job_id=job.id)
+            await db.commit()
+            await event_bus.emit("manager.activity", {**(_job_dict(job) or {}), "exchange": session.exchange_count})
 
         started = time.monotonic()
         last_change = time.monotonic()
         last_seen = (str(before.get("agent_state") or ""), before_since)
-        seen_busy = False
+        seen_busy = resume
         while True:
             state = await self.adapter.state(session.profile_id)
             current = str(state.get("agent_state") or ("offline" if not state.get("connected") else "")) or "offline"

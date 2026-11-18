@@ -183,6 +183,12 @@ class ArenaAgentAdapter(BaseProviderAdapter):
     async def keep_working(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "keep_working")
 
+    async def transcript_mark(self, profile_id: str) -> dict[str, Any]:
+        """Read-only fingerprint of the page, used to tell whether a prompt really reached it."""
+        page = await self.selector_test(profile_id)
+        latest = page.get("latest_reply") or {}
+        return {"mark": f"{latest.get('count')}:{latest.get('chars')}", "state": page.get("state")}
+
     async def create_pr(self, profile_id: str, *, repo: str, branch: str) -> dict[str, Any]:
         """Press Arena's Create PR for this chat after the page confirms it is the task's branch."""
         return await self.command(profile_id, "create_pr", repo=repo, branch=branch)
