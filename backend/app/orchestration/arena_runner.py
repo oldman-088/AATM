@@ -52,6 +52,7 @@ from app.orchestration.arena_prompts import (
     build_task_prompt,
     compare_report_to_changes,
     pr_title_prefix,
+    reply_has_final_report,
     repo_slug,
     report_is_complete,
     reports_github_blocked,
@@ -504,8 +505,13 @@ class ArenaAgentRunner:
             await self._block_needs_human(db, session, active, f"stalled: no Arena activity or new commits for {int(self.stall_minutes)} minutes")
             return {"phase": session.phase, "stalled": True}
 
+        github: dict[str, Any] = {}
         if page == "keep_working_visible":
-            if keep_working_allowed(session.keep_working_count):
+            # Arena shows this option after every reply, so its presence does not mean the agent stopped early.
+            decision, github = await self._keep_working_decision(db, session, parent, project)
+            if decision == "merged_outside":
+                return {"phase": session.phase}
+            if decision == "press":
                 try:
                     clicked = await self.adapter.keep_working(session.profile_id)
                 except ArenaAgentError as exc:
@@ -517,15 +523,19 @@ class ArenaAgentRunner:
                     append_event(session, "keep_working", f"#{session.keep_working_count}")
                 await db.commit()
                 return {"phase": session.phase, "keep_working": session.keep_working_count}
-            if not any(e.get("kind") == "keep_working_limit" for e in session.events or []):
-                append_event(session, "keep_working_limit", f"limit {session.keep_working_count} reached")
-                await self._notify(db, f"Keep working limit reached: {parent.title}",
-                                   "ARENA_AGENT_MAX_KEEP_WORKING was reached; AATM stopped continuing this session.")
+            if decision == "limit":
+                if not any(e.get("kind") == "keep_working_limit" for e in session.events or []):
+                    append_event(session, "keep_working_limit", f"limit {session.keep_working_count} reached")
+                    await self._notify(db, f"Keep working limit reached: {parent.title}",
+                                       "ARENA_AGENT_MAX_KEEP_WORKING was reached; AATM stopped continuing this session.")
+            else:
+                skipped = [e for e in session.events or [] if e.get("kind") == "keep_working_skipped"]
+                if not skipped or skipped[-1].get("detail") != decision:
+                    append_event(session, "keep_working_skipped", decision)
 
-        # Quiet = the agent stopped: idle, or Keep working shown after the configured limit was reached.
+        # Quiet = the agent stopped: idle, or Keep working shown when it must not be pressed.
         quiet = page in {"idle", "ready", "keep_working_visible"}
-        github: dict[str, Any] = {}
-        if session.submitted_at is not None and self._github_due(session, force=quiet and changed):
+        if not github and session.submitted_at is not None and self._github_due(session, force=quiet and changed):
             github = await self._poll_github(db, session, parent, project)
             if github.get("merged_outside"):
                 return {"phase": session.phase}
@@ -556,6 +566,32 @@ class ArenaAgentRunner:
 
         self._quiet_misses.pop(session.id, None)
         return await self._collect_report(db, session, parent, active, project)
+
+    async def _keep_working_decision(self, db: AsyncSession, session: ArenaSession, parent: Task,
+                                     project: Project | None) -> tuple[str, dict[str, Any]]:
+        """Return ``press`` only for an agent that stopped mid-task, otherwise the reason not to press."""
+        if session.pr_number:
+            return "pr_exists", {}
+        try:
+            reply = await self.adapter.read_last_reply(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "read_reply_failed", f"{exc.code}: {exc.message}")
+            return "reply_unread", {}
+        text = str(reply.get("text") or "")
+        if not text.strip():
+            return "reply_unread", {}
+        if reply_has_final_report(text):
+            return "final_report", {}
+        if not keep_working_allowed(session.keep_working_count):
+            return "limit", {}
+        github = await self._poll_github(db, session, parent, project)
+        if github.get("merged_outside"):
+            return "merged_outside", github
+        if session.pr_number:
+            return "pr_exists", github
+        if not github.get("ok") and repo_slug(project):
+            return "github_unknown", github
+        return "press", github
 
     async def _reports_github_blocked(self, session: ArenaSession) -> bool:
         try:

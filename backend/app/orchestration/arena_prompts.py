@@ -33,6 +33,14 @@ GITHUB_BLOCKED_MARKER = "AATM_BLOCKED: GITHUB_ACCESS"
 _GITHUB_BLOCKED_LINE = re.compile(rf"^[\s>*`_-]*{re.escape(GITHUB_BLOCKED_MARKER)}\b", re.MULTILINE)
 
 
+_REPORT_HEADING_LINE = re.compile(rf"^[\s>*_-]*{re.escape(REPORT_HEADING)}\b", re.MULTILINE | re.IGNORECASE)
+
+
+def reply_has_final_report(reply: str) -> bool:
+    """True when the reply starts a line with the report heading (an echoed prompt only quotes it mid-line)."""
+    return bool(_REPORT_HEADING_LINE.search(reply or ""))
+
+
 def reports_github_blocked(reply: str) -> bool:
     """True when a line of the agent's reply starts with the marker (the prompt only quotes it mid-sentence)."""
     return bool(_GITHUB_BLOCKED_LINE.search(reply or ""))

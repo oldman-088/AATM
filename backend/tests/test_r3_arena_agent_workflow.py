@@ -42,12 +42,13 @@ from app.orchestration.arena_prompts import (
     build_correction_prompt,
     build_task_prompt,
     compare_report_to_changes,
+    reply_has_final_report,
     report_is_complete,
     reports_github_blocked,
 )
 from app.orchestration.arena_runner import ArenaAgentRunner, arena_reservations, arena_runner
 from app.orchestration.scheduler import TaskScheduler
-from app.providers.adapters.arena_agent import ArenaAgentAdapter, keep_working_allowed
+from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError, keep_working_allowed
 from app.providers.base import ProviderRequest
 from app.runtime.agent_loop import AgentLoop
 from app.runtime.loop.common import NeedsHumanError
@@ -240,6 +241,7 @@ class ScriptedPage(ArenaAgentAdapter):
         self.select_calls = 0
         self.repo_select_wait_seconds = 0
         self.reply = ""
+        self.reply_unreadable = False
 
     async def state(self, profile_id: str) -> dict[str, Any]:
         return {"ok": True, "connected": True, "mode": "agent", "status": "ready", "agent_state": self.page_state}
@@ -260,6 +262,8 @@ class ScriptedPage(ArenaAgentAdapter):
             self.page_state = "generating"
             return {"clicked": True}
         if command == "read_last_reply":
+            if self.reply_unreadable:
+                raise ArenaAgentError("no_reply", "The reply could not be read.")
             return {"text": self.reply, "truncated": False}
         if command == "submit":
             self.page_state = "generating"
@@ -389,6 +393,7 @@ async def test_keep_working_continues_when_github_is_not_reported_blocked(env, a
 async def test_unlimited_keep_working_then_no_pr_is_escalated_instead_of_completed(env, arena_settings, monkeypatch, tmp_path):
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 0)
     page, runner, _gh, (task_id, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.reply = "Still implementing."
     async with env() as db:
         for _ in range(7):  # Keep working shown again and again: AATM continues every time
             page.page_state = "keep_working_visible"
@@ -413,13 +418,86 @@ async def test_unlimited_keep_working_then_no_pr_is_escalated_instead_of_complet
 async def test_keep_working_limit_stops_continuing_and_notifies(env, arena_settings, monkeypatch, tmp_path):
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 2)
     page, runner, _gh, (_task, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.reply = "Still implementing."  # stopped mid-task: no PR and no report
     async with env() as db:
         for _ in range(4):
             page.page_state = "keep_working_visible"
             await runner.tick(db)
         assert sum(1 for c, _ in page.commands if c == "keep_working") == 2
         session = await db.get(ArenaSession, session_id)
+        assert session.keep_working_count == 2
         assert any(e["kind"] == "keep_working_limit" for e in session.events)
+
+
+def _presses(page: ScriptedPage) -> int:
+    return sum(1 for c, _ in page.commands if c == "keep_working")
+
+
+async def _tick_with_panel(env, runner, page, session_id: str, ticks: int = 3) -> list[str]:
+    async with env() as db:
+        for _ in range(ticks):
+            page.page_state = "keep_working_visible"
+            await runner.tick(db)
+    async with env() as db:
+        session = await db.get(ArenaSession, session_id)
+        return [e["detail"] for e in session.events if e["kind"] == "keep_working_skipped"]
+
+
+async def test_finished_task_with_a_known_pr_gets_no_keep_working(env, arena_settings, monkeypatch, tmp_path):
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 5)
+    page, runner, _gh, (_task, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.reply = "Pull request opened."
+    async with env() as db:
+        session = await db.get(ArenaSession, session_id)
+        session.pr_number = 101
+        await db.commit()
+    skipped = await _tick_with_panel(env, runner, page, session_id, ticks=1)
+    assert _presses(page) == 0 and skipped == ["pr_exists"]
+
+
+async def test_pr_found_on_github_prevents_keep_working(env, arena_settings, monkeypatch, tmp_path):
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 5)
+    page, runner, gh, (task_id, session_id, _agent), origin = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    arena = ArenaOnGitHub(tmp_path, origin, gh)
+    arena.push(task_id, "arena/a1b2c3", {"answer.py": "def answer():\n    return 42\n"}, "Add answer()")
+    page.reply = "Opened the pull request."
+    await _tick_with_panel(env, runner, page, session_id, ticks=1)
+    assert _presses(page) == 0
+    async with env() as db:
+        assert (await db.get(ArenaSession, session_id)).pr_number == 101
+
+
+async def test_final_report_prevents_keep_working(env, arena_settings, monkeypatch, tmp_path):
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 5)
+    page, runner, _gh, (_task, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.reply = _report(["answer.py"], "1 passed")
+    skipped = await _tick_with_panel(env, runner, page, session_id)
+    assert _presses(page) == 0 and skipped == ["final_report"]
+
+
+@pytest.mark.parametrize("unreadable", [True, False])
+async def test_keep_working_needs_a_readable_last_reply(env, arena_settings, monkeypatch, tmp_path, unreadable):
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 5)
+    page, runner, _gh, (_task, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.reply_unreadable = unreadable  # otherwise the reply is empty
+    skipped = await _tick_with_panel(env, runner, page, session_id, ticks=1)
+    assert _presses(page) == 0 and skipped == ["reply_unread"]
+
+
+async def test_agent_stopped_mid_task_is_continued_up_to_the_limit(env, arena_settings, monkeypatch, tmp_path):
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 3)
+    page, runner, _gh, (_task, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.reply = "I added the first file and will continue with the tests."
+    await _tick_with_panel(env, runner, page, session_id, ticks=6)
+    assert _presses(page) == 3
+    async with env() as db:
+        assert (await db.get(ArenaSession, session_id)).keep_working_count == 3
+
+
+def test_an_echoed_prompt_is_not_a_final_report():
+    prompt = build_task_prompt(Task(id="task-1", title="T", description="D"), None)
+    assert "## AATM REPORT" in prompt and not reply_has_final_report(prompt)
+    assert reply_has_final_report("Done.\n\n## AATM REPORT\nSummary")
 
 
 async def test_pr_merged_outside_aatm_is_flagged(env, arena_settings, monkeypatch, tmp_path):
@@ -501,7 +579,7 @@ async def test_full_arena_agent_workflow_with_review_corrections_approval_and_ne
                 context = await browser.new_context()
                 await context.add_init_script(script)
                 page = await context.new_page()
-                await page.goto(f"{bridge.base}/mock-arena/agent/?gen_ms=900&kw_rounds=2")
+                await page.goto(f"{bridge.base}/mock-arena/agent/?gen_ms=900&kw_rounds=2&panel=1")  # the panel follows every reply
                 # Round 1: the report claims a test file the agent never pushed.
                 await page.evaluate("t => window.__mockArena.setReport(t)", _report(["answer.py", "tests/test_answer.py"], "1 passed"))
                 prompts: list[str] = []
@@ -512,7 +590,8 @@ async def test_full_arena_agent_workflow_with_review_corrections_approval_and_ne
                     for t in texts:
                         if t not in prompts:
                             prompts.append(t)
-                    if prompts and t1_id not in gh.prs:
+                    clicks = await page.evaluate("() => window.__mockArena.kw_clicks")
+                    if prompts and clicks >= 2 and t1_id not in gh.prs:  # the PR comes after the agent was continued
                         arena.push(t1_id, "arena/a1b2c3", {"answer.py": "def answer():\n    return 42\n"}, "Add answer()")
 
                 # 1. dispatch -> new_session -> submit -> Keep working x2 -> idle -> PR via GitHub API -> report -> review
@@ -537,6 +616,7 @@ async def test_full_arena_agent_workflow_with_review_corrections_approval_and_ne
 
                 # 2. correction goes to the SAME session; the agent pushes the missing test and reports again
                 await page.evaluate("t => window.__mockArena.setReport(t)", _report(["answer.py", "tests/test_answer.py"], "1 passed"))
+                await page.evaluate("() => window.__mockArena.setKwRounds(0)")  # this time it finishes in one go
 
                 async def _fix_on_github() -> None:
                     await _agent_on_github()
@@ -551,7 +631,7 @@ async def test_full_arena_agent_workflow_with_review_corrections_approval_and_ne
                 await _drive(env, scheduler, loops, _merge_requested, on_tick=_fix_on_github)
                 stats = await page.evaluate("() => window.__mockArena")
                 assert stats["new_sessions"] == 1, "corrections must reuse the same Arena session"
-                assert stats["submits"] == 2 and stats["kw_clicks"] == 4
+                assert stats["submits"] == 2 and stats["kw_clicks"] == 2, "no Keep working once the PR exists"
                 correction = prompts[1]
                 assert f"Corrections for [AATM-{t1_id}]" in correction and "tests/test_answer.py" in correction
                 assert not any(c[1:3] == ["pr", "merge"] for c in gh.calls), "nothing merges before the owner approves"

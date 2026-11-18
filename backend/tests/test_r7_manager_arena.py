@@ -9,6 +9,7 @@ test passed (otherwise it says why, in Arabic).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from typing import Any
@@ -270,6 +271,7 @@ class ScriptedManagerPage(ArenaAgentAdapter):
         self.stuck = False
         self.commands: list[tuple[str, str | None]] = []
         self.reply = ""
+        self.continued_replies: list[str] = []
         self.last_kind = "CHAT"
 
     def _move(self, page: str) -> None:
@@ -300,6 +302,8 @@ class ScriptedManagerPage(ArenaAgentAdapter):
             return {"sent": True}
         if command == "keep_working":
             self.kw_rounds -= 1
+            if self.continued_replies:
+                self.reply = self.continued_replies.pop(0)
             self.busy_ticks = 1
             self._move("generating")
             return {"clicked": True}
@@ -414,19 +418,43 @@ async def test_owner_new_session_button_sends_a_context_prompt(env, scripted):
     assert "## Team" in context and "worker-1" in context and "## Open tasks" in context and "## Open pull requests" in context
 
 
-async def test_manager_keep_working_uses_the_worker_limit(env, scripted, arena_settings, monkeypatch):
+async def test_manager_with_an_unfinished_plan_is_continued_up_to_the_limit(env, scripted, arena_settings, monkeypatch):
     make, project_id = scripted
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 2)
-    page, runtime = make({"*": ["تم."]})
+    page, runtime = make({"PLAN": ['{"summary_ar": "جزء'], "RETRY": ["ما زلت أعمل"]})
+    page.continued_replies = ['{"summary_ar": "جزء ثان', '{"summary_ar": "جزء ثالث']
+    page.kw_rounds = 5
     async with env() as db:
-        await runtime.handle_owner_message(db, project_id, "مرحبا؟")
-        await runtime.wait_idle()
-        page.kw_rounds = 5
-        await runtime.handle_owner_message(db, project_id, "سؤال طويل؟")
+        await runtime.handle_owner_message(db, project_id, "ابنِ دالة answer()")
         await runtime.wait_idle()
         session = (await db.execute(select(ArenaSession).where(ArenaSession.kind == "manager"))).scalars().first()
     assert [c for c, _ in page.commands].count("keep_working") == 2 and session.keep_working_count == 2
     assert any(e["kind"] == "keep_working_limit" for e in session.events)
+
+
+@pytest.mark.parametrize("goal", ["مرحبا؟", "ابنِ دالة answer()"])
+async def test_finished_manager_reply_gets_no_keep_working(env, scripted, arena_settings, monkeypatch, goal):
+    make, project_id = scripted
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 5)
+    page, runtime = make({"PLAN": [json.dumps(_plan(), ensure_ascii=False)], "*": ["تم."]})
+    page.kw_rounds = 50  # Arena shows the option after every reply
+    async with env() as db:
+        await runtime.handle_owner_message(db, project_id, goal)
+        await runtime.wait_idle()
+    assert [c for c, _ in page.commands].count("keep_working") == 0
+    assert (await _jobs(env))[-1].status == "done"
+
+
+async def test_manager_stops_pressing_when_keep_working_changes_nothing(env, scripted, arena_settings, monkeypatch):
+    make, project_id = scripted
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 0)  # unlimited must still end
+    page, runtime = make({"PLAN": ["Sure, here is my plan in words."], "RETRY": ["Still prose, sorry."]})
+    page.kw_rounds = 50
+    async with env() as db:
+        await runtime.handle_owner_message(db, project_id, "ابنِ دالة answer()")
+        await runtime.wait_idle()
+    assert [c for c, _ in page.commands].count("keep_working") == 2  # one per answer, then the JSON retry path
+    assert (await _jobs(env))[-1].status == "needs_human"
 
 
 async def test_stalled_manager_session_is_flagged_needs_human(env, scripted):
@@ -566,7 +594,7 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
                 await wctx.add_init_script(worker_script)
                 mpage, wpage = await mctx.new_page(), await wctx.new_page()
                 await mpage.goto(f"{bridge.base}/mock-arena/agent/?gen_ms=500")
-                await wpage.goto(f"{bridge.base}/mock-arena/agent/?gen_ms=900&kw_rounds=2")
+                await wpage.goto(f"{bridge.base}/mock-arena/agent/?gen_ms=900&kw_rounds=2&panel=1")
 
                 # ---- 1. the manager profile connects and its Selector test passes
                 await _wait_for(lambda: _connected())
@@ -626,7 +654,8 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
                     for t in texts:
                         if t not in prompts:
                             prompts.append(t)
-                    if prompts and t1_id not in gh.prs:
+                    clicks = await wpage.evaluate("() => window.__mockArena.kw_clicks")
+                    if prompts and clicks >= 2 and t1_id not in gh.prs:  # the PR comes after the agent was continued
                         arena.push(t1_id, "arena/m7a1", {"answer.py": "def answer():\n    return 42\n"}, "Add answer()")
 
                 # ---- 4. worker PR -> manager review (request_changes) -> correction in the same worker session
@@ -649,6 +678,8 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
                 assert any(c[1:3] == ["pr", "review"] and "--request-changes" in c for c in gh.calls)
 
                 # ---- 5. corrected -> manager approves -> waits for the OWNER (nothing merges)
+                await wpage.evaluate("() => window.__mockArena.setKwRounds(0)")  # the correction finishes in one go
+
                 async def _fix_on_github() -> None:
                     await _agent_on_github()
                     if len(prompts) >= 2 and len(_git(arena.work, "log", "--oneline", "origin/main..arena/m7a1").splitlines()) < 2:
@@ -664,6 +695,7 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
                 assert "Add tests/test_answer.py" in prompts[1], "the manager's comments go back to the same worker session"
                 wstats = await wpage.evaluate("() => window.__mockArena")
                 assert wstats["new_sessions"] == 1, "corrections reuse the worker's Arena session"
+                assert wstats["kw_clicks"] == 2, "no Keep working once the PR exists or the report is written"
                 assert [j.result["verdict"]["verdict"] for j in await manager_jobs("review")] == ["request_changes", "approve"]
                 assert not any(c[1:3] == ["pr", "merge"] for c in gh.calls), "the manager never merges"
                 async with env() as db:

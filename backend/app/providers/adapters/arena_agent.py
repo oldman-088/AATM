@@ -194,6 +194,9 @@ class ArenaAgentAdapter(BaseProviderAdapter):
             if state.get("status") == "needs_human" or current == "needs_human":
                 raise ArenaAgentError("needs_human", str(state.get("needs_human_reason") or "Arena page needs a human."))
             if current == "keep_working_visible":
+                # Arena shows this option after every reply: a written reply is the finished answer.
+                if str((await self.read_last_reply(profile_id)).get("text") or "").strip():
+                    return {"state": current, "keep_working": continued, "limit_reached": False}
                 if not keep_working_allowed(keep_working_used + continued):
                     return {"state": current, "keep_working": continued, "limit_reached": True}
                 clicked = await self.keep_working(profile_id)

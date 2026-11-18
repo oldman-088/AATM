@@ -70,6 +70,7 @@
   window.__mockArena = stats;
   // Test hook: the next final reply (the agent's report) changes between review rounds.
   stats.setReport = function (text) { finalReport = String(text); };
+  stats.setKwRounds = function (n) { kwRounds = Number(n) || 0; };
 
   // ---------------------------------------------------------------- R7: answering as the manager
   // A prompt that carries an [AATM-MANAGER:<KIND>] marker gets a manager answer instead of a report:

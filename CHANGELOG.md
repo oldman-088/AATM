@@ -24,6 +24,9 @@ owner approval → merge → project completed, on the test repository
 
 ### Fixed
 - **Feedback panel**: "Was this task successful?" is closed with its X or Escape. Yes and No are never clicked.
+- **Keep working only when the agent really stopped**: Arena offers it after every reply, so AATM now reads
+  the last reply first and never presses it when the task's PR exists or the reply holds the final report.
+  The manager presses it only for an unfinished plan or review answer.
 - **Late repository picker**: selection waits and retries on a freshly loaded page.
 - **Stale replies**: a real Arena new session is a full page load, so old chat text is not read as the reply.
 - **`reset-admin-password.sh`**: hidden prompt, checks it targets the database the backend uses, verifies

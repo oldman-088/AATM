@@ -569,6 +569,9 @@ class ManagerArenaRuntime:
 
         before = await self.adapter.state(session.profile_id)
         before_since = str(before.get("agent_state_since") or "")
+        before_state = str(before.get("agent_state") or "")
+        expects_json = kind != "context" and job.kind in {"plan", "review"}
+        pressed_on: str | None = None
         try:
             await self.adapter.submit(session.profile_id, text, source="manager")
         except ArenaAgentError as exc:
@@ -605,16 +608,33 @@ class ManagerArenaRuntime:
             if current in BUSY_STATES:
                 seen_busy = True
             if current == "keep_working_visible":
-                if keep_working_allowed(session.keep_working_count):
-                    clicked = await self.adapter.keep_working(session.profile_id)
-                    if clicked.get("clicked"):
-                        session.keep_working_count += 1
-                        append_event(session, "keep_working", f"#{session.keep_working_count}")
+                # Arena shows this option after every reply: press it only for an unfinished answer.
+                panel_is_new = (current, since) != (before_state, before_since)
+                latest = None
+                if panel_is_new or time.monotonic() - started > self.start_grace_seconds:
+                    try:
+                        latest = str((await self.adapter.read_last_reply(session.profile_id)).get("text") or "")
+                    except ArenaAgentError as exc:
+                        append_event(session, "read_reply_failed", f"{exc.code}: {exc.message}")
                         await db.commit()
-                elif seen_busy:
-                    append_event(session, "keep_working_limit", f"limit {session.keep_working_count} reached")
-                    await db.commit()
-                    break
+                if latest is not None and latest.strip():
+                    if not expects_json or extract_manager_json(latest) is not None:
+                        break
+                    if latest == pressed_on:  # the last press changed nothing: let the JSON retry handle it
+                        append_event(session, "keep_working_no_progress", f"#{session.keep_working_count}")
+                        await db.commit()
+                        break
+                    if keep_working_allowed(session.keep_working_count):
+                        clicked = await self.adapter.keep_working(session.profile_id)
+                        if clicked.get("clicked"):
+                            pressed_on = latest
+                            session.keep_working_count += 1
+                            append_event(session, "keep_working", f"#{session.keep_working_count}")
+                            await db.commit()
+                    else:
+                        append_event(session, "keep_working_limit", f"limit {session.keep_working_count} reached")
+                        await db.commit()
+                        break
             elif current in QUIET_STATES and (seen_busy or (since and since != before_since)
                                               or time.monotonic() - started > self.start_grace_seconds):
                 break
