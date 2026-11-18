@@ -125,22 +125,40 @@ def chrome_main_processes(directory: str | None = None) -> dict[int, str]:
     return found
 
 
+def _chrome_binary() -> str | None:
+    return os.environ.get("AATM_CHROME_BIN") or shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+
+
+def _launch(chrome: str, window: Window, target: str) -> None:
+    directory = profiles_home() / window.directory
+    directory.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(
+        [chrome, f"--user-data-dir={directory}", f"--window-name={window.title}", "--no-first-run",
+         "--no-default-browser-check", target],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+
+
 def open_windows() -> int:
-    chrome = os.environ.get("AATM_CHROME_BIN") or shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+    """Open each window empty, then load Arena once Tampermonkey has had time to start.
+
+    A page loaded while Chrome is still starting can miss the userscript, and then it never connects.
+    """
+    chrome = _chrome_binary()
     if not chrome:
         print("[AATM] ERROR: Google Chrome was not found.", file=sys.stderr)
         return 1
+    started: list[Window] = []
     for window in enabled_windows():
         if chrome_main_processes(window.directory):
             print(f"[AATM] {window.title}: the window is already open.")
             continue
-        directory = profiles_home() / window.directory
-        directory.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
-            [chrome, f"--user-data-dir={directory}", f"--window-name={window.title}", "--no-first-run",
-             "--no-default-browser-check", window.url],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-        )
+        _launch(chrome, window, "about:blank")
+        started.append(window)
+    if started:
+        time.sleep(float(os.environ.get("AATM_WINDOW_SETTLE_SECONDS", "10")))
+    for window in started:
+        _launch(chrome, window, window.url)
         print(f"[AATM] {window.title}: opened.")
     return 0
 
@@ -186,9 +204,10 @@ def bridge_profiles(bridge_url: str, token: str) -> dict[str, dict] | None:
         return None
 
 
-def readiness() -> tuple[int, int, list[str]]:
+def readiness() -> tuple[int, int, list[str], list[Window]]:
     windows = enabled_windows()
     problems: list[str] = []
+    missing: list[Window] = []
     backend = os.environ.get("AATM_BACKEND_URL", f"http://127.0.0.1:{env_value('BACKEND_PORT', '8000')}")
     if not _http_ok(f"{backend}/api/health"):
         problems.append("الخادم الخلفي لا يستجيب")
@@ -197,20 +216,22 @@ def readiness() -> tuple[int, int, list[str]]:
         problems.append(f"الواجهة لا تستمع على المنفذ {frontend_port}")
     bridge_url = env_value("ARENA_BRIDGE_URL", "http://127.0.0.1:4100").rstrip("/")
     live = bridge_profiles(bridge_url, env_value("ARENA_BRIDGE_TOKEN"))
+    bridge_up = live is not None
     if live is None:
         problems.append("الجسر لا يستجيب")
         live = {}
     connected = 0
     for window in windows:
         state = live.get(window.profile_id) or {}
-        if state.get("status") == "needs_human":
-            connected += 1 if state.get("connected") else 0
-            problems.append(f"{window.title}: يحتاج تدخلك ({state.get('needs_human_reason') or 'فحص بشري'})")
-        elif state.get("connected"):
+        if state.get("connected"):
             connected += 1
-        else:
+        if state.get("status") == "needs_human":
+            problems.append(f"{window.title}: يحتاج تدخلك ({state.get('needs_human_reason') or 'فحص بشري'})")
+        elif not state.get("connected"):
             problems.append(f"{window.title}: غير متصل، تأكد من تسجيل الدخول إلى Arena وتفعيل السكربت في نافذته")
-    return connected, len(windows), problems
+            if bridge_up:
+                missing.append(window)
+    return connected, len(windows), problems, missing
 
 
 def notify(title: str, body: str = "") -> None:
@@ -220,16 +241,26 @@ def notify(title: str, body: str = "") -> None:
 
 
 def wait_ready(timeout: float) -> int:
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    retry_after = float(os.environ.get("AATM_WINDOW_RETRY_SECONDS", "45"))
+    retried = False
     while True:
-        connected, total, problems = readiness()
+        connected, total, problems, missing = readiness()
         if not problems and total:
             title = f"AATM جاهز ✅ ({connected}/{total} متصلين)"
             print(f"[AATM] {title}")
             notify(title)
             return 0
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if now >= deadline:
             break
+        chrome = _chrome_binary()
+        if missing and chrome and not retried and now - started >= retry_after:
+            retried = True  # loading the page again only re-runs the userscript; nothing is sent to Arena
+            for window in missing:
+                print(f"[AATM] {window.title}: not connected yet, loading its page once more.")
+                _launch(chrome, window, window.url)
         time.sleep(float(os.environ.get("AATM_READY_POLL_SECONDS", "3")))
     title = f"AATM غير جاهز ⚠️ ({connected}/{total} متصلين)"
     problems = problems or ["لا يوجد ملف Arena مفعّل"]
