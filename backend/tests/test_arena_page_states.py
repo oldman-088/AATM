@@ -115,6 +115,38 @@ async def test_captcha_wins_over_tool_call_limit_and_blocks_sending(open_page):
     assert await page.locator("[data-role='user']").count() == 0
 
 
+async def _command(page, command: str, args: dict | None = None) -> dict:
+    request_id = f"r-{command}"
+    message = json.dumps({"type": "command", "request_id": request_id, "command": command, "args": args or {}})
+    await page.evaluate("raw => window.__socket.onmessage({ data: raw })", message)
+    await page.wait_for_function("id => window.__sent.some(m => m.type === 'result' && m.request_id === id)", arg=request_id)
+    return await page.evaluate("id => window.__sent.find(m => m.type === 'result' && m.request_id === id)", request_id)
+
+
+@needs_chromium
+async def test_suggestion_chips_are_ignored(open_page):
+    page = await open_page("suggestions=1&reply=The%20real%20agent%20reply")
+    state, human = await _report(page)
+    assert human is None and state == "ready"
+
+    reply = await _command(page, "read_last_reply")
+    assert reply["data"]["text"] == "The real agent reply"
+    tested = await _command(page, "selector_test")
+    assert tested["data"]["composer"]["found"] is True and tested["data"]["human_check"]["found"] is False
+
+    await page.fill("#revise", "")
+    sent = await _command(page, "submit", {"text": "continue"})
+    assert sent["ok"] is True, sent
+    assert await page.locator("[data-role='user']").all_inner_texts() == ["continue"]
+    assert await page.evaluate("window.__chipClicks") == 0
+
+
+@needs_chromium
+async def test_suggestions_do_not_hide_a_real_human_check(open_page):
+    _state, human = await _report(await open_page("suggestions=1&captcha=1"))
+    assert human
+
+
 def _runner(decision: str, sent_ok: bool = True):
     runner = ArenaAgentRunner.__new__(ArenaAgentRunner)
     calls = SimpleNamespace(sent=[], blocked=[])

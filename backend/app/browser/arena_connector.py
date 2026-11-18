@@ -251,16 +251,50 @@ USERSCRIPT_BODY = r"""(function () {
     return cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) > 0.05;
   }
 
-  function buttons() { return qa("button, [role='button']"); }
+  // ---- Arena's optional follow-up suggestions (radio chips, Skip, "Revise options or write your own"):
+  // noise. They are never clicked, typed into or read as the agent's reply.
+  var SUGGESTION_BOX = /revise options|write your own/i;
+  function fieldHint(el) {
+    return ["placeholder", "aria-placeholder", "data-placeholder", "aria-label"].map(function (name) {
+      return el.getAttribute(name) || "";
+    }).join(" ");
+  }
+  function isSuggestionMarker(el) {
+    if (el.matches("textarea, input, [contenteditable='true'], [role='textbox']")) return SUGGESTION_BOX.test(fieldHint(el));
+    return /^skip$/i.test(textOf(el));
+  }
+  function suggestionPanels() {
+    var panels = [];
+    qa("[role='radio'], input[type='radio']").forEach(function (radio) {
+      for (var node = radio.parentElement; node && node !== document.body; node = node.parentElement) {
+        var parts = node.querySelectorAll("button, [role='button'], textarea, input, [contenteditable='true'], [role='textbox']");
+        if (Array.prototype.some.call(parts, isSuggestionMarker)) {
+          if (panels.indexOf(node) === -1) panels.push(node);
+          return;
+        }
+      }
+    });
+    return panels;
+  }
+  function inSuggestionPanel(el, panels) {
+    return (panels || suggestionPanels()).some(function (panel) { return panel.contains(el); });
+  }
+
+  function buttons() {
+    var panels = suggestionPanels();
+    return qa("button, [role='button']").filter(function (el) { return !inSuggestionPanel(el, panels); });
+  }
 
   function findInput() {
     var custom = settings && settings.dom && settings.dom.agent_input;
     if (custom) { var c = qa(custom).filter(isVisible); if (c.length) return c[c.length - 1]; }
     var selectors = ["textarea", "div[contenteditable='true']", "[role='textbox']"];
     var candidates = [];
+    var panels = suggestionPanels();
     for (var i = 0; i < selectors.length; i++) {
       var els = qa(selectors[i]);
       for (var j = 0; j < els.length; j++) {
+        if (SUGGESTION_BOX.test(fieldHint(els[j])) || inSuggestionPanel(els[j], panels)) continue;
         var rect = els[j].getBoundingClientRect();
         // Long transcripts can scroll the composer out of view: size + visibility decide, not the viewport.
         if (rect.width > 50 && rect.height > 10 && isVisible(els[j])) {
@@ -292,7 +326,8 @@ USERSCRIPT_BODY = r"""(function () {
   function hasStopButton() {
     var busySel = settings && settings.dom && settings.dom.busy;
     if (busySel && q(busySel)) return true;
-    var els = qa("button");
+    var panels = suggestionPanels();
+    var els = qa("button").filter(function (el) { return !inSuggestionPanel(el, panels); });
     for (var i = 0; i < els.length; i++) {
       var label = labelOf(els[i]);
       var text = textOf(els[i]).toLowerCase();
@@ -321,8 +356,9 @@ USERSCRIPT_BODY = r"""(function () {
     if (form) scopes.push(form);
     if (container && container !== form) scopes.push(container);
     scopes.push(document);
+    var panels = suggestionPanels();
     function score(btn, inForm) {
-      if ((btn.disabled && !includeDisabled) || !isVisible(btn)) return -1;
+      if ((btn.disabled && !includeDisabled) || !isVisible(btn) || inSuggestionPanel(btn, panels)) return -1;
       var label = (labelOf(btn) + " " + btn.textContent).toLowerCase();
       if (/stop|abort/.test(label)) return -1;
       var s = 0;
@@ -436,7 +472,7 @@ USERSCRIPT_BODY = r"""(function () {
 
   function pageTextWithoutTranscript() {
     var text = (document.body && document.body.innerText) || "";
-    var transcript = transcriptText();
+    var transcript = transcriptText().concat(suggestionPanels());
     for (var j = 0; j < transcript.length; j++) { var t = transcript[j].innerText || ""; if (t) text = text.split(t).join(" "); }
     var input = findInput();
     if (input) { var v = inputText(input) || ""; if (v) text = text.split(v).join(" "); }
@@ -473,7 +509,7 @@ USERSCRIPT_BODY = r"""(function () {
   function isBlockingPage() { return !findInput() && !findNewButton() && !findFeedbackPanel(); }
 
   function phraseElements(phrase) {  // the smallest visible elements holding the phrase, outside the transcript
-    var skip = transcriptText().concat([findInput()]).filter(Boolean);
+    var skip = transcriptText().concat(suggestionPanels(), [findInput()]).filter(Boolean);
     var needle = phrase.split(" ")[0];
     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
     var seen = [];
@@ -573,8 +609,11 @@ USERSCRIPT_BODY = r"""(function () {
 
   function replyCandidates() {
     var sels = replySelectors();
+    var panels = suggestionPanels();
     for (var i = 0; i < sels.length; i++) {
-      var els = qa(sels[i]).filter(function (el) { return textOf(el) && !(el.closest && el.closest("form")); });
+      var els = qa(sels[i]).filter(function (el) {
+        return textOf(el) && !(el.closest && el.closest("form")) && !inSuggestionPanel(el, panels);
+      });
       if (els.length) { els.selector = sels[i]; return els; }
     }
     return [];
