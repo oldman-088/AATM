@@ -95,6 +95,8 @@ def test_reset_admin_password_script_rotates_the_hash_and_tokens(tmp_path):
         "ENVIRONMENT": "development",
         "SECRET_KEY": "a-test-secret-key-with-at-least-32-bytes",
         "AATM_NEW_PASSWORD": "brand-new-admin-password-2026",
+        "AATM_RESET_ALLOW_OTHER_DB": "1",
+        "AATM_RESET_LOG": str(tmp_path / "reset.log"),
         "AATM_ADMIN_EMAIL": "admin@aatm.local",
     }
     # First run creates + migrates the database and the admin account.
@@ -102,7 +104,8 @@ def test_reset_admin_password_script_rotates_the_hash_and_tokens(tmp_path):
         ["bash", str(SCRIPTS / "reset-admin-password.sh")], capture_output=True, text=True, env=env, cwd=str(REPO_ROOT)
     )
     assert first.returncode == 0, first.stderr + first.stdout
-    assert "brand-new-admin-password-2026" in first.stdout
+    assert "brand-new-admin-password-2026" not in first.stdout + first.stderr  # a chosen password is never echoed
+    assert "[AATM Reset] SUCCESS" in first.stdout
 
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
