@@ -46,6 +46,7 @@ from app.models import (
     Project,
     Task,
 )
+from app.models.project import configured_base_branch, project_base_branch
 from app.orchestration.arena_prompts import (
     build_correction_prompt,
     build_report_request,
@@ -318,7 +319,7 @@ class ArenaAgentRunner:
         slug = repo_slug(project)
         if not slug or not session.branch_name:
             return {"ok": False, "files": []}
-        base = (project.default_branch if project else None) or "main"
+        base = project_base_branch(project)
         return await git_workflow_manager.compare_branch(repo_slug=slug, base=base, head=session.branch_name,
                                                          cwd=project.repo_path if project else ".")
 
@@ -354,6 +355,10 @@ class ArenaAgentRunner:
         if pr.get("state") == "MERGED" and parent.status not in {"approved", "merged", "done"}:
             await self._merged_without_approval(db, session, parent, pr)
             return {"ok": True, "pr": pr, "merged_outside": True}
+        expected_base = configured_base_branch(project)
+        if expected_base and pr.get("baseRefName") != expected_base:
+            await self._wrong_base_pull_request(db, session, parent, pr, expected_base)
+            return {"ok": True, "pr": pr, "wrong_base": True}
         if session.pr_number != pr.get("number"):
             await self._associate_pr(db, session, parent, project, pr)
         head = pr.get("headRefOid")
@@ -428,7 +433,7 @@ class ArenaAgentRunner:
         if wf is None:
             wf = GitWorkflowRecord(project_id=parent.project_id, task_id=parent.id, branch_name=session.branch_name or "",
                                    owner_agent_id=session.agent_id,
-                                   base_branch=(project.default_branch if project else None) or "main")
+                                   base_branch=project_base_branch(project))
             db.add(wf)
         wf.branch_name = session.branch_name or wf.branch_name
         wf.owner_agent_id = session.agent_id
@@ -449,6 +454,17 @@ class ArenaAgentRunner:
         session.phase = "escalated"
         self._audit(db, "arena-runner", "arena.pr_merged_without_approval", parent, {"pr": pr.get("url")})
         await self._notify(db, "Pull request merged without approval", reason, severity="critical", link="/approvals")
+        await db.commit()
+
+    async def _wrong_base_pull_request(self, db: AsyncSession, session: ArenaSession, parent: Task, pr: dict[str, Any],
+                                       expected_base: str) -> None:
+        if any(e.get("kind") == "pr_wrong_base" for e in session.events or []):
+            return
+        reason = f"PR {pr.get('url')} targets {pr.get('baseRefName')}, but this project only accepts {expected_base}."
+        append_event(session, "pr_wrong_base", reason)
+        session.phase = "escalated"
+        self._audit(db, "arena-runner", "arena.pr_wrong_base", parent, {"pr": pr.get("url"), "base": pr.get("baseRefName")})
+        await self._notify(db, "Pull request targets the wrong branch", reason, severity="critical", link="/approvals")
         await db.commit()
 
     # ------------------------------------------------------------------ monitoring

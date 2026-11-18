@@ -8,6 +8,7 @@ from app.db.base import utcnow
 from app.db.session import get_db
 from app.git_workflows.manager import git_workflow_manager
 from app.models import Agent, AuditLog, ChatMessage, GitWorkflowRecord, Project, Task, User
+from app.models.project import project_base_branch
 from app.orchestration.scheduler import task_scheduler
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
 
@@ -305,7 +306,7 @@ async def provision_task_worktree(
         task.id,
         task.title,
         repo_path=project.repo_path,
-        base_branch=project.default_branch or "main",
+        base_branch=project_base_branch(project),
         db=db,
         actor=user.email,
     )
@@ -322,7 +323,7 @@ async def provision_task_worktree(
                 branch_name=task.branch_name,
                 worktree_path=task.worktree_path,
                 owner_agent_id=task.assigned_agent_id,
-                base_branch=str(res.get("base_branch") or project.default_branch or "main"),
+                base_branch=str(res.get("base_branch") or project_base_branch(project)),
                 pr_status="pending",
             )
         )

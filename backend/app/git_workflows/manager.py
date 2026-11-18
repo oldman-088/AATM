@@ -887,13 +887,22 @@ class GitWorkflowManager:
             return {"ok": False, "error": err2 or out2 or err or "gh pr review failed."}
         return {"ok": False, "error": err or out or "gh pr review failed."}
 
-    async def merge_pull_request(self, *, repo_slug: str, pr_number: int, cwd: str | Path) -> dict[str, Any]:
-        """Mark a draft PR ready and squash-merge it with `gh pr merge --squash` (caller enforces approval)."""
+    async def merge_pull_request(self, *, repo_slug: str, pr_number: int, cwd: str | Path,
+                                 expected_base: str | None = None) -> dict[str, Any]:
+        """Mark a draft PR ready and squash-merge it with `gh pr merge --squash` (caller enforces approval).
+
+        `gh pr merge` merges into the base the PR really has, so with ``expected_base`` any other base is refused."""
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_slug or ""):
             return {"ok": False, "error": "Invalid repository slug."}
         if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number < 1:
             return {"ok": False, "error": "Pull request number must be a positive integer."}
         work = Path(cwd)
+        if expected_base:
+            ok, data, err = await self._gh_json(["pr", "view", str(pr_number), "--repo", repo_slug, "--json", "baseRefName"], work)
+            actual = data.get("baseRefName") if ok and isinstance(data, dict) else None
+            if actual != expected_base:
+                detail = f"targets {actual}" if actual else f"could not be checked ({err or 'no base branch returned'})"
+                return {"ok": False, "code": "wrong_base", "error": f"PR #{pr_number} {detail}; only {expected_base} is allowed."}
         rc_ready, out_ready, err_ready = await self._exec(
             ["gh", "pr", "ready", str(pr_number), "--repo", repo_slug], work, timeout=60
         )

@@ -24,6 +24,7 @@ from app.models import (
     Task,
     WorkspaceArtifact,
 )
+from app.models.project import project_base_branch
 from app.orchestration.replacement import copy_workspace_handoff
 from app.orchestration.review import review_service
 from app.runtime.agent_protocol import (
@@ -107,7 +108,7 @@ class ContextMixin:
                     task.id,
                     task.title,
                     repo_path=repo_dir,
-                    base_branch=project.default_branch or "main",
+                    base_branch=project_base_branch(project),
                     db=db,
                     actor=agent.id,
                 )
@@ -126,7 +127,7 @@ class ContextMixin:
                                 branch_name=task.branch_name,
                                 worktree_path=task.worktree_path,
                                 owner_agent_id=agent.id,
-                                base_branch=str(wt_res.get("base_branch") or project.default_branch or "main"),
+                                base_branch=str(wt_res.get("base_branch") or project_base_branch(project)),
                                 pr_status="pending",
                             )
                         )

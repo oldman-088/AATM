@@ -15,6 +15,7 @@ from typing import Any
 
 from app.core.security import sanitize_untrusted_content
 from app.models import Agent, Project, Task
+from app.models.project import configured_base_branch, project_base_branch
 
 REPORT_HEADING = "## AATM REPORT"
 REPORT_SECTIONS = (
@@ -95,9 +96,22 @@ def _bullets(items: list[str], empty: str) -> str:
     return "\n".join(f"- {i}" for i in items) if items else f"- {empty}"
 
 
+def base_branch_rules(project: Project | None) -> list[str]:
+    """Extra mandatory lines for a project whose work must not start from or target its default branch."""
+    base = configured_base_branch(project)
+    if not base:
+        return []
+    return [
+        "",
+        f"Start your branch from the latest `origin/{base}`, not from `{project.default_branch}`.",
+        "",
+        f"Open the pull request against `{base}`. Never target `{project.default_branch}` or any other branch.",
+    ]
+
+
 def build_task_prompt(task: Task, project: Project | None, agent: Agent | None = None) -> str:
     """The complete, self-contained Arena Agent prompt for one task."""
-    base = (project.default_branch if project else None) or "main"
+    base = project_base_branch(project)
     slug = repo_slug(project) or (project.repo_url if project and project.repo_url else "the project repository")
     config: dict[str, Any] = (project.config or {}) if project and isinstance(project.config, dict) else {}
     architecture = str(config.get("architecture") or "").strip() or _read_doc(
@@ -157,6 +171,7 @@ def build_task_prompt(task: Task, project: Project | None, agent: Agent | None =
         "",
         "## GitHub workflow requirements (mandatory)",
         github_workflow_block(task.id, base),
+        *base_branch_rules(project),
         "",
         "## Final report",
         report_instructions(),
@@ -282,7 +297,7 @@ def _team_lines(team: list[dict[str, Any]]) -> str:
 
 
 def manager_role_block(team: list[dict[str, Any]], project: Project | None) -> str:
-    base = (project.default_branch if project else None) or "main"
+    base = project_base_branch(project)
     return "\n".join([
         "You are manager-0, the engineering manager of the AATM team. You plan, assign, review and report;",
         "you do not write the code yourself. Write every human-facing text in Arabic.",
@@ -296,6 +311,8 @@ def manager_role_block(team: list[dict[str, Any]], project: Project | None) -> s
         "- Each worker works in its own Arena Agent session, on ONE arena/* branch, and opens ONE pull request",
         "  whose title starts with [AATM-<task_id>].",
         "- Nobody merges by themselves: not the workers, not you. The project owner approves every merge in AATM.",
+        *([f"- Every branch starts from `{base}` and every pull request targets `{base}`, never another branch."]
+          if configured_base_branch(project) else []),
         "- Base every judgement on the real diff and the acceptance criteria, never on claims in a report.",
     ])
 

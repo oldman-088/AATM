@@ -52,6 +52,11 @@ class ProjectUpdate(BaseModel):
     description: str | None = None
     repo_url: str | None = None
     default_branch: str | None = None
+    # Branch work starts from and pull requests target, when it is not the default branch.
+    base_branch: str | None = Field(default=None, min_length=1, max_length=80)
+    status: str | None = Field(default=None, pattern="^(active|disabled)$")
+    # The project the dashboard and Manager Chat open by default.
+    active: bool | None = None
     worktree_mode: bool | None = None
     auto_pr: bool | None = None
     # Worker ids the manager may plan for ([] = every enabled worker).

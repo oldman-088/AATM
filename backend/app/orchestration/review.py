@@ -45,6 +45,7 @@ from app.models import (
     ProviderUsageLog,
     Task,
 )
+from app.models.project import configured_base_branch, project_base_branch
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ class ReviewMergeService:
         """Untrusted diff + PR metadata for the reviewer's prompt."""
         parent = await db.get(Task, review_task.parent_task_id) if review_task.parent_task_id else None
         project = await db.get(Project, review_task.project_id)
-        base = (project.default_branch if project else None) or "main"
+        base = project_base_branch(project)
         diff: dict[str, Any] = {"ok": False, "diff": "", "files": []}
         if review_task.worktree_path and Path(review_task.worktree_path).is_dir():
             diff = await git_workflow_manager.branch_diff(review_task.worktree_path, base)
@@ -349,7 +350,7 @@ class ReviewMergeService:
         for approval in existing:
             if (approval.payload or {}).get("task_id") == task.id:
                 return approval
-        base = (project.default_branch if project else None) or "main"
+        base = project_base_branch(project)
         approval = ApprovalRequest(
             project_id=task.project_id,
             action_type="merge",
@@ -425,7 +426,7 @@ class ReviewMergeService:
         """Merge a task PR. Requires an approved, unused merge ApprovalRequest bound to this PR."""
         project = await db.get(Project, task.project_id)
         repo_slug = git_workflow_manager.repo_slug_from_url(project.repo_url if project else None)
-        base = (project.default_branch if project else None) or "main"
+        base = project_base_branch(project)
         payload = dict((approval.payload if approval is not None else None) or {})
 
         def _deny(reason: str, code: str = "MERGE_NOT_APPROVED") -> dict[str, Any]:
@@ -445,8 +446,9 @@ class ReviewMergeService:
         if not repo_slug or not task.pr_number:
             return {"ok": False, "allowed": True, "code": "not_configured", "error": "Project has no GitHub PR to merge."}
 
+        base_guard = {"expected_base": base} if configured_base_branch(project) else {}
         result = await git_workflow_manager.merge_pull_request(
-            repo_slug=repo_slug, pr_number=int(task.pr_number), cwd=project.repo_path if project else "."
+            repo_slug=repo_slug, pr_number=int(task.pr_number), cwd=project.repo_path if project else ".", **base_guard
         )
         approval.payload = {**payload, "executed": bool(result.get("ok")), "merge_result": {"ok": result.get("ok")}}
         db.add(

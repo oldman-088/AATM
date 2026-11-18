@@ -341,8 +341,8 @@ class ManagerArenaRuntime:
             assert message is not None
             return message
         project = await db.get(Project, project_id) if project_id else None
-        if kind == "plan" and project is not None and project.status == "completed":
-            await self._finish(db, job, status="failed", error="project is completed")
+        if kind == "plan" and project is not None and project.status in {"completed", "disabled"}:
+            await self._finish(db, job, status="failed", error=f"project is {project.status}")
             message = await self._reply(db, job, f"المشروع «{project.name}» مكتمل، ولم يُرسل شيء إلى المدير. اختر مشروعًا نشطًا.",
                                         failed=True)
             assert message is not None
