@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 import subprocess
 import threading
@@ -10,12 +11,13 @@ import time
 from pathlib import Path
 
 import pytest
+
 from app.core.security import hash_password, verify_password
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ubuntu" / "reset-admin-password.sh"
 EMAIL = "admin@aatm.local"
-PASSWORD = "test-only-password-123"
+PASSWORD = secrets.token_urlsafe(18)
 
 
 @pytest.fixture()

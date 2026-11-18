@@ -21,6 +21,17 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+from test_b_review_merge_completion import REPO_SLUG, _FnRouter, _git, _init_repo
+from test_d_arena_connector import (  # noqa: F401 - fixtures
+    _admin_headers,
+    arena_settings,
+    bridge,
+    env,
+    needs_chromium,
+)
+
 from app.browser.arena_connector import agent_new_session_url, arena_gate
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
@@ -40,16 +51,6 @@ from app.providers.adapters.arena_agent import ArenaAgentAdapter, keep_working_a
 from app.providers.base import ProviderRequest
 from app.runtime.agent_loop import AgentLoop
 from app.runtime.loop.common import NeedsHumanError
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-from test_b_review_merge_completion import REPO_SLUG, _FnRouter, _git, _init_repo
-from test_d_arena_connector import (  # noqa: F401 - fixtures
-    _admin_headers,
-    arena_settings,
-    bridge,
-    env,
-    needs_chromium,
-)
 
 WORKFLOW_BLOCK = (
     "Work on ONE branch.\n\nCreate ONE pull request.\n\nPush changes after every completed implementation item.\n\n"
@@ -453,8 +454,9 @@ async def _drive(env, scheduler, loops, until, *, timeout: float = 90.0, on_tick
 async def test_full_arena_agent_workflow_with_review_corrections_approval_and_new_session(
     env, bridge, arena_settings, monkeypatch, tmp_path
 ):
-    from app.browser.manager import detect_playwright_capabilities
     from playwright.async_api import async_playwright
+
+    from app.browser.manager import detect_playwright_capabilities
 
     monkeypatch.setattr(arena_settings, "ARENA_MOCK_URL", f"{bridge.base}/mock-arena/")
     monkeypatch.setattr(arena_settings, "ARENA_BRIDGE_URL", bridge.base)

@@ -421,9 +421,18 @@ async def test_four_default_profiles_process_four_tasks_in_parallel_to_draft_prs
 
     calls: list[dict[str, Any]] = []
     original = ArenaBrowserAdapter.generate
+    first_seen: set[str] = set()
+    all_started = asyncio.Event()
 
     async def recording(self, req):
         start = time.monotonic()
+        # Hold each profile's first call until all four are in flight. Serial dispatch can never
+        # fill this and times out, so the parallel check below does not depend on machine load.
+        if req.agent_id not in first_seen:
+            first_seen.add(req.agent_id)
+            if len(first_seen) == len(workers):
+                all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=30)
         res = await original(self, req)
         calls.append({"agent": req.agent_id, "start": start, "end": time.monotonic(), "ok": res.success, "code": res.metadata.get("code")})
         return res

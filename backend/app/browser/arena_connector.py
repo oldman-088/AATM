@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 

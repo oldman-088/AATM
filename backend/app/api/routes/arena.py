@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.api.deps import get_current_user, require_role
 from app.browser.arena_connector import (
     NOT_ENABLED_MESSAGE,
@@ -35,10 +40,6 @@ from app.db.base import utcnow
 from app.db.session import get_db
 from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, Task, User, Userscript
 from app.runtime.agent_protocol import redact_secrets
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
 

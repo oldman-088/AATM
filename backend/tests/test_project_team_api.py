@@ -5,6 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.seed import seed_initial_data
@@ -12,9 +16,6 @@ from app.db.session import get_db
 from app.main import app
 from app.models import Project, User
 from app.orchestration.manager_arena import ManagerArenaRuntime
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest.fixture()

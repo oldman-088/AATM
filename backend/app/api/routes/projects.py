@@ -1,6 +1,10 @@
 import re
 from pathlib import Path
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.api.deps import get_current_user, require_role
 from app.core.config import get_settings
 from app.db.session import get_db
@@ -8,9 +12,6 @@ from app.git_workflows.manager import PROTECTED_BRANCHES, git_workflow_manager
 from app.memory.engine import memory_engine
 from app.models import Agent, AuditLog, GitWorkflowRecord, MemoryEntry, Project, User
 from app.schemas.common import GitWorkflowCreate, MemoryCreate, ProjectCreate, ProjectUpdate
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["projects-memory-git"], dependencies=[Depends(get_current_user)])
 

@@ -24,11 +24,6 @@ import time
 
 import httpx
 import pytest
-from app.browser.arena_connector import SCRIPT_VERSION, build_userscript, match_patterns
-from app.browser.engines import validate_userscript_policy
-from app.browser.manager import detect_playwright_capabilities
-from app.main import app
-from app.models import Agent, BrowserProfile
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from test_d_arena_connector import (  # noqa: F401 - fixtures
@@ -40,6 +35,12 @@ from test_d_arena_connector import (  # noqa: F401 - fixtures
     env,
     needs_chromium,
 )
+
+from app.browser.arena_connector import SCRIPT_VERSION, build_userscript, match_patterns
+from app.browser.engines import validate_userscript_policy
+from app.browser.manager import detect_playwright_capabilities
+from app.main import app
+from app.models import Agent, BrowserProfile
 
 ADMIN = {"Authorization": f"Bearer {BRIDGE_TOKEN}"}
 

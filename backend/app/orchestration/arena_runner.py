@@ -21,6 +21,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.browser.arena_sessions import (
     ArenaSessionConflict,
     append_event,
@@ -56,8 +59,6 @@ from app.orchestration.arena_prompts import (
 from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError, keep_working_allowed
 from app.runtime.agent_protocol import redact_secrets
 from app.runtime.temporal import to_naive_utc
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
