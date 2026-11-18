@@ -4,18 +4,22 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from test_d_arena_connector import _admin_headers, arena_settings, env  # noqa: F401 - fixtures
+from test_r3_arena_agent_workflow import _runner_fixture
 
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
 from app.main import app
 from app.models import Agent, ApprovalRequest, ArenaSession, Notification, Project, Task
 from app.models.project import configured_base_branch, project_base_branch
-from app.orchestration.arena_prompts import build_task_prompt, manager_role_block
+from app.orchestration.arena_prompts import base_branch_publish_steps, build_task_prompt, manager_role_block
 from app.orchestration.arena_runner import ArenaAgentRunner
 from app.orchestration.review import review_service
 
@@ -152,3 +156,57 @@ async def test_api_sets_base_branch_and_default_project_and_disables_projects(en
         projects = (await client.get("/api/v1/projects", headers=headers)).json()
     assert projects[0]["id"] == target_id and projects[0]["config"]["base_branch"] == "r8-aatm"
     assert "active" not in next(p for p in projects if p["id"] == second_id)["config"]
+
+
+def _git(cwd: Path, *args: str) -> str:
+    identity = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid"]
+    return subprocess.run(["git", *identity, *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _commit(repo: Path, name: str) -> str:
+    (repo / name).write_text(name)
+    _git(repo, "add", name)
+    _git(repo, "commit", "-q", "-m", name)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_publish_steps_put_work_from_a_default_branch_chat_on_top_of_the_moved_base(tmp_path):
+    """Arena opens the chat branch from main; the base has moved on, which caused "No commits between"."""
+    origin, seed, chat = tmp_path / "origin.git", tmp_path / "seed", tmp_path / "chat"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(seed)], check=True, capture_output=True)
+    _git(seed, "checkout", "-q", "-b", "main")
+    _commit(seed, "first")
+    _git(seed, "push", "-q", "origin", "main")
+    _git(seed, "checkout", "-q", "-b", "r8-aatm")
+    base_head = _commit(seed, "base-work")
+    _git(seed, "push", "-q", "origin", "r8-aatm")
+    subprocess.run(["git", "clone", "-q", "-b", "main", str(origin), str(chat)], check=True, capture_output=True)
+    _git(chat, "config", "user.name", "Test")
+    _git(chat, "config", "user.email", "test@example.invalid")
+    _git(chat, "checkout", "-q", "-b", "arena/abc-demo")
+    _git(chat, "push", "-q", "origin", "arena/abc-demo")
+    _commit(chat, "worker-change")
+    assert _git(origin, "rev-list", "--count", "r8-aatm..arena/abc-demo") == "0", "the failure: nothing on GitHub to open a PR from"
+
+    steps = base_branch_publish_steps(_project())
+    for step in (steps[2], steps[3]):
+        subprocess.run(re.search(r"`([^`]+)`", step).group(1), cwd=chat, shell=True, check=True, capture_output=True)  # noqa: S602
+
+    assert _git(origin, "rev-list", "--count", "r8-aatm..arena/abc-demo") == "1"
+    assert _git(origin, "merge-base", "r8-aatm", "arena/abc-demo") == base_head
+    assert _git(chat, "rev-parse", "HEAD") == _git(origin, "rev-parse", "arena/abc-demo")
+
+
+async def test_no_pull_request_nudge_repeats_the_publish_steps(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (task_id, _session, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    async with env() as db:
+        task = await db.get(Task, task_id)
+        (await db.get(Project, task.project_id)).config = {"base_branch": "r8-aatm"}
+        await db.commit()
+        page.reply = "All done!"
+        for _ in range(4):
+            page.page_state = "idle"
+            await runner.tick(db)
+    nudge = next(text for command, text in page.commands if command == "submit")
+    assert f"[AATM-{task_id}]" in nudge and "git rebase origin/r8-aatm" in nudge and "No commits between" in nudge

@@ -48,6 +48,7 @@ from app.models import (
 )
 from app.models.project import configured_base_branch, project_base_branch
 from app.orchestration.arena_prompts import (
+    base_branch_publish_steps,
     build_correction_prompt,
     build_report_request,
     build_task_prompt,
@@ -576,6 +577,7 @@ class ArenaAgentRunner:
             await self._follow_up(db, session, "pr_nudge", "\n".join([
                 f"You have not opened the pull request for {pr_title_prefix(parent.id)} yet.",
                 f"Push your work and open ONE pull request whose title starts with {pr_title_prefix(parent.id)}. Do NOT merge it.",
+                *base_branch_publish_steps(project),
             ]))
             self._quiet_misses[session.id] = 0
             return {"phase": session.phase, "nudged": nudges + 1}
