@@ -536,7 +536,15 @@ class ArenaAgentRunner:
             return {"phase": session.phase, "github_blocked": True}
 
         reference = max(filter(None, [_naive(session.last_state_change_at), _naive(session.submitted_at)]), default=None)
+        if reference and page == "generating" and (
+            timedelta(minutes=self.stall_minutes / 2) < _naive(_now()) - reference <= timedelta(minutes=self.stall_minutes)
+        ):
+            await self._note_page_mark(session, reference)
         if reference and _naive(_now()) - reference > timedelta(minutes=self.stall_minutes) and not (page in {"idle", "ready"} and session.pr_number):
+            if page == "generating" and await self._page_progressed(session, reference):
+                session.last_state_change_at = _now()  # a long turn keeps "generating" while it really works
+                await db.commit()
+                return {"phase": session.phase, "page": page}
             await self._block_needs_human(db, session, active, f"stalled: no Arena activity or new commits for {int(self.stall_minutes)} minutes")
             return {"phase": session.phase, "stalled": True}
 
@@ -660,6 +668,32 @@ class ArenaAgentRunner:
         if not skipped or skipped[-1].get("detail") != decision:
             append_event(session, "tool_limit_skipped", decision)
         return None, github
+
+    async def _transcript_mark(self, session: ArenaSession) -> str | None:
+        try:
+            latest = (await self.adapter.selector_test(session.profile_id)).get("latest_reply") or {}
+        except ArenaAgentError as exc:
+            append_event(session, "stall_check_failed", exc.code)
+            return None
+        return f"{latest.get('count')}:{latest.get('chars')}"
+
+    @staticmethod
+    def _mark_since(session: ArenaSession, reference: datetime) -> str | None:
+        marks = [e for e in session.events or [] if e.get("kind") == "page_mark"
+                 and _naive(datetime.fromisoformat(e["ts"])) >= reference]
+        return marks[-1].get("detail") if marks else None
+
+    async def _note_page_mark(self, session: ArenaSession, reference: datetime) -> None:
+        """Halfway to a stall, remember the transcript. Stored on the session, so a restart keeps it."""
+        if self._mark_since(session, reference) is None:
+            mark = await self._transcript_mark(session)
+            if mark:
+                append_event(session, "page_mark", mark)
+
+    async def _page_progressed(self, session: ArenaSession, reference: datetime) -> bool:
+        """Read-only: did the transcript change since the halfway mark?"""
+        earlier = self._mark_since(session, reference)
+        return earlier is not None and (await self._transcript_mark(session)) not in {None, earlier}
 
     async def _close_feedback_once(self, session: ArenaSession) -> None:
         """A finished task: dismiss "Was this task successful?" without answering it."""
