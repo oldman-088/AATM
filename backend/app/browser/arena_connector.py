@@ -24,7 +24,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
@@ -86,6 +85,17 @@ def arena_domains() -> list[str]:
     return [urlparse(o).netloc for o in configured_origins()]
 
 
+def agent_new_session_url(real: bool) -> str | None:
+    """Where a new Agent session starts. On real Arena this defaults to a full load of /agent: the
+    "New Chat" link changes the page without a reload and leaves the old chat's messages in the DOM,
+    where they would be read as the new session's reply."""
+    explicit = (get_settings().ARENA_AGENT_NEW_SESSION_URL or "").strip()
+    if explicit:
+        return explicit
+    origins = configured_origins() if real else []
+    return f"{origins[0]}/agent" if origins else None
+
+
 def mock_url() -> str | None:
     url = (get_settings().ARENA_MOCK_URL or "").strip()
     # The mock must be a local page; a non-loopback "mock" would be a back door to a real site.
@@ -106,7 +116,7 @@ def arena_gate() -> dict[str, Any]:
         "mock_url": mock,
         "mock_url_rejected": bool((s.ARENA_MOCK_URL or "").strip()) and mock is None,
         "domains": arena_domains() if real else [],
-        "agent_new_session_url": (s.ARENA_AGENT_NEW_SESSION_URL or "").strip() or None,
+        "agent_new_session_url": agent_new_session_url(real),
         "max_keep_working": s.ARENA_AGENT_MAX_KEEP_WORKING or None,  # None = unlimited
         "code": None if mode != "disabled" else "not_enabled",
         "message": None if mode != "disabled" else NOT_ENABLED_MESSAGE,
@@ -864,7 +874,7 @@ async def register_profile_with_bridge(profile: BrowserProfile, *, dom: dict[str
         "allowed_origins": allowed_origins(),
         "real_enabled": gate["real_enabled"],
         "mode": profile_arena_mode(profile),
-        "new_session_url": (s.ARENA_AGENT_NEW_SESSION_URL or "").strip() or None,
+        "new_session_url": agent_new_session_url(bool(gate["real_enabled"])),
     }
     configured_dom: dict[str, str] = {}
     raw_dom = (s.ARENA_DOM_SELECTORS or "").strip()

@@ -19,7 +19,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from app.browser.arena_connector import arena_gate
+from app.browser.arena_connector import agent_new_session_url, arena_gate
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
 from app.main import app
@@ -201,6 +201,15 @@ def test_report_comparison_finds_claims_that_do_not_match_the_diff():
     assert compare_report_to_changes("", ["answer.py"]) == ["The agent did not provide a final report."]
     assert any("missing sections" in i for i in compare_report_to_changes("I did it.", ["answer.py"]))
     assert any("no commits" in i for i in compare_report_to_changes(good, ["answer.py", "tests/test_answer.py"], commits=0))
+
+
+def test_new_session_on_real_arena_is_a_full_page_load(arena_settings, monkeypatch):
+    monkeypatch.setattr(arena_settings, "ARENA_ALLOWED_ORIGINS", "https://arena.ai")
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_NEW_SESSION_URL", "")
+    assert agent_new_session_url(True) == "https://arena.ai/agent"
+    assert agent_new_session_url(False) is None  # the mock page keeps its New Chat button
+    monkeypatch.setattr(arena_settings, "ARENA_AGENT_NEW_SESSION_URL", "https://arena.ai/agent?new=1")
+    assert agent_new_session_url(False) == "https://arena.ai/agent?new=1"
 
 
 def test_keep_working_limit_zero_means_unlimited(arena_settings, monkeypatch):
