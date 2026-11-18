@@ -239,6 +239,13 @@ class TaskScheduler:
         from app.orchestration.review import review_service
 
         try:
+            from app.browser.arena_sessions import sync_profiles_with_bridge
+
+            await sync_profiles_with_bridge(db)
+        except Exception as exc:  # noqa: BLE001 - a bridge problem must never break dispatch
+            logger.warning("Arena bridge profile sync failed: %s", type(exc).__name__)
+            await db.rollback()
+        try:
             arena = await arena_runner.tick(db)
         except Exception as exc:  # noqa: BLE001 - Arena monitoring must never break dispatch
             logger.warning("Arena runner tick failed: %s", type(exc).__name__)

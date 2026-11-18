@@ -59,6 +59,9 @@ AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "s
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REPO_CHECK_MIN_SCRIPT = (2, 1, 0)  # older scripts ignore the repository check
 READ_ONLY_COMMANDS = ("read_last_reply", "selector_test")
+# Registrations live in memory, so after a bridge restart a page may connect before the backend
+# has registered its profile again. Installed userscripts stop retrying on 4401 and 4410 only.
+CLOSE_NOT_REGISTERED_YET = 4404
 
 # Sent to the userscript as configuration data. The userscript never solves anything: when one
 # of these appears it reports ``needs_human`` and stops.
@@ -333,6 +336,10 @@ class ConnectorHub:
                 hello = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=HELLO_TIMEOUT_SECONDS))
             except (asyncio.TimeoutError, TimeoutError, ValueError):
                 await websocket.close(code=4400)
+                return
+            if isinstance(hello, dict) and hello.get("type") == "hello" and hello.get("profile_id") \
+                    and str(hello["profile_id"]) not in self.profiles:
+                await websocket.close(code=CLOSE_NOT_REGISTERED_YET)
                 return
             state = self._authenticate(hello, websocket.headers.get("origin"))
             if state is None:

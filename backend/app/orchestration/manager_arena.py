@@ -123,6 +123,7 @@ BUSY_STATES = {"generating", "keep_working_visible"}
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
+MAX_STATUS_QUESTION_CHARS = 200  # a long brief that mentions "status" is a goal, not a question
 
 _STATUS_RE = re.compile(
     r"(وين\s*وصلت|وين\s*صرتو|شو\s*صار|إلى\s*أين\s*وصل|الى\s*اين\s*وصل|ما\s*(?:هو\s*)?(?:الوضع|وضع)|حالة\s*المشروع|آخر\s*المستجدات|"
@@ -153,7 +154,7 @@ def classify_owner_message(content: str, intent: str | None = None) -> tuple[str
         return intent, text
     if intent == "goal":
         return "plan", text
-    if _STATUS_RE.search(text):
+    if len(text) <= MAX_STATUS_QUESTION_CHARS and _STATUS_RE.search(text):
         return "status", text
     if text.endswith(("?", "؟")):
         return "chat", text
@@ -336,6 +337,13 @@ class ManagerArenaRuntime:
         if kind == "plan" and (not project_id or await db.get(Project, project_id) is None):
             await self._finish(db, job, status="failed", error="no project selected")
             message = await self._reply(db, job, "اختر مشروعًا أولًا: الخطة تُنشئ مهام داخل مشروع، ولم يُرسل شيء إلى المدير.",
+                                        failed=True)
+            assert message is not None
+            return message
+        project = await db.get(Project, project_id) if project_id else None
+        if kind == "plan" and project is not None and project.status == "completed":
+            await self._finish(db, job, status="failed", error="project is completed")
+            message = await self._reply(db, job, f"المشروع «{project.name}» مكتمل، ولم يُرسل شيء إلى المدير. اختر مشروعًا نشطًا.",
                                         failed=True)
             assert message is not None
             return message
