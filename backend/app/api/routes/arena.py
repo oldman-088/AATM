@@ -7,11 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.api.deps import get_current_user, require_role
 from app.browser.arena_connector import (
     NOT_ENABLED_MESSAGE,
@@ -40,6 +35,10 @@ from app.db.base import utcnow
 from app.db.session import get_db
 from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, Task, User, Userscript
 from app.runtime.agent_protocol import redact_secrets
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
 
@@ -246,7 +245,7 @@ async def open_for_sign_in(profile_id: str, user: User = Depends(get_current_use
 # ---------------------------------------------------------------------------- Arena Agent mode
 
 MAX_REPLY_CHARS = 60_000
-COMMAND_TIMEOUTS = {"new_session": 90.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
+COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
 
 
 class ArenaModeBody(BaseModel):
@@ -254,8 +253,9 @@ class ArenaModeBody(BaseModel):
 
 
 class ArenaCommandBody(BaseModel):
-    command: str = Field(pattern="^(new_session|submit|keep_working|read_last_reply|selector_test)$")
+    command: str = Field(pattern="^(new_session|submit|keep_working|read_last_reply|selector_test|select_repo)$")
     text: str | None = Field(default=None, max_length=120_000)
+    repo: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 def redact_reply(text: str) -> dict[str, Any]:
@@ -373,6 +373,10 @@ async def run_profile_command(profile_id: str, body: ArenaCommandBody, user: Use
         if not (body.text or "").strip():
             raise HTTPException(status_code=422, detail={"code": "text_required", "message": "Submit needs a task prompt."})
         args["text"] = body.text
+    if body.command == "select_repo" and not body.repo:
+        raise HTTPException(status_code=422, detail={"code": "repo_required", "message": "select_repo needs owner/name."})
+    if body.repo and body.command in {"submit", "select_repo", "selector_test"}:
+        args["repo"] = body.repo
     async def _send() -> dict[str, Any]:
         return await bridge_call(
             "POST",

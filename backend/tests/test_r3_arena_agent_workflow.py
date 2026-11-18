@@ -17,8 +17,10 @@ import subprocess
 import time
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from app.browser.arena_connector import agent_new_session_url, arena_gate
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
@@ -37,6 +39,7 @@ from app.orchestration.scheduler import TaskScheduler
 from app.providers.adapters.arena_agent import ArenaAgentAdapter, keep_working_allowed
 from app.providers.base import ProviderRequest
 from app.runtime.agent_loop import AgentLoop
+from app.runtime.loop.common import NeedsHumanError
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from test_b_review_merge_completion import REPO_SLUG, _FnRouter, _git, _init_repo
@@ -206,7 +209,10 @@ def test_report_comparison_finds_claims_that_do_not_match_the_diff():
 def test_new_session_on_real_arena_is_a_full_page_load(arena_settings, monkeypatch):
     monkeypatch.setattr(arena_settings, "ARENA_ALLOWED_ORIGINS", "https://arena.ai")
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_NEW_SESSION_URL", "")
+    monkeypatch.setattr(arena_settings, "ARENA_MOCK_URL", "")
     assert agent_new_session_url(True) == "https://arena.ai/agent"
+    monkeypatch.setattr(arena_settings, "ARENA_MOCK_URL", "http://127.0.0.1:9/mock-arena/")
+    assert agent_new_session_url(True) is None
     assert agent_new_session_url(False) is None  # the mock page keeps its New Chat button
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_NEW_SESSION_URL", "https://arena.ai/agent?new=1")
     assert agent_new_session_url(False) == "https://arena.ai/agent?new=1"
@@ -227,13 +233,22 @@ class ScriptedPage(ArenaAgentAdapter):
         super().__init__()
         self.page_state = "generating"
         self.commands: list[tuple[str, str | None]] = []
+        self.repos: list[tuple[str, str | None]] = []
+        self.repo_available = True
         self.reply = ""
 
     async def state(self, profile_id: str) -> dict[str, Any]:
         return {"ok": True, "connected": True, "mode": "agent", "status": "ready", "agent_state": self.page_state}
 
-    async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None) -> dict[str, Any]:
+    async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None,
+                      repo: str | None = None) -> dict[str, Any]:
         self.commands.append((command, text))
+        self.repos.append((command, repo))
+        if command == "new_session":
+            self.page_state = "ready"
+            return {"started": True}
+        if command == "select_repo":
+            return {"selected": self.repo_available, "code": None if self.repo_available else "repo_not_available", "current": "AATM"}
         if command == "keep_working":
             self.page_state = "generating"
             return {"clicked": True}
@@ -302,6 +317,34 @@ async def test_stall_without_meaningful_change_marks_needs_human_and_notifies(en
         assert any("needs you" in n.title for n in notes)
         # The blocked task keeps the employee reserved for this session until a human resumes it.
         assert (await arena_reservations(db))[agent_id] == task_id
+
+
+async def _fresh_start(env, runner, task_id, session_id, agent_id):
+    async with env() as db:
+        session = await db.get(ArenaSession, session_id)
+        session.submitted_at = None
+        await db.commit()
+    async with env() as db:
+        task, agent = await db.get(Task, task_id), await db.get(Agent, agent_id)
+        await runner.run_message(db, SimpleNamespace(execution_status="running", response_payload=None), task, agent)
+
+
+async def test_worker_prompt_is_sent_only_after_the_task_repo_is_selected(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    await _fresh_start(env, runner, task_id, session_id, agent_id)
+    assert [c for c, _ in page.commands] == ["new_session", "select_repo", "submit"]
+    assert page.repos[1:] == [("select_repo", REPO_SLUG), ("submit", REPO_SLUG)]
+
+
+async def test_worker_prompt_is_not_sent_when_the_task_repo_cannot_be_selected(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.repo_available = False
+    with pytest.raises(NeedsHumanError):
+        await _fresh_start(env, runner, task_id, session_id, agent_id)
+    assert "submit" not in [c for c, _ in page.commands]
+    async with env() as db:
+        session = await db.get(ArenaSession, session_id)
+        assert session.phase == "needs_human" and REPO_SLUG in session.needs_human_reason
 
 
 async def test_agent_without_github_access_goes_to_a_human_at_once(env, arena_settings, monkeypatch, tmp_path):

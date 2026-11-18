@@ -20,16 +20,6 @@ from pathlib import Path
 import httpx
 import pytest
 import websockets
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-from test_d_arena_connector import (  # noqa: F401 - fixtures
-    BRIDGE_TOKEN,
-    _admin_headers,
-    arena_settings,
-    bridge,
-    env,
-)
-
 from app.browser.arena_sessions import (
     ArenaSessionConflict,
     apply_bridge_state,
@@ -40,6 +30,15 @@ from app.browser.arena_sessions import (
 from app.main import app
 from app.models import Agent, ArenaSession, BrowserProfile, Project, Task
 from app.orchestration.autoscale import autoscale_service
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+from test_d_arena_connector import (  # noqa: F401 - fixtures
+    BRIDGE_TOKEN,
+    _admin_headers,
+    arena_settings,
+    bridge,
+    env,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 ADMIN = {"Authorization": f"Bearer {BRIDGE_TOKEN}"}
@@ -143,7 +142,7 @@ async def test_bridge_drives_many_independent_agent_profiles_with_validated_comm
             page = FakeAgentPage(bridge, pid, f"tok-{pid}")
             config = await page.connect()
             assert config["mode"] == "agent" and set(config["commands"]) == {
-                "new_session", "submit", "keep_working", "read_last_reply", "selector_test"}
+                "new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo"}
             pages.append(page)
 
         async def submit(pid: str, text: str):

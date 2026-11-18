@@ -24,6 +24,11 @@ import time
 
 import httpx
 import pytest
+from app.browser.arena_connector import SCRIPT_VERSION, build_userscript, match_patterns
+from app.browser.engines import validate_userscript_policy
+from app.browser.manager import detect_playwright_capabilities
+from app.main import app
+from app.models import Agent, BrowserProfile
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from test_d_arena_connector import (  # noqa: F401 - fixtures
@@ -35,12 +40,6 @@ from test_d_arena_connector import (  # noqa: F401 - fixtures
     env,
     needs_chromium,
 )
-
-from app.browser.arena_connector import build_userscript, match_patterns
-from app.browser.engines import validate_userscript_policy
-from app.browser.manager import detect_playwright_capabilities
-from app.main import app
-from app.models import Agent, BrowserProfile
 
 ADMIN = {"Authorization": f"Bearer {BRIDGE_TOKEN}"}
 
@@ -61,6 +60,10 @@ class Harness:
 
     async def cmd(self, profile_id: str, command: str, text: str | None = None) -> httpx.Response:
         body = {"command": command, **({"text": text} if text is not None else {})}
+        return await self.client.post(f"/api/v1/arena/profiles/{profile_id}/command", json=body, headers=self.headers)
+
+    async def repo_cmd(self, profile_id: str, command: str, repo: str, text: str | None = None) -> httpx.Response:
+        body = {"command": command, "repo": repo, **({"text": text} if text is not None else {})}
         return await self.client.post(f"/api/v1/arena/profiles/{profile_id}/command", json=body, headers=self.headers)
 
     async def state(self, profile_id: str) -> dict:
@@ -362,6 +365,94 @@ async def test_session_recovery_after_reload_and_many_profiles_stay_independent(
             recovered = await harness.wait_state(pid, "ready")
             assert recovered["connections_total"] == 2
             assert {(await harness.state(p))["agent_state"] for p, _ in profiles[1:]} == {"idle"}
+        finally:
+            await browser.close()
+
+
+async def test_task_repo_is_selected_and_verified_before_anything_is_sent(harness):
+    from playwright.async_api import async_playwright
+
+    pid, script = await harness.setup_profile("worker-1")
+    async with async_playwright() as pw:
+        browser = await _browser(pw)
+        try:
+            page = await _open(browser, script, f"{harness.bridge.base}/mock-arena/agent/?gen_ms=100")
+            await harness.wait_state(pid, "ready")
+            stats = lambda: page.evaluate("window.__mockArena")  # noqa: E731
+
+            # The chat is on AATM: the prompt is refused, nothing is typed or sent.
+            refused = await harness.repo_cmd(pid, "submit", "acme/demo", "Do the task")
+            assert refused.status_code == 502 and refused.json()["detail"]["code"] == "repo_mismatch", refused.text
+            assert "AATM" in refused.json()["detail"]["message"]
+            assert (await stats())["submits"] == 0 and await page.input_value("#composer") == ""
+
+            report = (await harness.repo_cmd(pid, "selector_test", "acme/demo")).json()["result"]["repo"]
+            assert report["found"] and report["text"] == "AATM" and report["matches"] is False and report["controls"]
+
+            missing = (await harness.repo_cmd(pid, "select_repo", "acme/absent")).json()["result"]
+            assert missing["selected"] is False and missing["code"] == "repo_not_available" and missing["current"] == "AATM"
+            assert (await stats())["repo_changes"] == 0 and await page.locator("#repo-popup").is_hidden()
+
+            chosen = (await harness.repo_cmd(pid, "select_repo", "acme/demo")).json()["result"]
+            assert chosen == {"selected": True, "changed": True, "repo": "demo"}
+            again = (await harness.repo_cmd(pid, "select_repo", "acme/demo")).json()["result"]
+            assert again["selected"] is True and again["changed"] is False
+
+            sent = await harness.repo_cmd(pid, "submit", "acme/demo", "Do the task")
+            assert sent.status_code == 200, sent.text
+            assert (await stats())["submitted_repos"] == ["acme/demo"]
+
+            # A new chat starts on the default repository again, so it must be selected again.
+            assert (await harness.cmd(pid, "new_session")).status_code == 200
+            await harness.wait_state(pid, "ready")
+            refused = await harness.repo_cmd(pid, "submit", "acme/demo", "Next task")
+            assert refused.json()["detail"]["code"] == "repo_mismatch"
+            assert (await stats())["submits"] == 1
+        finally:
+            await browser.close()
+
+
+async def test_a_script_that_cannot_verify_the_repo_is_refused(harness):
+    from playwright.async_api import async_playwright
+
+    pid, script = await harness.setup_profile("worker-1")
+    assert '"version": "' + SCRIPT_VERSION + '"' in script
+    old = script.replace('"version": "' + SCRIPT_VERSION + '"', '"version": "2.0.1"')
+    async with async_playwright() as pw:
+        browser = await _browser(pw)
+        try:
+            page = await _open(browser, old, f"{harness.bridge.base}/mock-arena/agent/")
+            await harness.wait_state(pid, "ready")
+            refused = await harness.repo_cmd(pid, "submit", "acme/demo", "Do the task")
+            assert refused.json()["detail"]["code"] == "script_outdated", refused.text
+            assert (await page.evaluate("window.__mockArena"))["submits"] == 0
+        finally:
+            await browser.close()
+
+
+@pytest.mark.parametrize("query", ["panel=1", "panel=1&panel_no_x=1"])
+async def test_feedback_panel_is_closed_without_answering_it(harness, query):
+    from playwright.async_api import async_playwright
+
+    pid, script = await harness.setup_profile("worker-1")
+    async with async_playwright() as pw:
+        browser = await _browser(pw)
+        try:
+            page = await _open(browser, script, f"{harness.bridge.base}/mock-arena/agent/?gen_ms=100&{query}")
+            await harness.wait_state(pid, "ready")
+            assert (await harness.cmd(pid, "submit", "First")).status_code == 200
+            await harness.wait_state(pid, "keep_working_visible")
+            assert await page.locator("#composer").count() == 1 and await page.locator("#composer").is_hidden()
+            assert (await harness.cmd(pid, "selector_test")).json()["result"]["feedback_panel"]["found"] is True
+
+            # Keep working is still available from the panel.
+            assert (await harness.cmd(pid, "keep_working")).json()["result"]["clicked"] is True
+            await harness.wait_state(pid, "keep_working_visible")
+
+            sent = await harness.cmd(pid, "submit", "Second")
+            assert sent.status_code == 200, sent.text
+            stats = await page.evaluate("window.__mockArena")
+            assert stats["submits"] == 2 and stats["kw_clicks"] == 1 and stats["feedback_answers"] == 0
         finally:
             await browser.close()
 

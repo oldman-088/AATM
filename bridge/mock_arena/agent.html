@@ -37,11 +37,19 @@
     <button type="button" id="yes">Yes</button>
     <button type="button" id="no">No</button>
     <button type="button" id="kw">Keep working</button>
+    <button type="button" id="widget-close" aria-label="Close"><svg width="10" height="10"><path d="M0 0L10 10M10 0L0 10" stroke="currentColor"/></svg></button>
   </div>
+  <div id="composer-wrap">
   <div class="composer" id="composer-box">
     <div id="composer-slot"></div>
     <button type="button" id="send" aria-label="Send message"><svg width="12" height="12"><path d="M0 0L12 6L0 12z" fill="currentColor"/></svg></button>
     <button type="button" id="stop" aria-label="Stop generating" hidden>&#9632;</button>
+  </div>
+  <div id="repo-row">
+    <button type="button" id="repo-btn" aria-haspopup="listbox"></button>
+    <span id="branch-label"></span>
+    <div id="repo-popup" role="listbox" hidden><input id="repo-search" placeholder="Search repositories"><div id="repo-list"></div></div>
+  </div>
   </div>
 </main>
 <script>
@@ -58,7 +66,7 @@
   var composerKind = params.get("composer") || "textarea";  // textarea | contenteditable
   var finalReport = params.get("report") || "Implementation summary: mock work done.\nModified files: feature.py\nTests: 1 passed";
   var stats = { submits: 0, kw_clicks: 0, new_sessions: 0, generations: 0, submits_while_generating: 0,
-                manager_prompts: [] };
+                manager_prompts: [], feedback_answers: 0, submitted_repos: [], repo_changes: 0 };
   window.__mockArena = stats;
   // Test hook: the next final reply (the agent's report) changes between review rounds.
   stats.setReport = function (text) { finalReport = String(text); };
@@ -123,7 +131,38 @@
   var widget = document.getElementById("widget");
   var sendBtn = document.getElementById("send");
   var stopBtn = document.getElementById("stop");
-  var box = document.getElementById("composer-box");
+  var box = document.getElementById("composer-wrap");
+  // The repository picker under the composer: one repository per chat, AATM until another is chosen.
+  var repos = (params.get("repos") || "oldman-088/AATM,acme/demo,oldman-088/aatm-e2e-2026-11-18").split(",");
+  var repo = repos[0];
+  var panelAfterReply = params.get("panel") === "1";
+  var noPanelX = params.get("panel_no_x") === "1";
+  var repoBtn = document.getElementById("repo-btn");
+  var repoPopup = document.getElementById("repo-popup");
+  var repoSearch = document.getElementById("repo-search");
+  var repoList = document.getElementById("repo-list");
+  function short(name) { return name.split("/").pop(); }
+  function renderRepo() { repoBtn.textContent = short(repo); document.getElementById("branch-label").textContent = "arena/mock-" + short(repo).toLowerCase(); }
+  function renderOptions() {
+    repoList.innerHTML = "";
+    repos.filter(function (r) { return r.toLowerCase().indexOf(repoSearch.value.toLowerCase()) !== -1; }).forEach(function (r) {
+      var o = document.createElement("div");
+      o.setAttribute("role", "option"); o.textContent = r;
+      o.addEventListener("click", function () { repo = r; stats.repo_changes += 1; repoPopup.hidden = true; renderRepo(); });
+      repoList.appendChild(o);
+    });
+  }
+  repoBtn.addEventListener("click", function () { repoPopup.hidden = !repoPopup.hidden; repoSearch.value = ""; renderOptions(); });
+  repoSearch.addEventListener("input", renderOptions);
+  renderRepo();
+  function closeWidget() { widget.hidden = true; box.hidden = false; }
+  if (noPanelX) document.getElementById("widget-close").remove();
+  else document.getElementById("widget-close").addEventListener("click", closeWidget);
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    repoPopup.hidden = true;
+    if (!widget.hidden) closeWidget();
+  });
   var statusLine = document.getElementById("status-line");
   var banners = document.getElementById("banners");
   var roundsLeft = 0;
@@ -196,6 +235,7 @@
         box.hidden = true;          // the widget replaces the composer, like Arena
       } else {
         bubble.textContent = nextReply !== null ? nextReply : finalReport;
+        if (panelAfterReply) { widget.hidden = false; box.hidden = true; }
       }
     }, genMs);
   }
@@ -204,6 +244,7 @@
     var text = draft;
     if (!text.trim()) return;
     stats.submits += 1;
+    stats.submitted_repos.push(repo);
     if (!stopBtn.hidden) stats.submits_while_generating += 1;   // must stay 0: one prompt in flight
     nextReply = managerReply(text);
     draft = "";
@@ -222,10 +263,12 @@
     box.hidden = false;
     generate("continuing");
   });
-  document.getElementById("yes").addEventListener("click", function () { widget.hidden = true; box.hidden = false; });
-  document.getElementById("no").addEventListener("click", function () { widget.hidden = true; box.hidden = false; });
+  ["yes", "no"].forEach(function (id) {
+    document.getElementById(id).addEventListener("click", function () { stats.feedback_answers += 1; closeWidget(); });
+  });
   document.getElementById("new").addEventListener("click", function () {
     stats.new_sessions += 1;
+    repo = repos[0]; renderRepo(); repoPopup.hidden = true;
     clearTimeout(genTimer);
     log.innerHTML = "";
     widget.hidden = true;

@@ -30,7 +30,7 @@ from app.providers.base import (
     ProviderResponse,
 )
 
-COMMAND_TIMEOUTS = {"new_session": 90.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
+COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
 QUIET_STATES = {"idle", "ready"}
 MAX_REPLY_CHARS = 60_000
 
@@ -107,12 +107,15 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         super().__init__(provider_id, endpoint_url, credential_ref, default_model)
 
     # ------------------------------------------------------------------ engine API
-    async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None) -> dict[str, Any]:
+    async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None,
+                      repo: str | None = None) -> dict[str, Any]:
         """Run one validated command on the profile's Arena page; raises ArenaAgentError on failure."""
         from app.browser.arena_connector import bridge_call
 
         wait = timeout or COMMAND_TIMEOUTS.get(command, 60.0)
-        args = {"text": text} if text is not None else {}
+        args: dict[str, Any] = {"text": text} if text is not None else {}
+        if repo:
+            args["repo"] = repo
         res = await bridge_call("POST", f"/v1/connector/profiles/{profile_id}/command",
                                 {"command": command, "args": args, "timeout_seconds": wait}, timeout=wait + 15)
         if not res.get("ok"):
@@ -147,9 +150,19 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         await self.wait_for_state(profile_id, {"ready"}, timeout=ready_timeout)
         return result
 
-    async def submit(self, profile_id: str, text: str, *, source: str = "worker") -> dict[str, Any]:
+    async def select_repo(self, profile_id: str, repo: str) -> dict[str, Any]:
+        """Select the task's repository for this chat; raises unless the page confirms it."""
+        result = await self.command(profile_id, "select_repo", repo=repo)
+        if not result.get("selected"):
+            detail = result.get("current") or "unknown"
+            raise ArenaAgentError(str(result.get("code") or "repo_not_selected"),
+                                  f"Could not select {repo} in Arena (selected: {detail}).")
+        return result
+
+    async def submit(self, profile_id: str, text: str, *, source: str = "worker", repo: str | None = None) -> dict[str, Any]:
+        """Send a prompt. With ``repo`` the page refuses it unless that repository is selected."""
         async with arena_submit_queue.slot(profile_id, source=source):
-            result = await self.command(profile_id, "submit", text)
+            result = await (self.command(profile_id, "submit", text, repo=repo) if repo else self.command(profile_id, "submit", text))
         if not result.get("sent"):
             raise ArenaAgentError("send_failed", "The Arena page did not confirm the message was sent.")
         return result

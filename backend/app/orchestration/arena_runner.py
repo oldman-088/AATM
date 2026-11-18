@@ -121,6 +121,11 @@ def live_diff_summary(session: ArenaSession, parent: Task, changes: dict[str, An
     }
 
 
+# The chat is not on the task's repository (or that cannot be proven): retrying could write elsewhere.
+REPO_SAFETY_CODES = {"repo_unknown", "repo_mismatch", "repo_unverified", "repo_not_selected", "repo_not_available",
+                     "repo_control_not_found", "script_outdated", "invalid_repo"}
+
+
 class ArenaAgentRunner:
     def __init__(self, adapter: ArenaAgentAdapter | None = None) -> None:
         self.adapter = adapter or ArenaAgentAdapter()
@@ -217,12 +222,17 @@ class ArenaAgentRunner:
                 session.phase = "starting"
                 append_event(session, "new_session")
                 await db.commit()
-                await self.adapter.new_session(profile_id)
                 project = await self._project(db, task)
+                repo = repo_slug(project)
+                if not repo:
+                    raise ArenaAgentError("repo_unknown", "The project has no GitHub repository URL, so Arena cannot be pointed at it.")
+                await self.adapter.new_session(profile_id)
+                await self.adapter.select_repo(profile_id, repo)
+                append_event(session, "repo_selected", repo)
                 prompt = build_task_prompt(task, project, agent)
                 session.phase = "submitting"
                 await db.commit()
-                await self.adapter.submit(profile_id, prompt)
+                await self.adapter.submit(profile_id, prompt, repo=repo)
                 session.submitted_at = _now()
                 session.last_state_change_at = session.submitted_at
                 session.phase = "working"
@@ -236,7 +246,7 @@ class ArenaAgentRunner:
         except ArenaAgentError as exc:
             session.error_message = f"{exc.code}: {exc.message}"[:500]
             append_event(session, "submit_failed", session.error_message)
-            if exc.code == "needs_human":
+            if exc.code == "needs_human" or exc.code in REPO_SAFETY_CODES:
                 session.phase = "needs_human"
                 session.needs_human_reason = exc.message[:240]
                 await db.commit()
@@ -280,11 +290,11 @@ class ArenaAgentRunner:
         prompt = build_correction_prompt(parent, review_comments=follow_up.description or "", discrepancies=discrepancies,
                                          round_number=parent.review_round, pr_url=session.pr_url)
         try:
-            await self.adapter.submit(session.profile_id, prompt)
+            await self.adapter.submit(session.profile_id, prompt, repo=repo_slug(project))
         except ArenaAgentError as exc:
             append_event(session, "correction_failed", f"{exc.code}: {exc.message}")
             await db.commit()
-            if exc.code == "needs_human":
+            if exc.code == "needs_human" or exc.code in REPO_SAFETY_CODES:
                 raise NeedsHumanError(session.profile_id, exc.message) from exc
             raise ArenaRunnerError(f"Arena Agent {exc.code}: {exc.message}") from exc
         session.correction_rounds += 1
@@ -555,8 +565,10 @@ class ArenaAgentRunner:
         return reports_github_blocked(str(reply.get("text") or ""))
 
     async def _follow_up(self, db: AsyncSession, session: ArenaSession, kind: str, text: str) -> bool:
+        parent = await db.get(Task, session.task_id) if session.task_id else None
+        repo = repo_slug(await self._project(db, parent)) if parent else None
         try:
-            await self.adapter.submit(session.profile_id, text)
+            await self.adapter.submit(session.profile_id, text, repo=repo)
         except ArenaAgentError as exc:
             append_event(session, f"{kind}_failed", f"{exc.code}: {exc.message}")
             await db.commit()

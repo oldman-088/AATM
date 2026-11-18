@@ -27,14 +27,15 @@ import httpx
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
-SCRIPT_VERSION = "2.0.1"
+SCRIPT_VERSION = "2.1.0"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
 # R7: the manager's own Arena profile (Chrome --user-data-dir=$HOME/.aatm-profiles/manager).
 MANAGER_AGENT_ID = "manager-0"
 MANAGER_PROFILE_ID = "profile-manager"
 MANAGER_PROFILE_NAME = "manager"
-DOM_KEYS = ("input", "send", "assistant_message", "user_message", "busy", "agent_input", "agent_reply")
+DOM_KEYS = ("input", "send", "assistant_message", "user_message", "busy", "agent_input", "agent_reply",
+            "repo_control", "repo_option", "repo_search")
 NOT_ENABLED_MESSAGE = (
     "Arena connector is not enabled: set ARENA_CONNECTOR_ENABLED=true (with ARENA_ALLOWED_ORIGINS), "
     "or set ARENA_MOCK_URL to test against the local mock page."
@@ -92,7 +93,7 @@ def agent_new_session_url(real: bool) -> str | None:
     explicit = (get_settings().ARENA_AGENT_NEW_SESSION_URL or "").strip()
     if explicit:
         return explicit
-    origins = configured_origins() if real else []
+    origins = configured_origins() if real and not mock_url() else []  # the local mock keeps its New button
     return f"{origins[0]}/agent" if origins else None
 
 
@@ -278,7 +279,7 @@ USERSCRIPT_BODY = r"""(function () {
     return null;
   }
 
-  function findYesButton() {  // closes the "Was this task successful?" widget
+  function findYesButton() {  // only detects the "Was this task successful?" panel; never clicked
     var els = buttons();
     for (var i = 0; i < els.length; i++) {
       if (/^yes$/i.test(textOf(els[i])) && isVisible(els[i])) return els[i];
@@ -619,6 +620,148 @@ USERSCRIPT_BODY = r"""(function () {
   /* ---------------------------------------------------------------- Arena Agent commands */
   function fail(code, message) { var e = new Error(message); e.code = code; return e; }
 
+  function pressEscape() {
+    [document.activeElement, document.body, document].forEach(function (target) {
+      if (!target || !target.dispatchEvent) return;
+      ["keydown", "keyup"].forEach(function (type) {
+        target.dispatchEvent(new KeyboardEvent(type, { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+      });
+    });
+  }
+
+  // ---- "Was this task successful? Yes / No / Keep working": it replaces the composer after a reply.
+  // It is closed with its X or Escape. Yes and No are never clicked: that would rate the task.
+  function findFeedbackPanel() {
+    var starts = [findKeepWorking(), findYesButton()];
+    for (var i = 0; i < starts.length; i++) {
+      var node = starts[i];
+      for (var depth = 0; node && node !== document.body && depth < 7; depth++, node = node.parentElement) {
+        var text = node.textContent || "";
+        if (text.length > 800) break;
+        if (/was this task successful/i.test(text)) return node;
+      }
+    }
+    return null;
+  }
+
+  function feedbackCloseButton(panel) {
+    var list = Array.prototype.slice.call(panel.querySelectorAll("button, [role='button']")).filter(isVisible);
+    var plain = list.filter(function (b) { return !/^(yes|no)$/i.test(textOf(b)) && !/keep\s*working/i.test(b.textContent || ""); });
+    for (var i = 0; i < plain.length; i++) {
+      if (/close|dismiss/.test(labelOf(plain[i])) || /^[×✕✖xX]$/.test(textOf(plain[i]))) return plain[i];
+    }
+    for (var j = 0; j < plain.length; j++) { if (!textOf(plain[j]) && plain[j].querySelector("svg")) return plain[j]; }
+    return null;
+  }
+
+  async function closeFeedbackPanel() {
+    var panel = findFeedbackPanel();
+    if (!panel) return true;
+    var closed = function () { return !findFeedbackPanel() && findInput(); };
+    var btn = feedbackCloseButton(panel);
+    if (btn) { btn.click(); if (await waitFor(closed, 2000, 100)) { notify("feedback_closed", "x"); return true; } }
+    pressEscape();
+    if (await waitFor(closed, 2000, 100)) { notify("feedback_closed", "escape"); return true; }
+    return false;
+  }
+
+  // ---- repository picker: each Arena Agent chat works on the one repository selected under the composer.
+  function normRepo(value) {
+    return String(value || "").trim().toLowerCase().replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "");
+  }
+  function repoTextMatches(text, repo) {
+    var got = normRepo(text), want = normRepo(repo);
+    return !!got && !!want && (got === want || got === want.split("/").pop());
+  }
+  function firstLine(el) { return textOf(el).split("\n")[0].trim(); }
+
+  function composerArea() {
+    var input = findInput();
+    if (!input) return null;
+    var area = composerScope(input);
+    for (var i = 0; i < 3 && area.parentElement && (area.parentElement.textContent || "").length <= 3000; i++) area = area.parentElement;
+    return area;
+  }
+  function repoControls(area) {
+    return Array.prototype.slice.call(area.querySelectorAll("button, [role='button'], [role='combobox'], [aria-haspopup]")).filter(isVisible);
+  }
+
+  function repoState(repo) {
+    var custom = settings && settings.dom && settings.dom.repo_control;
+    if (custom) {
+      var chosen = qa(custom).filter(isVisible)[0];
+      if (chosen) return { found: true, el: chosen, text: firstLine(chosen), via: "selector", matches: repoTextMatches(firstLine(chosen), repo) };
+    }
+    var area = composerArea();
+    if (!area) return { found: false, el: null, text: null, via: null, matches: false };
+    var list = repoControls(area), i;
+    for (i = 0; i < list.length; i++) {
+      if (repoTextMatches(firstLine(list[i]), repo)) return { found: true, el: list[i], text: firstLine(list[i]), via: "text", matches: true };
+    }
+    // A chat that already started can show its repository as plain text.
+    var input = findInput(), leaves = area.querySelectorAll("span, div, p");
+    for (i = 0; i < leaves.length; i++) {
+      var leaf = leaves[i];
+      if (leaf.children.length || leaf === input || input.contains(leaf) || !isVisible(leaf)) continue;
+      if (repoTextMatches(textOf(leaf), repo)) return { found: true, el: null, text: textOf(leaf), via: "label", matches: true };
+    }
+    var found = null, via = null;
+    for (i = 0; i < list.length && !found; i++) { if (/\brepo(sitory)?\b/.test(labelOf(list[i]))) { found = list[i]; via = "label"; } }
+    for (i = 1; i < list.length && !found; i++) { if (/^arena\//i.test(firstLine(list[i]))) { found = list[i - 1]; via = "branch"; } }
+    for (i = 0; i < list.length && !found; i++) {
+      if (list[i].getAttribute("aria-haspopup") && /^[\w.-]+(\/[\w.-]+)?$/.test(firstLine(list[i]))) { found = list[i]; via = "popup"; }
+    }
+    return { found: !!found, el: found, text: found ? firstLine(found) : null, via: via, matches: false };
+  }
+
+  function describeControls() {
+    var area = composerArea();
+    return (area ? repoControls(area) : []).slice(0, 15).map(function (el) {
+      return { tag: el.tagName.toLowerCase(), role: el.getAttribute("role"), popup: el.getAttribute("aria-haspopup"),
+               text: firstLine(el).slice(0, 50), label: labelOf(el).trim().slice(0, 50) };
+    });
+  }
+
+  function repoOptions() {
+    var custom = settings && settings.dom && settings.dom.repo_option;
+    var selector = custom || "[role='option'], [role='menuitem'], [role='menuitemradio'], [cmdk-item], [role='listbox'] button, " +
+      "[role='menu'] button, [role='dialog'] button, [data-radix-popper-content-wrapper] button, [data-radix-popper-content-wrapper] [role='button']";
+    return qa(selector).filter(isVisible);
+  }
+  function optionMatches(el, repo) {
+    return textOf(el).split("\n").some(function (line) { return repoTextMatches(line, repo); });
+  }
+  function repoSearchBox() {
+    var custom = settings && settings.dom && settings.dom.repo_search;
+    var selector = custom || "[role='dialog'] input, [role='listbox'] input, [role='menu'] input, [cmdk-input], [data-radix-popper-content-wrapper] input";
+    return qa(selector).filter(isVisible)[0] || null;
+  }
+
+  async function cmdSelectRepo(args) {
+    var repo = String(args.repo || "");
+    if (hasStopButton()) throw fail("busy", "the agent is still generating");
+    if (!(await closeFeedbackPanel())) throw fail("feedback_not_closed", "the task feedback panel could not be closed");
+    var state = repoState(repo);
+    if (state.matches) return { selected: true, changed: false, repo: state.text };
+    if (!state.el) return { selected: false, code: "repo_control_not_found", current: state.text, controls: describeControls() };
+    var current = state.text;
+    state.el.click();
+    await sleep(300);
+    var search = repoSearchBox();
+    if (search) { setInputText(search, repo.split("/").pop()); await sleep(300); }
+    var option = await waitFor(function () { return repoOptions().filter(function (el) { return optionMatches(el, repo); })[0]; }, 6000);
+    if (!option) {
+      var seen = repoOptions().slice(0, 15).map(function (el) { return firstLine(el).slice(0, 60); });
+      pressEscape();
+      return { selected: false, code: "repo_not_available", current: current, options: seen };
+    }
+    option.click();
+    var done = await waitFor(function () { return repoState(repo).matches; }, 8000);
+    if (!done) { pressEscape(); return { selected: false, code: "repo_not_selected", current: repoState(repo).text }; }
+    evaluate(true);
+    return { selected: true, changed: true, repo: repoState(repo).text };
+  }
+
   async function cmdNewSession(args) {
     if (args.url) {
       var target = new URL(args.url, location.href);
@@ -646,13 +789,17 @@ USERSCRIPT_BODY = r"""(function () {
     var reason = humanCheckReason();
     if (reason) { evaluate(true); throw fail("needs_human", reason); }
     if (hasStopButton()) throw fail("busy", "the agent is still generating");
+    if (!(await closeFeedbackPanel())) throw fail("feedback_not_closed", "the task feedback panel could not be closed");
     var input = findInput();
-    if (!input && findKeepWorking()) {
-      var yes = findYesButton();  // the feedback widget hides the composer
-      if (yes) { yes.click(); notify("feedback_dismissed"); input = await waitFor(findInput, 5000); }
-    }
     if (!input) throw fail("composer_not_found", "message composer not found (signed out or page changed)");
     if (input.disabled || input.readOnly) throw fail("composer_busy", "the composer is disabled");
+    if (args.repo) {  // nothing is typed or sent unless this chat is on the task's repository
+      var selected = repoState(args.repo);
+      if (!selected.matches) {
+        throw fail(selected.found ? "repo_mismatch" : "repo_unverified",
+                   "selected repository is " + (selected.text || "unknown") + ", the task needs " + args.repo);
+      }
+    }
     try { input.scrollIntoView({ block: "center" }); } catch (e) {}
     setInputText(input, text);
     await sleep(300);
@@ -681,7 +828,8 @@ USERSCRIPT_BODY = r"""(function () {
 
   function cmdReadLastReply() { return latestReply(); }
 
-  function cmdSelectorTest() {  // read-only: never clicks, types or sends
+  function cmdSelectorTest(args) {  // read-only: never clicks, types or sends
+    args = args || {};
     var input = findInput();
     var sendBtn = input ? findSendButton(input, true) : null;  // disabled while the composer is empty
     var kw = findKeepWorking();
@@ -701,6 +849,11 @@ USERSCRIPT_BODY = r"""(function () {
       stop: { found: hasStopButton() },
       keep_working: describe(kw),
       feedback_yes: describe(yes),
+      feedback_panel: { found: !!findFeedbackPanel() },
+      repo: (function () {
+        var r = repoState(args.repo || "");
+        return { found: r.found, text: r.text, via: r.via, matches: r.matches, controls: describeControls() };
+      })(),
       new_session: describe(nb),
       latest_reply: { found: reply.found, selector: reply.selector, count: reply.count, chars: reply.text.length },
       human_check: { found: !!human, reason: human },
@@ -715,7 +868,8 @@ USERSCRIPT_BODY = r"""(function () {
   }
 
   var COMMANDS = { new_session: cmdNewSession, submit: cmdSubmit, keep_working: cmdKeepWorking,
-                   read_last_reply: cmdReadLastReply, selector_test: cmdSelectorTest };
+                   read_last_reply: cmdReadLastReply, selector_test: cmdSelectorTest,
+                   select_repo: cmdSelectRepo };
   var READ_ONLY = { read_last_reply: true, selector_test: true };
 
   async function handleCommand(msg) {

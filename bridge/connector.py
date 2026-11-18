@@ -32,6 +32,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections import deque
@@ -54,7 +55,9 @@ MAX_EVENTS = 50
 AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "needs_human", "offline")
 # Commands the bridge may send to an Arena Agent page. Anything else is refused before it
 # reaches the browser. Read-only commands still run while the profile waits for a human.
-AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test")
+AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+REPO_CHECK_MIN_SCRIPT = (2, 1, 0)  # older scripts ignore the repository check
 READ_ONLY_COMMANDS = ("read_last_reply", "selector_test")
 
 # Sent to the userscript as configuration data. The userscript never solves anything: when one
@@ -522,6 +525,18 @@ class ConnectorHub:
             return answer
 
     # ------------------------------------------------------------------ Arena Agent commands
+    @staticmethod
+    def _valid_repo(state: ProfileState, repo: Any) -> str:
+        if not isinstance(repo, str) or not REPO_RE.match(repo):
+            raise ConnectorError("invalid_repo", "repo must look like owner/name.", 422)
+        try:
+            version = tuple(int(part) for part in (state.script_version or "").split(".")[:3])
+        except ValueError:
+            version = ()
+        if version < REPO_CHECK_MIN_SCRIPT:
+            raise ConnectorError("script_outdated", "Install userscript 2.1.0 or later: this one cannot verify the repository.", 409)
+        return repo
+
     def _validate_command(self, state: ProfileState, command: str, args: dict[str, Any]) -> dict[str, Any]:
         if command not in AGENT_COMMANDS:
             raise ConnectorError("unknown_command", f"Unsupported connector command '{command[:40]}'.", 422)
@@ -533,6 +548,10 @@ class ConnectorHub:
             if len(text) > MAX_PROMPT_CHARS:
                 raise ConnectorError("prompt_too_large", "Prompt exceeds the connector limit.", 413)
             clean["text"] = text
+            if args.get("repo") is not None:
+                clean["repo"] = self._valid_repo(state, args.get("repo"))
+        elif command == "select_repo":
+            clean["repo"] = self._valid_repo(state, args.get("repo"))
         elif command == "new_session":
             # Navigation only ever targets the URL the backend registered for this profile; a
             # caller-supplied URL is accepted only when it is on one of the profile's origins.

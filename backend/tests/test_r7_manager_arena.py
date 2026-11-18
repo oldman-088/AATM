@@ -14,19 +14,6 @@ import time
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from pydantic import ValidationError
-from sqlalchemy import select
-from test_b_review_merge_completion import REPO_SLUG, _FnRouter, _git, _init_repo
-from test_d_arena_connector import (  # noqa: F401 - fixtures
-    _admin_headers,
-    arena_settings,
-    bridge,
-    env,
-    needs_chromium,
-)
-from test_r3_arena_agent_workflow import ArenaOnGitHub, FakeGitHub, _drive, _passthrough, _report
-
 from app.browser.arena_connector import MANAGER_PROFILE_ID
 from app.core.config import Settings
 from app.main import app
@@ -65,6 +52,18 @@ from app.orchestration.manager_arena import (
     manager_readiness,
 )
 from app.providers.adapters.arena_agent import ArenaAgentAdapter
+from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
+from sqlalchemy import select
+from test_b_review_merge_completion import REPO_SLUG, _FnRouter, _git, _init_repo
+from test_d_arena_connector import (  # noqa: F401 - fixtures
+    _admin_headers,
+    arena_settings,
+    bridge,
+    env,
+    needs_chromium,
+)
+from test_r3_arena_agent_workflow import ArenaOnGitHub, FakeGitHub, _drive, _passthrough, _report
 
 
 def _mock_mode(arena_settings, monkeypatch, bridge) -> None:
@@ -507,8 +506,6 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
 ):
     """Manager and worker each in their own Chrome profile on the mock Arena Agent page, real bridge,
     real userscripts, git as GitHub's storage and a fake ``gh``. No model API is used at all."""
-    from playwright.async_api import async_playwright
-
     from app.browser.manager import detect_playwright_capabilities
     from app.git_workflows.manager import git_workflow_manager
     from app.orchestration.arena_runner import arena_runner
@@ -516,6 +513,7 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
     from app.providers.adapters.arena_agent import arena_submit_queue
     from app.runtime.agent_loop import AgentLoop
     from app.runtime.code_stream import code_stream
+    from playwright.async_api import async_playwright
 
     _mock_mode(arena_settings, monkeypatch, bridge)
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_NEW_SESSION_URL", "")
@@ -606,10 +604,15 @@ async def test_manager_on_arena_end_to_end_chat_plan_review_corrections_and_owne
                 assert goal.status_code == 201
                 plan_job = (await _wait_for(lambda: _all_done(manager_jobs, "plan", 1), timeout=90))[0]
                 t1_id = plan_job.result["task_ids"][0]
+
+                async def dispatched() -> bool:  # the job is marked done just before the scheduler cycle runs
+                    async with env() as db:
+                        return (await db.get(Task, t1_id)).status == "in_progress"
+
+                assert await _wait_for(dispatched, timeout=30), "the plan is dispatched through the existing scheduler"
                 async with env() as db:
                     t1 = await db.get(Task, t1_id)
                     assert t1.assigned_agent_id == "worker-1" and t1.project_id == project_id
-                    assert t1.status == "in_progress", "the plan is dispatched through the existing scheduler"
                     plan_reply = await db.get(ChatMessage, plan_job.reply_message_id)
                     assert "مهمة واحدة" in plan_reply.content and "Add answer()" in plan_reply.content
 
@@ -694,9 +697,8 @@ async def _all_done(jobs_of, kind: str, count: int):
 
 @needs_chromium
 async def test_invalid_manager_json_on_the_mock_page_retries_once_then_needs_human(env, bridge, arena_settings, monkeypatch):
-    from playwright.async_api import async_playwright
-
     from app.browser.manager import detect_playwright_capabilities
+    from playwright.async_api import async_playwright
 
     _mock_mode(arena_settings, monkeypatch, bridge)
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_NEW_SESSION_URL", "")
