@@ -977,9 +977,11 @@ USERSCRIPT_BODY = r"""(function () {
     };
     socket.onclose = function (ev) {
       socket = null;
-      if (closed || ev.code === 4401 || ev.code === 4410) return;  // bad token / unregistered: wait for a new script
-      setTimeout(connect, retryMs);
-      retryMs = Math.min(retryMs * 2, 30000);
+      if (closed) return;
+      // Never give up: a rejected page retries slowly, so it recovers when the bridge knows its token again.
+      var rejected = ev.code === 4401 || ev.code === 4410;
+      setTimeout(connect, rejected ? 60000 : retryMs);
+      if (!rejected) retryMs = Math.min(retryMs * 2, 30000);
     };
   }
 

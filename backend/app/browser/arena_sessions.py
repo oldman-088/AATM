@@ -97,7 +97,7 @@ async def set_arena_mode(db: AsyncSession, agent: Agent, mode: str, *, actor: st
 async def sync_profiles_with_bridge(db: AsyncSession) -> list[str]:
     """Register enabled employees' profiles the bridge does not know, e.g. after it restarted.
 
-    The bridge keeps registrations in memory only. Tokens are not changed, so installed userscripts
+    A bridge without its state file starts empty. Tokens are not changed, so installed userscripts
     stay valid. Returns the profile ids registered by this call.
     """
     if not arena_gate()["enabled"]:
