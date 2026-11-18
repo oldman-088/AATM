@@ -732,6 +732,7 @@ async def test_invalid_manager_json_on_the_mock_page_retries_once_then_needs_hum
                 await _wait_for(lambda: _job_in(env, "plan", {"needs_human"}), timeout=90)
                 stats = await page.evaluate("() => window.__mockArena")
                 assert [p["kind"] for p in stats["manager_prompts"]] == ["CONTEXT", "PLAN", "RETRY"], "exactly one retry"
+                await manager_arena_runtime.wait_idle()  # the job status is saved just before its chat reply
                 chat = (await client.get("/api/v1/chat", headers=headers)).json()
             finally:
                 await manager_arena_runtime.wait_idle()
