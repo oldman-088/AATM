@@ -101,6 +101,8 @@ def redact_reply(text: str) -> dict[str, Any]:
 
 class ArenaAgentAdapter(BaseProviderAdapter):
     provider_type = "arena_agent"
+    repo_select_attempts = 8
+    repo_select_wait_seconds = 2.5
 
     def __init__(self, provider_id: str = "arena-agent", endpoint_url: str | None = None,
                  credential_ref: str | None = "env:ARENA_BRIDGE_TOKEN", default_model: str = "arena-agent-coder") -> None:
@@ -151,13 +153,19 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         return result
 
     async def select_repo(self, profile_id: str, repo: str) -> dict[str, Any]:
-        """Select the task's repository for this chat; raises unless the page confirms it."""
-        result = await self.command(profile_id, "select_repo", repo=repo)
-        if not result.get("selected"):
-            detail = result.get("current") or "unknown"
-            raise ArenaAgentError(str(result.get("code") or "repo_not_selected"),
-                                  f"Could not select {repo} in Arena (selected: {detail}).")
-        return result
+        """Select the task's repository for this chat; raises unless the page confirms it.
+
+        A freshly loaded page shows the composer before the repository picker, so a miss is retried."""
+        result: dict[str, Any] = {}
+        for attempt in range(self.repo_select_attempts):
+            if attempt:
+                await asyncio.sleep(self.repo_select_wait_seconds)
+            result = await self.command(profile_id, "select_repo", repo=repo)
+            if result.get("selected"):
+                return result
+        detail = result.get("current") or "unknown"
+        raise ArenaAgentError(str(result.get("code") or "repo_not_selected"),
+                              f"Could not select {repo} in Arena (selected: {detail}).")
 
     async def submit(self, profile_id: str, text: str, *, source: str = "worker", repo: str | None = None) -> dict[str, Any]:
         """Send a prompt. With ``repo`` the page refuses it unless that repository is selected."""

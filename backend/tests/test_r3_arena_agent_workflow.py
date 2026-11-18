@@ -235,6 +235,9 @@ class ScriptedPage(ArenaAgentAdapter):
         self.commands: list[tuple[str, str | None]] = []
         self.repos: list[tuple[str, str | None]] = []
         self.repo_available = True
+        self.picker_late_calls = 0
+        self.select_calls = 0
+        self.repo_select_wait_seconds = 0
         self.reply = ""
 
     async def state(self, profile_id: str) -> dict[str, Any]:
@@ -248,6 +251,9 @@ class ScriptedPage(ArenaAgentAdapter):
             self.page_state = "ready"
             return {"started": True}
         if command == "select_repo":
+            self.select_calls += 1
+            if self.select_calls <= self.picker_late_calls:
+                return {"selected": False, "code": "repo_control_not_found", "current": None}
             return {"selected": self.repo_available, "code": None if self.repo_available else "repo_not_available", "current": "AATM"}
         if command == "keep_working":
             self.page_state = "generating"
@@ -334,6 +340,14 @@ async def test_worker_prompt_is_sent_only_after_the_task_repo_is_selected(env, a
     await _fresh_start(env, runner, task_id, session_id, agent_id)
     assert [c for c, _ in page.commands] == ["new_session", "select_repo", "submit"]
     assert page.repos[1:] == [("select_repo", REPO_SLUG), ("submit", REPO_SLUG)]
+
+
+async def test_repo_picker_that_renders_late_is_retried(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.picker_late_calls = 3
+    await _fresh_start(env, runner, task_id, session_id, agent_id)
+    assert page.select_calls == 4
+    assert [c for c, _ in page.commands].count("submit") == 1
 
 
 async def test_worker_prompt_is_not_sent_when_the_task_repo_cannot_be_selected(env, arena_settings, monkeypatch, tmp_path):
