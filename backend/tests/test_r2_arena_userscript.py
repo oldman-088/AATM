@@ -370,6 +370,7 @@ async def test_session_recovery_after_reload_and_many_profiles_stay_independent(
             await browser.close()
 
 
+@needs_chromium
 async def test_task_repo_is_selected_and_verified_before_anything_is_sent(harness):
     from playwright.async_api import async_playwright
 
@@ -415,6 +416,7 @@ async def test_task_repo_is_selected_and_verified_before_anything_is_sent(harnes
             await browser.close()
 
 
+@needs_chromium
 async def test_a_script_that_cannot_verify_the_repo_is_refused(harness):
     from playwright.async_api import async_playwright
 
@@ -433,6 +435,7 @@ async def test_a_script_that_cannot_verify_the_repo_is_refused(harness):
             await browser.close()
 
 
+@needs_chromium
 @pytest.mark.parametrize("query", ["panel=1", "panel=1&panel_no_x=1"])
 async def test_feedback_panel_is_closed_without_answering_it(harness, query):
     from playwright.async_api import async_playwright

@@ -509,6 +509,7 @@ export const ar: Translations = {
       generating: 'يعمل',
       keep_working_visible: 'زر متابعة العمل ظاهر',
       tool_call_limit: 'توقف عند حد الأدوات',
+      pr_ready: 'الطلب جاهز للمراجعة',
       needs_human: 'يحتاج إنساناً',
       offline: 'غير متصل',
     },

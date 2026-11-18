@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -74,6 +74,7 @@ MONITORED_PHASES = {"working", "correcting", "reporting"}
 RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starting", "submitting", "needs_human"}
 STALL_MINUTES = 20
 NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is escalated to the owner
+CREATE_PR_WAIT_MINUTES = 5  # after pressing Arena's Create PR, before falling back to asking the agent
 NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
@@ -363,8 +364,20 @@ class ArenaAgentRunner:
             return {"ok": True, "pr": pr, "merged_outside": True}
         expected_base = configured_base_branch(project)
         if expected_base and pr.get("baseRefName") != expected_base:
-            await self._wrong_base_pull_request(db, session, parent, pr, expected_base)
-            return {"ok": True, "pr": pr, "wrong_base": True}
+            corrected = None
+            if pr.get("state") == "OPEN":
+                fixed = await git_workflow_manager.ensure_task_pull_request(
+                    repo_slug=slug, task_id=parent.id, title=parent.title, branch=str(pr.get("headRefName") or ""),
+                    base=expected_base, cwd=cwd,
+                )
+                if fixed.get("ok"):
+                    append_event(session, "pr_base_corrected", ", ".join(fixed.get("actions") or []))
+                    again = await git_workflow_manager.find_task_pull_request(repo_slug=slug, task_id=parent.id, cwd=cwd)
+                    corrected = again.get("pull_request") if again.get("ok") else None
+            if not corrected or corrected.get("baseRefName") != expected_base:
+                await self._wrong_base_pull_request(db, session, parent, pr, expected_base)
+                return {"ok": True, "pr": pr, "wrong_base": True}
+            pr = corrected
         if session.pr_number != pr.get("number"):
             await self._associate_pr(db, session, parent, project, pr)
         head = pr.get("headRefOid")
@@ -560,7 +573,7 @@ class ArenaAgentRunner:
                     append_event(session, "keep_working_skipped", decision)
 
         # Quiet = the agent stopped: idle, or Keep working shown when it must not be pressed.
-        quiet = page in {"idle", "ready", "keep_working_visible", "tool_call_limit"}
+        quiet = page in {"idle", "ready", "keep_working_visible", "tool_call_limit", "pr_ready"}
         if not github and session.submitted_at is not None and self._github_due(session, force=quiet and changed):
             github = await self._poll_github(db, session, parent, project)
             if github.get("merged_outside"):
@@ -573,6 +586,10 @@ class ArenaAgentRunner:
             if not github:
                 await db.commit()
                 return {"phase": session.phase, "waiting": "github"}
+            secured = await self._secure_pull_request(db, session, parent, project, page)
+            if secured is not None:
+                await db.commit()
+                return {"phase": session.phase, **secured}
             misses = self._quiet_misses.get(session.id, 0) + 1
             self._quiet_misses[session.id] = misses
             if misses < NO_PR_QUIET_CHECKS:
@@ -592,6 +609,7 @@ class ArenaAgentRunner:
             return {"phase": session.phase, "nudged": nudges + 1}
 
         self._quiet_misses.pop(session.id, None)
+        await self._close_feedback_once(session)
         return await self._collect_report(db, session, parent, active, project)
 
     async def _keep_working_decision(self, db: AsyncSession, session: ArenaSession, parent: Task,
@@ -642,6 +660,65 @@ class ArenaAgentRunner:
         if not skipped or skipped[-1].get("detail") != decision:
             append_event(session, "tool_limit_skipped", decision)
         return None, github
+
+    async def _close_feedback_once(self, session: ArenaSession) -> None:
+        """A finished task: dismiss "Was this task successful?" without answering it."""
+        if any(e.get("kind") == "feedback_closed" for e in session.events or []):
+            return
+        try:
+            closed = await self.adapter.close_feedback(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "feedback_close_failed", exc.code)
+            return
+        if closed.get("closed"):
+            append_event(session, "feedback_closed")
+
+    async def _secure_pull_request(self, db: AsyncSession, session: ArenaSession, parent: Task, project: Project | None,
+                                   page: str) -> dict[str, Any] | None:
+        """The agent finished without a usable PR: publish its work and open the PR from AATM."""
+        slug = repo_slug(project)
+        if not slug or not project:
+            return None
+        try:
+            finished = page == "pr_ready" or reply_has_final_report(
+                str((await self.adapter.read_last_reply(session.profile_id)).get("text") or ""))
+            if not finished:
+                return None
+            path = str(((await self.adapter.selector_test(session.profile_id)).get("page") or {}).get("path") or "")
+        except ArenaAgentError as exc:
+            append_event(session, "secure_pr_failed", exc.code)
+            return None
+        suffix = path.rstrip("/").rsplit("/", 1)[-1][-8:]
+        cwd = project.repo_path
+        listed = await git_workflow_manager.list_arena_branches(repo_slug=slug, cwd=cwd)
+        branch = next((b["name"] for b in listed.get("branches", []) if suffix and b["name"].startswith(f"arena/{suffix}-")), None)
+        if not branch:
+            return None
+        base = project_base_branch(project)
+        ahead = await git_workflow_manager.commits_ahead(repo_slug=slug, base=base, head=branch, cwd=cwd)
+        if not ahead.get("ok"):
+            return None
+        if ahead["ahead"] <= 0:
+            clicks = [e for e in session.events or [] if e.get("kind") == "arena_create_pr"]
+            if clicks:
+                clicked_at = datetime.fromisoformat(clicks[-1]["ts"])
+                waited = datetime.now(timezone.utc) - clicked_at
+                return {"waiting": "arena_push"} if waited < timedelta(minutes=CREATE_PR_WAIT_MINUTES) else None
+            try:
+                await self.adapter.create_pr(session.profile_id, repo=slug, branch=branch)
+            except ArenaAgentError as exc:
+                append_event(session, "arena_create_pr_failed", exc.code)
+                return None
+            append_event(session, "arena_create_pr", branch)
+            return {"waiting": "arena_push"}
+        result = await git_workflow_manager.ensure_task_pull_request(
+            repo_slug=slug, task_id=parent.id, title=parent.title, branch=branch, base=base, cwd=cwd)
+        if not result.get("ok"):
+            append_event(session, "pr_ensure_failed", str(result.get("code")))
+            return None
+        append_event(session, "pr_ensured", ", ".join(result.get("actions") or []) or "already correct")
+        await self._poll_github(db, session, parent, project)
+        return {"pr_ensured": True}
 
     async def _reports_github_blocked(self, session: ArenaSession) -> bool:
         try:

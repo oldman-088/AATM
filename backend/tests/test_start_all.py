@@ -189,16 +189,19 @@ def test_chrome_rewritten_command_line_is_recognized_but_shell_text_is_not():
 
 def test_arena_loads_only_after_every_window_has_started(stack):
     env, log = stack({"manager-0": True, "worker-1": True}, {"profile-manager-0", "profile-worker-1"})
+    env["AATM_WINDOW_SETTLE_SECONDS"] = "0.5"  # the fake browsers log from separate processes
     assert _run("start-all.sh", env).returncode == 0
     targets = [line.rsplit(" ", 1)[-1] for line in log.read_text().splitlines() if line.startswith("chrome ")]
-    assert targets == ["about:blank", "about:blank", "https://arena.ai/agent", "https://arena.ai/agent"]
+    assert sorted(targets[:2]) == ["about:blank", "about:blank"]
+    assert targets[2:] == ["https://arena.ai/agent", "https://arena.ai/agent"]
 
 
 def test_unconnected_window_is_loaded_again_only_once(stack):
     env, log = stack({"manager-0": True, "worker-1": True}, {"profile-manager-0"})
     env["AATM_READY_TIMEOUT"] = "0.5"
+    env["AATM_WINDOW_SETTLE_SECONDS"] = "0.3"
     assert _run("start-all.sh", env).returncode == 1
     worker = [line for line in log.read_text().splitlines() if line.startswith("chrome ") and "worker-1" in line]
-    assert [line.rsplit(" ", 1)[-1] for line in worker] == ["about:blank", "https://arena.ai/agent", "https://arena.ai/agent"]
+    assert sorted(line.rsplit(" ", 1)[-1] for line in worker) == ["about:blank", "https://arena.ai/agent", "https://arena.ai/agent"]
     manager = [line for line in log.read_text().splitlines() if line.startswith("chrome ") and "/manager " in line]
     assert len(manager) == 2

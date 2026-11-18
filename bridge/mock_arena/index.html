@@ -93,6 +93,22 @@
   if (params.get("terms_link")) extra('<footer><a href="#">Terms of Service</a> <a href="#">Terms of Use</a></footer>');
   if (params.get("terms_dialog")) extra('<div role="dialog"><p>Please accept the Terms of Service.</p><button type="button">Accept</button></div>');
   if (params.get("captcha")) showHumanCheck();
+  var form = document.getElementById("composer");
+  function formExtra(html) {
+    var box = document.createElement("span");
+    box.innerHTML = html;
+    form.appendChild(box);
+  }
+  window.__mergeClicks = 0;
+  window.__createClicks = 0;
+  document.addEventListener("click", function (ev) {
+    if (ev.target.closest("[data-merge]")) window.__mergeClicks += 1;
+    if (ev.target.closest("[data-create-pr]")) window.__createClicks += 1;
+  });
+  if (params.get("diff")) formExtra('<button type="button">+91</button>');
+  if (params.get("create_pr")) formExtra('<button type="button" data-create-pr>Create PR</button>');
+  if (params.get("merge_pr")) formExtra('<button type="button" data-merge>Merge PR</button>');
+  if (params.get("no_send")) document.getElementById("send").remove();
   if (params.get("reply")) add("assistant", params.get("reply"));
   if (params.get("suggestions")) {
     window.__chipClicks = 0;

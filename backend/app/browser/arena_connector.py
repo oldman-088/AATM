@@ -280,6 +280,26 @@ USERSCRIPT_BODY = r"""(function () {
     return (panels || suggestionPanels()).some(function (panel) { return panel.contains(el); });
   }
 
+  // ---- merging happens only through AATM's Approval Center, never from the Arena page.
+  function isMergeControl(el) {
+    var text = textOf(el);
+    return /^(?:squash and |rebase and )?merge(?:\s|$)/i.test(text) || /\bmerge\s+(?:pr|pull)\b/i.test(text + " " + labelOf(el));
+  }
+  function safeClick(el) {
+    if (isMergeControl(el)) {
+      notify("click_refused", "merge control");
+      throw fail("merge_forbidden", "AATM never merges from the Arena page");
+    }
+    if (inSuggestionPanel(el)) throw fail("suggestion_forbidden", "suggestion options are never clicked");
+    el.click();
+  }
+  function findMergeButton() {
+    return qa("button, [role='button']").filter(function (el) { return isVisible(el) && isMergeControl(el); })[0] || null;
+  }
+  function findCreatePrButton() {
+    return buttons().filter(function (el) { return isVisible(el) && /^create\s+(?:pr|pull request)$/i.test(textOf(el)); })[0] || null;
+  }
+
   function buttons() {
     var panels = suggestionPanels();
     return qa("button, [role='button']").filter(function (el) { return !inSuggestionPanel(el, panels); });
@@ -358,7 +378,7 @@ USERSCRIPT_BODY = r"""(function () {
     scopes.push(document);
     var panels = suggestionPanels();
     function score(btn, inForm) {
-      if ((btn.disabled && !includeDisabled) || !isVisible(btn) || inSuggestionPanel(btn, panels)) return -1;
+      if ((btn.disabled && !includeDisabled) || !isVisible(btn) || inSuggestionPanel(btn, panels) || isMergeControl(btn)) return -1;
       var label = (labelOf(btn) + " " + btn.textContent).toLowerCase();
       if (/stop|abort/.test(label)) return -1;
       var s = 0;
@@ -380,7 +400,9 @@ USERSCRIPT_BODY = r"""(function () {
     }
     if (form) {
       var fb = form.querySelectorAll("button");
-      for (var k = 0; k < fb.length; k++) { if ((includeDisabled || !fb[k].disabled) && isVisible(fb[k])) return fb[k]; }
+      for (var k = 0; k < fb.length; k++) {
+        if ((includeDisabled || !fb[k].disabled) && isVisible(fb[k]) && !isMergeControl(fb[k])) return fb[k];
+      }
     }
     return null;
   }
@@ -437,7 +459,7 @@ USERSCRIPT_BODY = r"""(function () {
       for (var i = 0; i < list.length; i++) {
         var lab = labelOf(list[i]);
         var txt = textOf(list[i]);
-        if (/remove|delete/.test(lab) || ((txt === "×" || txt === "✕") && lab.length < 60)) { try { list[i].click(); } catch (e) {} }
+        if (/remove|delete/.test(lab) || ((txt === "×" || txt === "✕") && lab.length < 60)) { try { safeClick(list[i]); } catch (e) {} }
       }
       setInputText(input, "");
     } catch (e) {}
@@ -449,7 +471,7 @@ USERSCRIPT_BODY = r"""(function () {
       var how;
       var btn = findSendButton(input);
       var form = input.closest && input.closest("form");
-      if (btn && !btn.disabled) { btn.click(); how = "send_button"; }
+      if (btn && !btn.disabled) { safeClick(btn); how = "send_button"; }
       else if (form && form.requestSubmit) { try { form.requestSubmit(); how = "form_submit"; } catch (e) { pressEnter(input); how = "enter"; } }
       else { pressEnter(input); how = "enter"; }
       setTimeout(function () {
@@ -632,6 +654,7 @@ USERSCRIPT_BODY = r"""(function () {
     if (human) return { state: "needs_human", reason: human };
     var off = offlineReason();
     if (off) return { state: "offline", reason: off };
+    if (!hasStopButton() && findMergeButton()) return { state: "pr_ready", reason: null };  // finished: goes to review
     // Right after a message the old notice may still be on the page: do not report it again yet.
     var settled = Date.now() - mon.submittedAt >= TOOL_LIMIT_SETTLE_MS;
     if (settled && !hasStopButton() && toolCallLimitShown()) return { state: "tool_call_limit", reason: null };
@@ -742,7 +765,7 @@ USERSCRIPT_BODY = r"""(function () {
     if (!panel) return true;
     var closed = function () { return !findFeedbackPanel() && findInput(); };
     var btn = feedbackCloseButton(panel);
-    if (btn) { btn.click(); if (await waitFor(closed, 2000, 100)) { notify("feedback_closed", "x"); return true; } }
+    if (btn) { safeClick(btn); if (await waitFor(closed, 2000, 100)) { notify("feedback_closed", "x"); return true; } }
     pressEscape();
     if (await waitFor(closed, 2000, 100)) { notify("feedback_closed", "escape"); return true; }
     return false;
@@ -828,7 +851,7 @@ USERSCRIPT_BODY = r"""(function () {
     if (state.matches) return { selected: true, changed: false, repo: state.text };
     if (!state.el) return { selected: false, code: "repo_control_not_found", current: state.text, controls: describeControls() };
     var current = state.text;
-    state.el.click();
+    safeClick(state.el);
     await sleep(300);
     var search = repoSearchBox();
     if (search) { setInputText(search, repo.split("/").pop()); await sleep(300); }
@@ -838,7 +861,7 @@ USERSCRIPT_BODY = r"""(function () {
       pressEscape();
       return { selected: false, code: "repo_not_available", current: current, options: seen };
     }
-    option.click();
+    safeClick(option);
     var done = await waitFor(function () { return repoState(repo).matches; }, 8000);
     if (!done) { pressEscape(); return { selected: false, code: "repo_not_selected", current: repoState(repo).text }; }
     evaluate(true);
@@ -857,7 +880,7 @@ USERSCRIPT_BODY = r"""(function () {
     if (!btn) throw fail("new_button_not_found", "no New session button found on the page");
     var navigating = btn.tagName === "A" && btn.href && btn.target !== "_blank";
     mon.newSessionAt = Date.now(); mon.lastBusyAt = 0; mon.submittedAt = 0; mon.busyVisible = false;
-    btn.click();
+    safeClick(btn);
     if (navigating) return { started: true, method: "button", navigating: true };
     await sleep(800);
     var input = await waitFor(function () { var i = findInput(); return i && !hasStopButton() && inputText(i).trim() === "" ? i : null; }, 20000);
@@ -901,7 +924,7 @@ USERSCRIPT_BODY = r"""(function () {
   async function cmdKeepWorking() {
     var btn = findKeepWorking();
     if (!btn) return { clicked: false, reason: "Keep working is not visible" };
-    btn.click();
+    safeClick(btn);
     mon.submittedAt = Date.now();
     notify("keep_working_clicked");
     await sleep(300);
@@ -910,6 +933,26 @@ USERSCRIPT_BODY = r"""(function () {
   }
 
   function cmdReadLastReply() { return latestReply(); }
+
+  async function cmdCloseFeedback() { return { closed: await closeFeedbackPanel() }; }
+
+  function cmdCreatePr(args) {  // publishes this chat's work; AATM then checks GitHub and owns the PR
+    var reason = humanCheckReason();
+    if (reason) { evaluate(true); throw fail("needs_human", reason); }
+    if (hasStopButton()) throw fail("busy", "the agent is still generating");
+    var match = /^arena\/([A-Za-z0-9]{8})-/.exec(String(args.branch || ""));
+    if (!match || location.pathname.slice(-8) !== match[1]) throw fail("branch_mismatch", "this chat is not the task's branch");
+    var repo = args.repo ? repoState(args.repo) : null;
+    if (repo && repo.found && /\//.test(repo.text || "") && !repo.matches) throw fail("repo_mismatch", "this chat shows another repository");
+    var button = findCreatePrButton();
+    if (!button) throw fail("create_pr_not_found", "Create PR is not on the page");
+    var area = composerArea();
+    var hasChanges = area && repoControls(area).some(function (el) { return /^\+\d[\d,]*(\s+-\d[\d,]*)?$/.test(firstLine(el)); });
+    if (!hasChanges) throw fail("no_changes", "the page shows no changes to publish");
+    safeClick(button);
+    notify("create_pr_clicked", args.branch);
+    return { clicked: true };
+  }
 
   function cmdSelectorTest(args) {  // read-only: never clicks, types or sends
     args = args || {};
@@ -952,7 +995,7 @@ USERSCRIPT_BODY = r"""(function () {
 
   var COMMANDS = { new_session: cmdNewSession, submit: cmdSubmit, keep_working: cmdKeepWorking,
                    read_last_reply: cmdReadLastReply, selector_test: cmdSelectorTest,
-                   select_repo: cmdSelectRepo };
+                   select_repo: cmdSelectRepo, create_pr: cmdCreatePr, close_feedback: cmdCloseFeedback };
   var READ_ONLY = { read_last_reply: true, selector_test: true };
 
   async function handleCommand(msg) {
@@ -1003,7 +1046,7 @@ USERSCRIPT_BODY = r"""(function () {
     status("busy");
     var before = lastAnswer().count;
     typeInto(input, msg.prompt);
-    setTimeout(function () { button.click(); }, 150);
+    setTimeout(function () { safeClick(button); }, 150);
     var started = Date.now();
     var lastText = null;
     var stableSince = 0;

@@ -945,6 +945,74 @@ class GitWorkflowManager:
         matches.sort(key=lambda pr: (pr.get("state") != "OPEN", -int(pr.get("number") or 0)))
         return {"ok": True, "pull_request": matches[0] if matches else None, "count": len(matches)}
 
+    def _valid_pr_refs(self, repo_slug: str, *refs: str) -> bool:
+        if not self._SLUG_RE.fullmatch(repo_slug or ""):
+            return False
+        return all(validate_branch_name(ref)[0] and _COMMIT_REF_RE.fullmatch(ref) for ref in refs)
+
+    async def commits_ahead(self, *, repo_slug: str, base: str, head: str, cwd: str | Path) -> dict[str, Any]:
+        """How many commits ``head`` has on GitHub that ``base`` does not."""
+        if not self._valid_pr_refs(repo_slug, base, head):
+            return {"ok": False, "error": "Invalid repository or branch."}
+        ok, data, err = await self._gh_json(["api", f"repos/{repo_slug}/compare/{base}...{head}"], cwd)
+        if not ok or not isinstance(data, dict):
+            return {"ok": False, "error": err or "compare failed"}
+        return {"ok": True, "ahead": int(data.get("ahead_by") or 0)}
+
+    async def ensure_task_pull_request(self, *, repo_slug: str, task_id: str, title: str, branch: str, base: str,
+                                       cwd: str | Path) -> dict[str, Any]:
+        """Make the branch's open PR target ``base`` with the task's title. This never merges anything."""
+        if not self._valid_pr_refs(repo_slug, base, branch) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", task_id or ""):
+            return {"ok": False, "code": "invalid", "error": "Invalid repository, branch or task id."}
+        ahead = await self.commits_ahead(repo_slug=repo_slug, base=base, head=branch, cwd=cwd)
+        if not ahead.get("ok"):
+            return {"ok": False, "code": "github", "error": ahead.get("error")}
+        if ahead["ahead"] <= 0:
+            return {"ok": False, "code": "no_commits", "error": f"{branch} has no commits ahead of {base}."}
+        ok, data, err = await self._gh_json(
+            ["pr", "list", "--repo", repo_slug, "--head", branch, "--state", "open", "--json", "number,title,url,baseRefName"],
+            cwd,
+        )
+        if not ok:
+            return {"ok": False, "code": "github", "error": err}
+        prefix = f"[AATM-{task_id}]"
+        wanted_title = f"{prefix} {' '.join((title or '').split())}".strip()[:200]
+        repo_args = ["--repo", repo_slug]
+        actions: list[str] = []
+        kept: dict[str, Any] | None = None
+
+        async def gh(*args: str) -> tuple[int, str]:
+            rc, out, error = await self._exec(["gh", *args], Path(cwd))
+            return rc, out or error
+
+        for pr in sorted((p for p in data or [] if isinstance(p, dict)), key=lambda p: p.get("baseRefName") != base):
+            number = str(pr.get("number"))
+            if pr.get("baseRefName") != base:
+                rc, _ = await gh("pr", "edit", number, *repo_args, "--base", base)
+                if rc == 0 and kept is None:
+                    actions.append(f"retargeted #{number}")
+                else:  # a PR into another branch must not stay open
+                    rc, output = await gh("pr", "close", number, *repo_args, "--comment", f"Closed by AATM: this work targets {base}.")
+                    if rc != 0:
+                        return {"ok": False, "code": "github", "error": sanitize_cli_output(output)[:300], "actions": actions}
+                    actions.append(f"closed #{number}")
+                    continue
+            if kept is None:
+                kept = pr
+        if kept is None:
+            rc, output = await gh("pr", "create", *repo_args, "--base", base, "--head", branch, "--title", wanted_title,
+                                  "--body", f"Opened by AATM for task `{task_id}`. It waits for the owner's approval.")
+            if rc != 0:
+                return {"ok": False, "code": "github", "error": sanitize_cli_output(output)[:300], "actions": actions}
+            actions.append("created")
+            return {"ok": True, "url": output.strip().splitlines()[-1] if output.strip() else None, "actions": actions}
+        if not str(kept.get("title") or "").startswith(prefix):
+            rc, output = await gh("pr", "edit", str(kept.get("number")), *repo_args, "--title", wanted_title)
+            if rc != 0:
+                return {"ok": False, "code": "github", "error": sanitize_cli_output(output)[:300], "actions": actions}
+            actions.append("renamed")
+        return {"ok": True, "url": kept.get("url"), "number": kept.get("number"), "actions": actions}
+
     async def list_arena_branches(self, *, repo_slug: str, cwd: str | Path, prefix: str = "arena/") -> dict[str, Any]:
         """``arena/*`` branches with their head SHA (GitHub matching-refs API)."""
         if not self._SLUG_RE.fullmatch(repo_slug or "") or not re.fullmatch(r"[A-Za-z0-9_./-]{1,60}", prefix):

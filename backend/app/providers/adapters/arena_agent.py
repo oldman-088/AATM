@@ -113,7 +113,7 @@ class ArenaAgentAdapter(BaseProviderAdapter):
 
     # ------------------------------------------------------------------ engine API
     async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None,
-                      repo: str | None = None) -> dict[str, Any]:
+                      repo: str | None = None, branch: str | None = None) -> dict[str, Any]:
         """Run one validated command on the profile's Arena page; raises ArenaAgentError on failure."""
         from app.browser.arena_connector import bridge_call
 
@@ -121,6 +121,8 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         args: dict[str, Any] = {"text": text} if text is not None else {}
         if repo:
             args["repo"] = repo
+        if branch:
+            args["branch"] = branch
         res = await bridge_call("POST", f"/v1/connector/profiles/{profile_id}/command",
                                 {"command": command, "args": args, "timeout_seconds": wait}, timeout=wait + 15)
         if not res.get("ok"):
@@ -181,6 +183,13 @@ class ArenaAgentAdapter(BaseProviderAdapter):
     async def keep_working(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "keep_working")
 
+    async def create_pr(self, profile_id: str, *, repo: str, branch: str) -> dict[str, Any]:
+        """Press Arena's Create PR for this chat after the page confirms it is the task's branch."""
+        return await self.command(profile_id, "create_pr", repo=repo, branch=branch)
+
+    async def close_feedback(self, profile_id: str) -> dict[str, Any]:
+        return await self.command(profile_id, "close_feedback")
+
     async def read_last_reply(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "read_last_reply")
 
@@ -209,7 +218,7 @@ class ArenaAgentAdapter(BaseProviderAdapter):
                     return {"state": current, "keep_working": continued, "limit_reached": True}
                 await self.submit(profile_id, TOOL_LIMIT_CONTINUE)
                 continued += 1
-            elif current == "idle":
+            elif current in {"idle", "pr_ready"}:
                 return {"state": current, "keep_working": continued, "limit_reached": False}
             await asyncio.sleep(poll)
         raise ArenaAgentError("timeout", "Arena Agent did not finish in time.")
