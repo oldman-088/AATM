@@ -158,5 +158,6 @@ def test_userscript_keeps_retrying_after_every_close_code_and_start_enables_pers
     assert "if (closed) return;\n      // Never give up" in source
     assert "rejected ? 60000 : retryMs" in source
     assert "ev.code === 4410) return" not in source
+    assert "ev.code === 4409 ? 300000" in source  # two tabs of one profile must not keep replacing each other
     start = (Path(__file__).resolve().parents[2] / "scripts/ubuntu/start.sh").read_text()
     assert "ARENA_CONNECTOR_STATE_FILE" in start and "$HOME/.aatm/bridge/" in start

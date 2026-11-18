@@ -1105,7 +1105,8 @@ USERSCRIPT_BODY = r"""(function () {
       if (closed) return;
       // Never give up: a rejected page retries slowly, so it recovers when the bridge knows its token again.
       var rejected = ev.code === 4401 || ev.code === 4410;
-      setTimeout(connect, rejected ? 60000 : retryMs);
+      // 4409: a newer tab of this profile took over, so this one waits instead of fighting it.
+      setTimeout(connect, ev.code === 4409 ? 300000 : (rejected ? 60000 : retryMs));
       if (!rejected) retryMs = Math.min(retryMs * 2, 30000);
     };
   }
