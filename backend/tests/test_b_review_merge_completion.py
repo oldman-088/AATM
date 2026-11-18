@@ -45,10 +45,20 @@ class _FnRouter:
     def __init__(self, fn) -> None:
         self.fn = fn
         self.calls: list[dict[str, Any]] = []
+        self.overlap_agents: set[str] = set()
+        self._arrived: set[str] = set()
+        self._all_arrived = asyncio.Event()
 
     async def route_and_execute(self, db: AsyncSession, request: ProviderRequest, preferred_provider_id=None):
         started = time.monotonic()
-        await asyncio.sleep(0.05)  # model latency, makes overlap observable
+        if request.agent_id in self.overlap_agents:
+            # Hold until every listed agent is in flight. Serial execution can never fill this and
+            # times out, so the overlap check does not depend on machine load.
+            self._arrived.add(request.agent_id)
+            if self._arrived >= self.overlap_agents:
+                self._all_arrived.set()
+            await asyncio.wait_for(self._all_arrived.wait(), timeout=30)
+        await asyncio.sleep(0.05)  # model latency
         content = self.fn(request)
         self.calls.append({"agent_id": request.agent_id, "task_id": request.task_id, "start": started, "end": time.monotonic()})
         return ProviderResponse(
@@ -256,6 +266,7 @@ async def test_phase4_full_loop_directive_to_project_completed(env, fake_gh, tmp
         assert {(t.assigned_agent_id, t.status) for t in tasks} == {("worker-1", "in_progress"), ("worker-2", "in_progress")}
 
     # 4: two workers run truly in parallel in isolated worktrees
+    router.overlap_agents = {"worker-1", "worker-2"}
     assert all(await asyncio.gather(*(loop.process_one() for loop in loops)))
     w1 = [c for c in router.calls if c["agent_id"] == "worker-1"]
     w2 = [c for c in router.calls if c["agent_id"] == "worker-2"]

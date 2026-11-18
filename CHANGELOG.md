@@ -28,7 +28,7 @@ owner approval → merge → project completed, on the test repository
 - **Stale replies**: a real Arena new session is a full page load, so old chat text is not read as the reply.
 - **`reset-admin-password.sh`**: hidden prompt, checks it targets the database the backend uses, verifies
   the result and prints a clear success or failure.
-- The parallel-workers test no longer depends on machine load.
+- The parallel-worker tests no longer depend on machine load.
 
 ## [3.4.1] — 2026-11-17
 
