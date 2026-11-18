@@ -87,6 +87,7 @@ if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
     fi
     echo "[AATM] Starting local Arena bridge on 127.0.0.1:${ARENA_BRIDGE_PORT:-4100}..."
     (set -a; [[ -f .env ]] && . ./.env; set +a; \
+      ARENA_CONNECTOR_STATE_FILE="${ARENA_CONNECTOR_STATE_FILE:-$HOME/.aatm/bridge/connector-profiles.json}" \
       ARENA_BRIDGE_HOST=127.0.0.1 nohup "$ROOT_DIR/.venv/bin/python" -m bridge.server \
       > "$ROOT_DIR/logs/bridge.log" 2>&1 & echo $! > "$ROOT_DIR/logs/bridge.pid")
   fi

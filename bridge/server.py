@@ -517,6 +517,7 @@ def create_app(
     max_history: int | None = None,
     state_file: str | Path | None = None,
     session_ttl_seconds: float | None = None,
+    connector_state_file: str | Path | None = None,
 ) -> FastAPI:
     hist_limit = max_history if max_history is not None else int(os.environ.get("ARENA_BRIDGE_MAX_HISTORY", "40"))
     resolved_state_file = (
@@ -541,7 +542,7 @@ def create_app(
 
     from bridge.connector import ConnectorError, ConnectorHub, register_connector_routes
 
-    hub = ConnectorHub()
+    hub = ConnectorHub(connector_state_file or os.environ.get("ARENA_CONNECTOR_STATE_FILE", "").strip() or None)
     bridge_app.state.connector_hub = hub
     register_connector_routes(bridge_app, hub)
     mock_page = Path(__file__).resolve().parent / "mock_arena" / "index.html"
