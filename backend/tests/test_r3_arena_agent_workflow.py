@@ -19,6 +19,24 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from app.browser.arena_connector import arena_gate
+from app.db.base import utcnow
+from app.git_workflows.manager import git_workflow_manager
+from app.main import app
+from app.models import Agent, ApprovalRequest, ArenaSession, AuditLog, Notification, Project, Task
+from app.orchestration.arena_prompts import (
+    GITHUB_BLOCKED_MARKER,
+    build_correction_prompt,
+    build_task_prompt,
+    compare_report_to_changes,
+    report_is_complete,
+    reports_github_blocked,
+)
+from app.orchestration.arena_runner import ArenaAgentRunner, arena_reservations, arena_runner
+from app.orchestration.scheduler import TaskScheduler
+from app.providers.adapters.arena_agent import ArenaAgentAdapter, keep_working_allowed
+from app.providers.base import ProviderRequest
+from app.runtime.agent_loop import AgentLoop
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from test_b_review_merge_completion import REPO_SLUG, _FnRouter, _git, _init_repo
@@ -29,23 +47,6 @@ from test_d_arena_connector import (  # noqa: F401 - fixtures
     env,
     needs_chromium,
 )
-
-from app.browser.arena_connector import arena_gate
-from app.db.base import utcnow
-from app.git_workflows.manager import git_workflow_manager
-from app.main import app
-from app.models import Agent, ApprovalRequest, ArenaSession, AuditLog, Notification, Project, Task
-from app.orchestration.arena_prompts import (
-    build_correction_prompt,
-    build_task_prompt,
-    compare_report_to_changes,
-    report_is_complete,
-)
-from app.orchestration.arena_runner import ArenaAgentRunner, arena_reservations, arena_runner
-from app.orchestration.scheduler import TaskScheduler
-from app.providers.adapters.arena_agent import ArenaAgentAdapter, keep_working_allowed
-from app.providers.base import ProviderRequest
-from app.runtime.agent_loop import AgentLoop
 
 WORKFLOW_BLOCK = (
     "Work on ONE branch.\n\nCreate ONE pull request.\n\nPush changes after every completed implementation item.\n\n"
@@ -294,6 +295,30 @@ async def test_stall_without_meaningful_change_marks_needs_human_and_notifies(en
         assert (await arena_reservations(db))[agent_id] == task_id
 
 
+async def test_agent_without_github_access_goes_to_a_human_at_once(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    prompt = build_task_prompt(Task(id="task-1", title="T", description="D"), None)
+    assert GITHUB_BLOCKED_MARKER in prompt and not reports_github_blocked(prompt)  # an echoed prompt is not a report
+    page.page_state = "keep_working_visible"
+    page.reply = f"I checked.\n**{GITHUB_BLOCKED_MARKER}** no connector for this account"
+    async with env() as db:
+        result = (await runner.tick(db))[session_id]
+    assert result["github_blocked"] is True
+    assert ("keep_working", None) not in page.commands
+    async with env() as db:
+        session, task, agent = await db.get(ArenaSession, session_id), await db.get(Task, task_id), await db.get(Agent, agent_id)
+        assert session.phase == "needs_human" and "no GitHub access" in session.needs_human_reason
+        assert task.status == "blocked" and agent.status == "needs_human"
+
+
+async def test_keep_working_continues_when_github_is_not_reported_blocked(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (_task, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.page_state = "keep_working_visible"
+    page.reply = "Still implementing."
+    async with env() as db:
+        assert (await runner.tick(db))[session_id]["keep_working"] == 1
+
+
 async def test_unlimited_keep_working_then_no_pr_is_escalated_instead_of_completed(env, arena_settings, monkeypatch, tmp_path):
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 0)
     page, runner, _gh, (task_id, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
@@ -362,9 +387,8 @@ async def _drive(env, scheduler, loops, until, *, timeout: float = 90.0, on_tick
 async def test_full_arena_agent_workflow_with_review_corrections_approval_and_new_session(
     env, bridge, arena_settings, monkeypatch, tmp_path
 ):
-    from playwright.async_api import async_playwright
-
     from app.browser.manager import detect_playwright_capabilities
+    from playwright.async_api import async_playwright
 
     monkeypatch.setattr(arena_settings, "ARENA_MOCK_URL", f"{bridge.base}/mock-arena/")
     monkeypatch.setattr(arena_settings, "ARENA_BRIDGE_URL", bridge.base)

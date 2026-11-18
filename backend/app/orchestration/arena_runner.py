@@ -21,9 +21,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.browser.arena_sessions import (
     ArenaSessionConflict,
     append_event,
@@ -54,10 +51,13 @@ from app.orchestration.arena_prompts import (
     pr_title_prefix,
     repo_slug,
     report_is_complete,
+    reports_github_blocked,
 )
 from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError, keep_working_allowed
 from app.runtime.agent_protocol import redact_secrets
 from app.runtime.temporal import to_naive_utc
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -480,6 +480,14 @@ class ArenaAgentRunner:
             await self._block_needs_human(db, session, active, session.needs_human_reason or "human check on the Arena page")
             return {"phase": session.phase}
 
+        # The agent says it cannot reach GitHub: Keep working or nudges cannot help, a human must connect it.
+        if not session.pr_number and session.submitted_at is not None and (
+            page == "keep_working_visible" or (changed and page in {"idle", "ready"})
+        ) and await self._reports_github_blocked(session):
+            slug = repo_slug(project) or "the project repository"
+            await self._block_needs_human(db, session, active, f"Arena agent has no GitHub access to {slug}: connect GitHub for this account")
+            return {"phase": session.phase, "github_blocked": True}
+
         reference = max(filter(None, [_naive(session.last_state_change_at), _naive(session.submitted_at)]), default=None)
         if reference and _naive(_now()) - reference > timedelta(minutes=self.stall_minutes) and not (page in {"idle", "ready"} and session.pr_number):
             await self._block_needs_human(db, session, active, f"stalled: no Arena activity or new commits for {int(self.stall_minutes)} minutes")
@@ -537,6 +545,14 @@ class ArenaAgentRunner:
 
         self._quiet_misses.pop(session.id, None)
         return await self._collect_report(db, session, parent, active, project)
+
+    async def _reports_github_blocked(self, session: ArenaSession) -> bool:
+        try:
+            reply = await self.adapter.read_last_reply(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "read_reply_failed", f"{exc.code}: {exc.message}")
+            return False
+        return reports_github_blocked(str(reply.get("text") or ""))
 
     async def _follow_up(self, db: AsyncSession, session: ArenaSession, kind: str, text: str) -> bool:
         try:

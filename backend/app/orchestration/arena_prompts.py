@@ -29,6 +29,15 @@ REPORT_SECTIONS = (
 _DOC_CHARS = 2_500
 
 
+GITHUB_BLOCKED_MARKER = "AATM_BLOCKED: GITHUB_ACCESS"
+_GITHUB_BLOCKED_LINE = re.compile(rf"^[\s>*`_-]*{re.escape(GITHUB_BLOCKED_MARKER)}\b", re.MULTILINE)
+
+
+def reports_github_blocked(reply: str) -> bool:
+    """True when a line of the agent's reply starts with the marker (the prompt only quotes it mid-sentence)."""
+    return bool(_GITHUB_BLOCKED_LINE.search(reply or ""))
+
+
 def pr_title_prefix(task_id: str) -> str:
     return f"[AATM-{task_id}]"
 
@@ -46,6 +55,10 @@ def github_workflow_block(task_id: str, base_branch: str) -> str:
         f"Put {pr_title_prefix(task_id)} at the beginning of the pull request title.",
         "",
         f"The pull request targets the base branch `{base_branch}`. The project owner reviews and merges it.",
+        "",
+        "Before you change anything, check that you can read this repository and push to it. If you cannot, stop: "
+        f"do not work around it and do not ask for credentials. Reply with one line that begins with {GITHUB_BLOCKED_MARKER} "
+        "and then say what is missing.",
     ])
 
 
