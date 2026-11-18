@@ -397,6 +397,8 @@ async def test_task_repo_is_selected_and_verified_before_anything_is_sent(harnes
             assert chosen == {"selected": True, "changed": True, "repo": "demo"}
             again = (await harness.repo_cmd(pid, "select_repo", "acme/demo")).json()["result"]
             assert again["selected"] is True and again["changed"] is False
+            report = (await harness.repo_cmd(pid, "selector_test", "acme/demo")).json()["result"]["repo"]
+            assert report["matches"] is True and report["text"] == "demo"
 
             sent = await harness.repo_cmd(pid, "submit", "acme/demo", "Do the task")
             assert sent.status_code == 200, sent.text

@@ -550,7 +550,7 @@ class ConnectorHub:
             clean["text"] = text
             if args.get("repo") is not None:
                 clean["repo"] = self._valid_repo(state, args.get("repo"))
-        elif command == "select_repo":
+        elif command == "select_repo" or (command == "selector_test" and args.get("repo") is not None):
             clean["repo"] = self._valid_repo(state, args.get("repo"))
         elif command == "new_session":
             # Navigation only ever targets the URL the backend registered for this profile; a
