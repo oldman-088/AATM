@@ -93,6 +93,19 @@
   if (params.get("terms_link")) extra('<footer><a href="#">Terms of Service</a> <a href="#">Terms of Use</a></footer>');
   if (params.get("terms_dialog")) extra('<div role="dialog"><p>Please accept the Terms of Service.</p><button type="button">Accept</button></div>');
   if (params.get("captcha")) showHumanCheck();
+  if (params.get("reply")) add("assistant", params.get("reply"));
+  if (params.get("suggestions")) {
+    window.__chipClicks = 0;
+    extra('<div role="radiogroup">' +
+          '<button type="button" role="radio" data-chip><span data-role="assistant">خطة الموجات 2-4</span></button>' +
+          '<button type="button" role="radio" data-chip>Handle the rate limit: try again</button>' +
+          '<button type="button" role="radio" data-chip aria-label="Send this option">مراجعة</button>' +
+          '<button type="button">Skip</button>' +
+          '<textarea id="revise" placeholder="Revise options or write your own…"></textarea></div>');
+    document.addEventListener("click", function (ev) {
+      if (ev.target.closest("[data-chip]")) window.__chipClicks += 1;
+    });
+  }
 
   document.getElementById("composer").addEventListener("submit", function (ev) {
     ev.preventDefault();
