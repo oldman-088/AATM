@@ -1,6 +1,7 @@
 import React from 'react'
 import { Bell, Check, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { Badge, Button, Card } from '../components/ui'
+import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import type { Language } from '../i18n/types'
 import { apiFetch } from '../lib/api'
@@ -8,14 +9,17 @@ import { apiFetch } from '../lib/api'
 export function QAView({
   qaData,
   securityPosture,
+  error,
   onReload,
 }: {
   qaData: any
   securityPosture?: any
+  error?: string | null
   onReload: () => void
 }) {
   const { t, formatNumber } = useI18n()
-  if (!qaData) return null
+  if (error) return <EmptyState variant="error" onRetry={onReload} testId="qa-error" />
+  if (!qaData) return <EmptyState variant="loading" testId="qa-loading" />
 
   const triggerHeal = async () => {
     await apiFetch('/qa/self-heal', { method: 'POST' })
@@ -93,10 +97,12 @@ export function QAView({
 export function ApprovalsAuditView({
   approvals,
   auditLogs,
+  error,
   onReload,
 }: {
   approvals: any[]
   auditLogs: any[]
+  error?: string | null
   onReload: () => void
 }) {
   const { t, formatDate } = useI18n()
@@ -113,7 +119,12 @@ export function ApprovalsAuditView({
     <div className="space-y-6">
       <h2 className="text-xl font-semibold text-white">{t.approvals.title}</h2>
 
-      <div className="space-y-3">
+      {error ? (
+        <EmptyState variant="error" onRetry={onReload} testId="approvals-error" />
+      ) : approvals.length === 0 ? (
+        <EmptyState variant="empty" testId="approvals-empty" />
+      ) : (
+        <div className="space-y-3">
         {approvals.map((ap) => (
           <Card key={ap.id} className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -140,10 +151,14 @@ export function ApprovalsAuditView({
             )}
           </Card>
         ))}
-      </div>
+        </div>
+      )}
 
       <Card className="space-y-3">
         <h3 className="text-sm font-semibold text-slate-200">{t.approvals.auditTimeline}</h3>
+        {auditLogs.length === 0 ? (
+          <EmptyState variant="empty" testId="audit-empty" />
+        ) : (
         <div className="max-h-72 space-y-2 overflow-y-auto text-xs">
           {auditLogs.map((lg) => (
             <div key={lg.id} className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/60 p-2">
@@ -157,6 +172,7 @@ export function ApprovalsAuditView({
             </div>
           ))}
         </div>
+        )}
       </Card>
     </div>
   )
@@ -165,12 +181,14 @@ export function ApprovalsAuditView({
 export function SettingsNotificationsView({
   notifications,
   theme,
+  error,
   onToggleTheme,
   onChangeLanguage,
   onReload,
 }: {
   notifications: any[]
   theme: 'dark' | 'light'
+  error?: string | null
   onToggleTheme: (next: 'dark' | 'light') => void
   onChangeLanguage: (lang: Language) => void
   onReload: () => void
@@ -228,7 +246,11 @@ export function SettingsNotificationsView({
           {t.settings.notifications}
         </h3>
         <div className="space-y-2">
-          {notifications.map((n) => (
+          {error ? (
+            <EmptyState variant="error" onRetry={onReload} testId="notifications-error" />
+          ) : notifications.length === 0 ? (
+            <EmptyState variant="empty" testId="notifications-empty" />
+          ) : notifications.map((n) => (
             <div key={n.id} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs">
               <div>
                 <div className="font-semibold text-white">{n.title}</div>

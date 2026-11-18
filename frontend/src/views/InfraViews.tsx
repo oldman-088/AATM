@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Brain, Cpu, FolderGit2, Globe, Monitor, Play, RefreshCw, ShieldAlert, Square, Sparkles, Wallet } from 'lucide-react'
 import { Badge, Button, Card, Input, Select } from '../components/ui'
+import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 
@@ -86,10 +87,12 @@ export function VisualWorkflowBuilder({ browsers }: { browsers: any[] }) {
 export function BrowserWallView({
   browsers,
   capabilities,
+  error,
   onReload,
 }: {
   browsers: any[]
   capabilities: any
+  error?: string | null
   onReload: () => void
 }) {
   const { t } = useI18n()
@@ -143,6 +146,11 @@ export function BrowserWallView({
       )}
 
       <VisualWorkflowBuilder browsers={browsers} />
+      {error ? (
+        <EmptyState variant="error" onRetry={onReload} testId="browsers-error" />
+      ) : browsers.length === 0 ? (
+        <EmptyState variant="empty" testId="browsers-empty" />
+      ) : (
       <div className="grid gap-4 lg:grid-cols-2">
         {browsers.map((bp) => (
           <Card key={bp.id} className="space-y-3">
@@ -219,6 +227,7 @@ export function BrowserWallView({
           </Card>
         ))}
       </div>
+      )}
     </div>
   )
 }
@@ -380,12 +389,14 @@ export function ProvidersView({
   usage,
   agents,
   sessions,
+  error,
   onReload,
 }: {
   providers: any[]
   usage: any
   agents: any[]
   sessions: any[]
+  error?: string | null
   onReload: () => void
 }) {
   const { t, formatNumber } = useI18n()
@@ -692,7 +703,11 @@ export function ProvidersView({
         </Select>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
-        {providers.map((p) => (
+        {error ? (
+          <EmptyState variant="error" onRetry={onReload} testId="providers-error" className="md:col-span-3" />
+        ) : providers.length === 0 ? (
+          <EmptyState variant="empty" testId="providers-empty" className="md:col-span-3" />
+        ) : providers.map((p) => (
           <Card key={p.id} className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="font-semibold text-white">{p.name}</div>
@@ -818,7 +833,9 @@ export function ProjectsMemoryView({
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="space-y-3">
           <div className="flex flex-wrap gap-2">
-            {projects.map((p) => (
+            {projects.length === 0 ? (
+              <EmptyState variant="empty" testId="projects-empty" />
+            ) : projects.map((p) => (
               <Button
                 key={p.id}
                 size="sm"
@@ -868,7 +885,9 @@ export function ProjectsMemoryView({
           </Button>
         </div>
         <div className="grid gap-3 md:grid-cols-2">
-          {memories.map((m) => (
+          {memories.length === 0 ? (
+            <EmptyState variant="empty" testId="memories-empty" className="md:col-span-2" />
+          ) : memories.map((m) => (
             <div key={m.id} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-semibold text-white">{m.title}</span>
@@ -925,7 +944,7 @@ export function AgentWorktrees({ agents, worktrees, onReload }: { agents: any[];
 
 type GitHubTarget = 'pr' | 'issue' | 'branch' | 'comment'
 
-export function GitWorkflowsView({ gitData, approvals, agents, onReload }: { gitData: any; approvals: any[]; agents: any[]; onReload: () => void }) {
+export function GitWorkflowsView({ gitData, approvals, agents, error, onReload }: { gitData: any; approvals: any[]; agents: any[]; error?: string | null; onReload: () => void }) {
   const { t } = useI18n()
   const [mergeFeedback, setMergeFeedback] = useState<string | null>(null)
 
@@ -945,7 +964,8 @@ export function GitWorkflowsView({ gitData, approvals, agents, onReload }: { git
   const [requesting, setRequesting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
-  if (!gitData) return null
+  if (error) return <EmptyState variant="error" onRetry={onReload} testId="git-error" />
+  if (!gitData) return <EmptyState variant="loading" testId="git-loading" />
 
   const { repository, workflows } = gitData
   const approvalStatus = approvals.find((a) => a.id === approvalId.trim())?.status ?? (approvalId && approvalId === requestedApprovalId ? 'pending' : 'unknown')

@@ -153,8 +153,7 @@ export function useBridgeData() {
       : arenaGate
         ? 'unavailable'
         : 'unknown'
-  const demoMode = Boolean(data.health?.demo_mode)
-  const hasEngine = Boolean(modelStatus?.configured) || demoMode
+  const hasEngine = Boolean(modelStatus?.configured)
   const hasProject = data.projects.length > 0
   const hasDirective = data.chats.some((message) => message?.sender_type === 'user')
   const missionName = data.projects.find((project) => project.id === data.projectId)?.name || null
@@ -170,6 +169,5 @@ export function useBridgeData() {
     modelStatus,
     arenaGate,
     arenaLabel,
-    demoMode,
   }
 }

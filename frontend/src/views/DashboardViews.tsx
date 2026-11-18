@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Activity, AlertTriangle, ArrowLeftRight, GitPullRequest, OctagonX, Pause, Play, RefreshCw, UserRoundCog } from 'lucide-react'
 import { Badge, Button, Card } from '../components/ui'
+import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 
@@ -34,8 +35,10 @@ const TASK_EVENTS = ['task.updated', 'task.created', 'agent.heartbeat', 'arena.n
 
 export function HomeOverview() {
   const { t, formatNumber } = useI18n()
-  const { data } = useLoad<any>('/dashboard/home', TASK_EVENTS)
-  if (!data?.counters || !Array.isArray(data.architecture)) return <div className="text-slate-400">{t.common.loading}</div>
+  const { data, error, reload } = useLoad<any>('/dashboard/home', TASK_EVENTS)
+  if (error) return <EmptyState variant="error" onRetry={reload} testId="home-overview-error" />
+  if (!data?.counters || !Array.isArray(data.architecture)) return <EmptyState variant="loading" testId="home-overview-loading" />
+  if (data.architecture.length === 0) return <EmptyState variant="empty" testId="home-overview-empty" />
   const c = data.counters
   const archLabel: Record<string, string> = {
     dashboard: t.home.archDashboard, orchestrator: t.home.archOrchestrator, profiles: t.home.archProfiles, results: t.home.archResults,
@@ -71,7 +74,7 @@ export function HomeOverview() {
 
 export function ProjectTimeline({ projectId }: { projectId: string | null }) {
   const { t, formatNumber } = useI18n()
-  const { data } = useLoad<any>(projectId ? `/projects/${projectId}/timeline` : null, TASK_EVENTS)
+  const { data, error, reload } = useLoad<any>(projectId ? `/projects/${projectId}/timeline` : null, TASK_EVENTS)
   const labels: Record<string, string> = {
     request: t.home.stepRequest, analyze_split: t.home.stepAnalyze, distribute: t.home.stepDistribute, execute: t.home.stepExecute,
     collect: t.home.stepCollect, pull_request: t.home.stepPr, review_merge: t.home.stepReview, completed: t.home.stepCompleted,
@@ -84,8 +87,14 @@ export function ProjectTimeline({ projectId }: { projectId: string | null }) {
   }
   return <Card data-testid="project-timeline">
     <h3 className="mb-2 text-sm font-semibold text-white">{t.home.timeline}{data ? ` — ${data.project_name}` : ''}</h3>
-    {!projectId && <p className="text-xs text-slate-400">{t.home.noProject}</p>}
-    {Array.isArray(data?.steps) && <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+    {error ? (
+      <EmptyState variant="error" onRetry={reload} testId="project-timeline-error" />
+    ) : !projectId ? (
+      <p className="text-xs text-slate-400">{t.home.noProject}</p>
+    ) : !Array.isArray(data?.steps) || data.steps.length === 0 ? (
+      <EmptyState variant="empty" testId="project-timeline-empty" />
+    ) : (
+      <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
       {data.steps.map((s: any) => <li key={s.id} data-testid={`step-${s.id}`} data-state={s.state} className={`rounded-lg border p-2 text-start text-xs ${tone[s.state]}`}>
         <div className="font-medium">{labels[s.id]}</div>
         <div className="mt-1 flex items-center justify-between gap-1">
@@ -93,7 +102,8 @@ export function ProjectTimeline({ projectId }: { projectId: string | null }) {
           {s.total > 0 && <span dir="ltr">{formatNumber(s.done)}/{formatNumber(s.total)}</span>}
         </div>
       </li>)}
-    </ol>}
+    </ol>
+    )}
   </Card>
 }
 
@@ -101,7 +111,7 @@ export function ProjectTimeline({ projectId }: { projectId: string | null }) {
 
 export function EmployeeCards() {
   const { t } = useI18n()
-  const { data, reload } = useLoad<any>('/dashboard/employees', TASK_EVENTS)
+  const { data, error: loadError, reload } = useLoad<any>('/dashboard/employees', TASK_EVENTS)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const act = async (id: string, fn: () => Promise<unknown>) => {
@@ -110,7 +120,12 @@ export function EmployeeCards() {
   }
   return <section data-testid="employee-cards" className="space-y-2">
     <h3 className="text-sm font-semibold text-white">{t.home.employees}</h3>
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+    {loadError ? (
+      <EmptyState variant="error" onRetry={reload} testId="employee-cards-error" />
+    ) : (Array.isArray(data?.employees) && data.employees.length === 0) ? (
+      <EmptyState variant="empty" testId="employee-cards-empty" />
+    ) : (
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       {(Array.isArray(data?.employees) ? data.employees : []).map((e: any) => <Card key={e.id} className="space-y-1" >
         <div data-testid={`employee-${e.id}`} className="space-y-1 border-s-4 ps-2" style={{ borderInlineStartColor: e.color }}>
           <div className="flex items-center justify-between gap-2">
@@ -136,6 +151,7 @@ export function EmployeeCards() {
         </div>
       </Card>)}
     </div>
+    )}
     {error && <p className="text-xs text-red-300">{error}</p>}
   </section>
 }
@@ -145,9 +161,12 @@ export function EmployeeCards() {
 export function LiveAgentLog({ max = 200 }: { max?: number }) {
   const { t } = useI18n()
   const [entries, setEntries] = useState<any[]>([])
-  useEffect(() => {
-    apiFetch<any>('/dashboard/agent-log?limit=100').then((d) => setEntries(Array.isArray(d?.entries) ? d.entries : [])).catch(() => setEntries([]))
+  const [error, setError] = useState(false)
+  const load = React.useCallback(() => {
+    setError(false)
+    apiFetch<any>('/dashboard/agent-log?limit=100').then((d) => setEntries(Array.isArray(d?.entries) ? d.entries : [])).catch(() => setError(true))
   }, [])
+  useEffect(() => { load() }, [load])
   const onEvent = React.useCallback((ev: any) => {
     if (ev?.type !== 'agent.iteration') return
     const p = ev.payload || {}
@@ -162,7 +181,11 @@ export function LiveAgentLog({ max = 200 }: { max?: number }) {
       <h3 className="flex items-center gap-1 text-sm font-semibold text-white"><Activity className="h-4 w-4" />{t.home.agentLog}</h3>
       <Badge variant="info">{t.home.logLive}</Badge>
     </div>
-    {entries.length === 0 && <p className="text-xs text-slate-400">{t.home.logEmpty}</p>}
+    {error ? (
+      <EmptyState variant="error" onRetry={load} testId="agent-log-error" />
+    ) : entries.length === 0 ? (
+      <EmptyState variant="empty" testId="agent-log-empty" />
+    ) : null}
     <ul role="log" aria-live="polite" className="max-h-72 space-y-1 overflow-y-auto font-mono text-xs" dir="ltr">
       {entries.map((e, i) => <li key={i} className={e.failed ? 'text-red-300' : 'text-slate-300'}>
         <span className="text-indigo-300">[{e.agent_id}]</span> {e.summary}
@@ -175,7 +198,7 @@ export function LiveAgentLog({ max = 200 }: { max?: number }) {
 
 export function PullRequestsView({ projectId }: { projectId?: string | null }) {
   const { t } = useI18n()
-  const { data: raw, reload } = useLoad<any[]>(projectId ? `/reviews/pull-requests?project_id=${projectId}` : '/reviews/pull-requests', TASK_EVENTS)
+  const { data: raw, error: loadError, reload } = useLoad<any[]>(projectId ? `/reviews/pull-requests?project_id=${projectId}` : '/reviews/pull-requests', TASK_EVENTS)
   const data = Array.isArray(raw) ? raw : []
   const [diff, setDiff] = useState<{ task: string; text: string | null } | null>(null)
   const [error, setError] = useState('')
@@ -191,7 +214,11 @@ export function PullRequestsView({ projectId }: { projectId?: string | null }) {
   }
   return <Card data-testid="pr-view" className="space-y-2">
     <h3 className="flex items-center gap-1 text-sm font-semibold text-white"><GitPullRequest className="h-4 w-4" />{t.home.pullRequests}</h3>
-    {data.length === 0 && <p className="text-xs text-slate-400">{t.home.noPrs}</p>}
+    {loadError ? (
+      <EmptyState variant="error" onRetry={reload} testId="pr-view-error" />
+    ) : data.length === 0 ? (
+      <EmptyState variant="empty" testId="pr-view-empty" />
+    ) : null}
     {data.map((pr: any) => {
       const approved = (pr.merge_approvals || []).find((a: any) => a.status === 'approved')
       const pending = (pr.merge_approvals || []).find((a: any) => a.status === 'pending')
@@ -226,12 +253,13 @@ export function PullRequestsView({ projectId }: { projectId?: string | null }) {
 
 export function RecoveryPanel() {
   const { t } = useI18n()
-  const { data, reload } = useLoad<any>('/dashboard/recovery', TASK_EVENTS)
+  const { data, error, reload } = useLoad<any>('/dashboard/recovery', TASK_EVENTS)
   const resume = async (profileId: string) => {
     await apiFetch(`/arena/profiles/${profileId}/resume`, { method: 'POST' }).catch(() => undefined)
     await reload()
   }
-  if (!data || !['failed_tasks', 'retried_tasks', 'blocked_tasks', 'replacements', 'needs_human'].every((k) => Array.isArray(data[k]))) return null
+  if (error) return <EmptyState variant="error" onRetry={reload} testId="recovery-panel-error" />
+  if (!data || !['failed_tasks', 'retried_tasks', 'blocked_tasks', 'replacements', 'needs_human'].every((k) => Array.isArray(data[k]))) return <EmptyState variant="loading" testId="recovery-panel-loading" />
   const empty = !data.failed_tasks.length && !data.retried_tasks.length && !data.blocked_tasks.length && !data.replacements.length && !data.needs_human.length
   const rows = (title: string, items: any[]) => items.length > 0 && <div>
     <p className="text-xs font-medium text-slate-300">{title} ({items.length})</p>

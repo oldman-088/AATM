@@ -716,6 +716,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
         kpis: {
           active_workers: 0,
           idle_workers: 3,
+          total_agents: 3,
           completion_rate: 0,
           healthy_providers: 0,
           total_providers: 3,
@@ -758,6 +759,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
         kpis: {
           active_workers: 0,
           idle_workers: 4,
+          total_agents: 4,
           completion_rate: 0,
           healthy_providers: 0,
           total_providers: 3,
