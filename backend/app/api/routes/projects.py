@@ -1,17 +1,16 @@
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.api.deps import get_current_user, require_role
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.git_workflows.manager import PROTECTED_BRANCHES, git_workflow_manager
 from app.memory.engine import memory_engine
-from app.models import AuditLog, GitWorkflowRecord, MemoryEntry, Project, User
+from app.models import Agent, AuditLog, GitWorkflowRecord, MemoryEntry, Project, User
 from app.schemas.common import GitWorkflowCreate, MemoryCreate, ProjectCreate, ProjectUpdate
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["projects-memory-git"], dependencies=[Depends(get_current_user)])
 
@@ -121,6 +120,15 @@ async def update_project(
         cfg["worktree_mode"] = body.worktree_mode
     if body.auto_pr is not None:
         cfg["auto_pr"] = body.auto_pr
+    if body.team is not None:
+        team = list(dict.fromkeys(body.team))
+        known = set((await db.execute(select(Agent.id).where(Agent.role == "worker", Agent.id.in_(team)))).scalars())
+        unknown = [worker for worker in team if worker not in known]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Unknown worker ids: {', '.join(unknown)}")
+        cfg["team"] = team
+    if body.test_command is not None:
+        cfg["test_command"] = body.test_command.strip()
     proj.config = cfg
     db.add(AuditLog(actor=user.email, action="project.update", resource_type="project", resource_id=proj.id, details=body.model_dump(exclude_none=True)))
     await db.commit()

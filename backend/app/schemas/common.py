@@ -54,6 +54,9 @@ class ProjectUpdate(BaseModel):
     default_branch: str | None = None
     worktree_mode: bool | None = None
     auto_pr: bool | None = None
+    # Worker ids the manager may plan for ([] = every enabled worker).
+    team: list[str] | None = Field(default=None, max_length=50)
+    test_command: str | None = Field(default=None, max_length=500)
 
 
 class EmployeeCreate(BaseModel):
