@@ -198,7 +198,6 @@ async def test_long_generation_counts_as_progress_only_while_the_transcript_chan
     session = SimpleNamespace(id="s", profile_id="p", events=[])
     reference = datetime(2026, 11, 18, 11, 0)
     assert await runner._page_progressed(session, reference) is False  # no earlier mark: a real stall still stops
-    pages.insert(0, (5, 10))
     await runner._note_page_mark(session, reference)
     assert await runner._page_progressed(session, reference) is True
     session.events[-1]["detail"] = "6:10"
