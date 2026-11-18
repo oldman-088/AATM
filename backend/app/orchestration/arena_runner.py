@@ -591,6 +591,11 @@ class ArenaAgentRunner:
                 session.last_state_change_at = _now()  # a long turn keeps "generating" while it really works
                 await db.commit()
                 return {"phase": session.phase, "page": page}
+            if page == "generating" and session.pr_number and await self._report_on_page(session):
+                # The page still shows Stop, but the work is done: a PR exists and the report has not changed.
+                append_event(session, "finished_while_generating")
+                await self._close_feedback_once(session)
+                return await self._collect_report(db, session, parent, active, project)
             await self._block_needs_human(db, session, active, f"stalled: no Arena activity or new commits for {int(self.stall_minutes)} minutes")
             return {"phase": session.phase, "stalled": True}
 
@@ -714,6 +719,13 @@ class ArenaAgentRunner:
         if not skipped or skipped[-1].get("detail") != decision:
             append_event(session, "tool_limit_skipped", decision)
         return None, github
+
+    async def _report_on_page(self, session: ArenaSession) -> bool:
+        try:
+            return report_is_complete(str((await self.adapter.read_last_reply(session.profile_id)).get("text") or ""))
+        except ArenaAgentError as exc:
+            append_event(session, "read_reply_failed", exc.code)
+            return False
 
     async def _transcript_mark(self, session: ArenaSession) -> str | None:
         try:

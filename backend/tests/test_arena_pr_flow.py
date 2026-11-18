@@ -202,3 +202,38 @@ async def test_long_generation_counts_as_progress_only_while_the_transcript_chan
     assert await runner._page_progressed(session, reference) is True
     session.events[-1]["detail"] = "6:10"
     assert await runner._page_progressed(session, reference) is False
+
+
+@pytest.mark.parametrize(("reply", "reviewed"), [
+    ("AATM REPORT\nImplementation summary\nModified files\nCompleted requirements\nTests performed", True),
+    ("Still looking at the tests", False),
+])
+async def test_stuck_generating_page_with_pr_and_report_goes_to_review(monkeypatch, reply, reviewed):
+    runner = ArenaAgentRunner.__new__(ArenaAgentRunner)
+    adapter = _Adapter("generating")
+
+    async def _read(_profile):
+        return {"text": reply}
+
+    adapter.read_last_reply = _read
+    runner.adapter, runner.stall_minutes, runner._quiet_misses = adapter, 20, {}
+    outcome = []
+
+    async def _project(*_args):
+        return None
+
+    async def _collect(*_args):
+        outcome.append("review")
+        return {"phase": "reviewing"}
+
+    async def _block(*_args):
+        outcome.append("human")
+
+    runner._project, runner._collect_report, runner._block_needs_human = _project, _collect, _block
+    session = SimpleNamespace(id="s", task_id=TASK, active_task_id=TASK, profile_id="p", page_state="generating", pr_number=5,
+                              submitted_at=None, last_state_change_at=datetime(2020, 1, 1), events=[], recovery_count=0,
+                              phase="reporting", needs_human_reason=None, keep_working_count=0, updated_at=None)
+    monkeypatch.setattr(arena_runner, "apply_bridge_state", lambda *_args: False)
+    monkeypatch.setattr(arena_runner, "append_event", lambda s, kind, *_a, **_k: s.events.append({"kind": kind}))
+    await runner._tick_session(_Db(), session)
+    assert outcome == (["review"] if reviewed else ["human"]) and adapter.forbidden == []
