@@ -56,6 +56,8 @@ backend_healthy() {
 }
 
 
+"$ROOT_DIR/scripts/ubuntu/start-infra.sh"
+
 echo "[AATM] Running database migrations (alembic upgrade head)..."
 (cd "$ROOT_DIR/backend" && "$ROOT_DIR/.venv/bin/alembic" upgrade head)
 
