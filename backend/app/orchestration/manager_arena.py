@@ -140,6 +140,114 @@ class ManagerArenaError(RuntimeError):
         self.message = message
 
 
+# ------------------------------------------------------------------ E8: plan validation and policy
+MAX_TASKS_WITHOUT_DRAFT = 5      # more tasks than this: the owner approves the plan first
+MAX_TASKS_ONE_LINE = 3           # a one-line request gets 1-3 tasks at most
+CHAIN_SHARE = 0.5                # warn when more than this share of the tasks depend on one task
+
+PLANNING_RULES = (
+    "## Planning rules",
+    "- Plan independent tasks together. Leave depends_on empty unless a task needs another task's output.",
+    "- Add a dependency only when a task needs another task's output. Never chain tasks just to order them.",
+    "- Prefer few, larger tasks over many small ones.",
+    "- A one-line request gets 1 to 3 tasks at most.",
+    "- If the goal is unclear, set \"ambiguous\": true and ask the owner your question in summary_ar.",
+    "- Refuse goals about unauthorized scraping, surveillance or profiling of private people, or CAPTCHA / anti-bot bypass: return an empty tasks list and say why in summary_ar.",
+)
+
+# (pattern, reason key). Matched case-insensitively against the goal and every planned task.
+_POLICY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(scrap(e|es|ed|ing)|crawl(s|ed|ing)?|harvest)\b.{0,80}\b(private|personal|members?[- ]only|login|logged[- ]in|password|e-?mails?|phone numbers?|without (permission|consent|authori[sz]ation)|unauthori[sz]ed|rate[- ]limit)", re.I), "unauthorized_scraping"),
+    (re.compile(r"\b(private|personal|members?[- ]only|without (permission|consent)|unauthori[sz]ed)\b.{0,80}\b(scrap(e|es|ed|ing)|crawl(s|ed|ing)?)\b", re.I), "unauthorized_scraping"),
+    (re.compile(r"(سحب|استخراج|كشط)\s+(ال)?بيانات.{0,60}(الخاصة|الشخصية|بدون إذن)"), "unauthorized_scraping"),
+    (re.compile(r"\b(surveil(l)?ance|spy(ing)? on|stalk(ing)?|covertly (track|monitor))\b", re.I), "surveillance_or_profiling"),
+    (re.compile(r"\b(track|monitor|profil(e|ing)|follow|locate|find where)\s+(a |an |the |this |that |my |their )?(specific |private )?(person|people|individual|someone|employee|customer|user|somebody|him|her)\b", re.I), "surveillance_or_profiling"),
+    (re.compile(r"\b(solve|solving|bypass|bypassing|defeat|break|crack|circumvent|evade|get past|beat)\b.{0,40}\b(captcha|recaptcha|hcaptcha|anti[- ]?bot|bot[- ]detection)\b", re.I), "captcha_or_antibot_bypass"),
+    (re.compile(r"\b(captcha|recaptcha|hcaptcha|anti[- ]?bot)\b.{0,40}\b(bypass|solve|defeat|break|circumvent|evade|get past)\b", re.I), "captcha_or_antibot_bypass"),
+    (re.compile(r"(تجاوز|كسر|اكسر|تخطي)\s+(ال)?(كابتشا|حماية|الحماية)"), "captcha_or_antibot_bypass"),
+)
+
+POLICY_TEXT_AR = {
+    "unauthorized_scraping": "هذا الطلب يطلب جمع بيانات خاصة أو سحبها دون إذن، وهذا مرفوض.",
+    "surveillance_or_profiling": "هذا الطلب يطلب مراقبة أشخاص محددين أو تتبعهم أو تنميط هويتهم، وهذا مرفوض.",
+    "captcha_or_antibot_bypass": "هذا الطلب يطلب تجاوز CAPTCHA أو حماية مضادة للبوتات، وهذا مرفوض.",
+}
+POLICY_TEXT_EN = {
+    "unauthorized_scraping": "Refused: unauthorized scraping of private data.",
+    "surveillance_or_profiling": "Refused: surveillance or profiling of private people.",
+    "captcha_or_antibot_bypass": "Refused: CAPTCHA or anti-bot bypass.",
+}
+
+
+def policy_violation(text: str) -> str | None:
+    """The reason key when the text asks for something AATM will not plan (no tasks are created), else None."""
+    for pattern, reason in _POLICY_RULES:
+        if pattern.search(text or ""):
+            return reason
+    return None
+
+
+def validate_plan_graph(tasks: list[dict[str, Any]]) -> list[str]:
+    """Reject unknown dependencies, self-dependencies and cycles. An empty list means the graph is valid."""
+    count = len(tasks)
+    errors: list[str] = []
+    for index, task in enumerate(tasks):
+        for dep in task.get("depends_on") or []:
+            if not isinstance(dep, int) or isinstance(dep, bool) or dep < 0 or dep >= count:
+                errors.append(f"Task {index} depends on unknown task {dep}.")
+            elif dep == index:
+                errors.append(f"Task {index} depends on itself.")
+    if errors:
+        return errors
+    state = [0] * count  # 0 = unvisited, 1 = on the stack, 2 = done
+
+    def _has_cycle(index: int) -> bool:
+        if state[index] == 1:
+            return True
+        if state[index] == 2:
+            return False
+        state[index] = 1
+        if any(_has_cycle(dep) for dep in tasks[index].get("depends_on") or []):
+            return True
+        state[index] = 2
+        return False
+
+    if any(_has_cycle(index) for index in range(count)):
+        errors.append("The plan has a circular dependency between its tasks.")
+    return errors
+
+
+def plan_warnings(tasks: list[dict[str, Any]]) -> list[str]:
+    """Warn when more than half of the tasks depend on one task: the plan is a chain, not parallel work."""
+    count = len(tasks)
+    dependents: dict[int, int] = {}
+    for task in tasks:
+        for dep in set(task.get("depends_on") or []):
+            dependents[dep] = dependents.get(dep, 0) + 1
+    warnings: list[str] = []
+    for dep, n in sorted(dependents.items()):
+        if n > count * CHAIN_SHARE:
+            warnings.append(
+                f"{n} of {count} tasks depend on task {dep} ({tasks[dep]['title']}). "
+                "Check that each of them really needs that output; independent tasks should run in parallel."
+            )
+    return warnings
+
+
+def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool) -> list[str]:
+    """Why this plan needs the owner's approval before its tasks are created (empty: create directly)."""
+    reasons: list[str] = []
+    if len(tasks) > MAX_TASKS_WITHOUT_DRAFT:
+        reasons.append(f"The plan has {len(tasks)} tasks; more than {MAX_TASKS_WITHOUT_DRAFT} needs your approval.")
+    stripped = (goal or "").strip()
+    one_line = bool(stripped) and "\n" not in stripped and len(stripped) <= 160
+    if one_line and len(tasks) > MAX_TASKS_ONE_LINE:
+        reasons.append(f"A one-line request should give 1 to {MAX_TASKS_ONE_LINE} tasks; this plan has {len(tasks)}.")
+    if ambiguous:
+        reasons.append("The goal is ambiguous; confirm it before any task is created.")
+    return reasons
+
+
 def classify_owner_message(content: str, intent: str | None = None) -> tuple[str, str]:
     """(kind, text): status questions -> status, other questions -> chat, everything else is a goal -> plan.
 
@@ -334,6 +442,9 @@ class ManagerArenaRuntime:
         kind, text = classify_owner_message(content, intent)
         job = await self.enqueue(db, kind, project_id=project_id, text=text or content, chat_message_id=user_message_id,
                                  context={"gated_categories": sorted(gated_categories or [])})
+        refusal = policy_violation(text or content)
+        if kind == "plan" and refusal:
+            return await self._refuse(db, job, refusal)
         if kind == "plan" and (not project_id or await db.get(Project, project_id) is None):
             await self._finish(db, job, status="failed", error="no project selected")
             message = await self._reply(db, job, "اختر مشروعًا أولًا: الخطة تُنشئ مهام داخل مشروع، ولم يُرسل شيء إلى المدير.",
@@ -743,7 +854,8 @@ class ManagerArenaRuntime:
         if job.kind == "plan":
             if project is None:
                 return None
-            return build_manager_plan_prompt(job.request_text, project, team, await self._open_tasks(db, job.project_id))
+            prompt = build_manager_plan_prompt(job.request_text, project, team, await self._open_tasks(db, job.project_id))
+            return prompt + "\n" + "\n".join(PLANNING_RULES)
         if job.kind == "review":
             return await self._review_prompt(db, job, project, team)
         return None
@@ -772,7 +884,10 @@ class ManagerArenaRuntime:
         data = extract_manager_json(reply)
         if job.kind == "plan":
             known = {m["id"] for m in await self._team(db, job.project_id)}
-            return validate_manager_plan(data, known)
+            plan, error = validate_manager_plan(data, known)
+            if plan is not None and isinstance(data, dict) and data.get("ambiguous") is True:
+                plan["ambiguous"] = True
+            return plan, error
         return validate_manager_review(data)
 
     # ------------------------------------------------------------------ outcomes
@@ -810,14 +925,57 @@ class ManagerArenaRuntime:
             await self._apply_review(db, job, parsed, raw=raw)
 
     async def _apply_plan(self, db: AsyncSession, job: ManagerJob, plan: dict[str, Any], *, raw: str) -> None:
-        from app.orchestration.scheduler import task_scheduler
-
+        """Validate a model plan before any task exists: policy, graph, then draft-or-create (E8)."""
         gated = list((job.context or {}).get("gated_categories") or [])
         if gated:
             await self._finish(db, job, result={"plan": plan, "deferred": gated}, raw=raw)
             await self._reply(db, job, plan["summary_ar"] + "\n\nلم تُنشأ المهام: طلب عالي الخطورة ينتظر موافقة المالك.", plan=plan,
                               deferred=gated)
             return
+        planned_text = " ".join([job.request_text or ""] + [f"{t['title']} {t['description']}" for t in plan["tasks"]])
+        refusal = policy_violation(planned_text)
+        if refusal:
+            await self._refuse(db, job, refusal, raw=raw)
+            return
+        errors = validate_plan_graph(plan["tasks"])
+        if errors:
+            await self._finish(db, job, status="failed", error="invalid plan: " + " ".join(errors)[:400], raw=raw)
+            await self._reply(db, job, "الخطة مرفوضة لأن ترتيب مهامها غير صالح؛ لم تُنشأ أي مهام. " + " ".join(errors),
+                              failed=True, plan_errors=errors)
+            return
+        warnings = plan_warnings(plan["tasks"])
+        reasons = plan_draft_reasons(plan["tasks"], job.request_text or "", bool(plan.get("ambiguous")))
+        if reasons:
+            await self._make_draft(db, job, plan, raw=raw, warnings=warnings, reasons=reasons)
+            return
+        await self._create_plan_tasks(db, job, plan, raw=raw, warnings=warnings)
+
+    async def _refuse(self, db: AsyncSession, job: ManagerJob, reason: str, *, raw: str | None = None) -> ChatMessage:
+        """A goal the policy forbids: no tasks, the job fails with the reason, and the owner sees why."""
+        await self._finish(db, job, status="failed", error=f"policy: {reason}", raw=raw)
+        message = await self._reply(
+            db, job,
+            f"{POLICY_TEXT_AR[reason]} {POLICY_TEXT_EN[reason]} لم تُنشأ أي مهام.",
+            failed=True, policy=reason,
+        )
+        assert message is not None
+        return message
+
+    async def _make_draft(self, db: AsyncSession, job: ManagerJob, plan: dict[str, Any], *, raw: str | None,
+                          warnings: list[str], reasons: list[str]) -> None:
+        """Keep the plan as a draft: nothing is created until the owner approves, edits or rejects it."""
+        job.result = {**(job.result or {}), "draft": plan, "warnings": warnings, "draft_reasons": reasons}
+        await self._finish(db, job, status="draft", raw=raw)
+        lines = [plan["summary_ar"], "", "مسودة خطة بانتظار موافقتك (اعتماد / تعديل / رفض):"]
+        lines += [f"- {t['title']} ← {t['assignee']}" for t in plan["tasks"]]
+        lines += ["", "السبب: " + (" ".join(reasons) or "عُدّلت المسودة؛ اعتمدها لإنشاء المهام.")]
+        lines += [f"تحذير: {w}" for w in warnings]
+        await self._reply(db, job, "\n".join(lines), draft=True, draft_reasons=reasons, warnings=warnings, plan=plan)
+
+    async def _create_plan_tasks(self, db: AsyncSession, job: ManagerJob, plan: dict[str, Any], *, raw: str | None,
+                                 warnings: list[str]) -> list[Task]:
+        from app.orchestration.scheduler import task_scheduler
+
         team = {m["id"]: m for m in await self._team(db, job.project_id)}
         tasks: list[Task] = []
         for item in plan["tasks"]:
@@ -837,13 +995,54 @@ class ManagerArenaRuntime:
                             details={"title": task.title, "assignee": task.assigned_agent_id, "source": "manager_arena_plan",
                                      "manager_job_id": job.id}))
         await db.commit()
-        await self._finish(db, job, result={"task_ids": [t.id for t in tasks], "summary_ar": plan["summary_ar"]}, raw=raw)
+        await self._finish(db, job, result={"task_ids": [t.id for t in tasks], "summary_ar": plan["summary_ar"],
+                                            "warnings": warnings}, raw=raw)
         lines = [plan["summary_ar"], ""] + [f"- {t.title} ← {t.assigned_agent_id}" for t in tasks]
-        await self._reply(db, job, "\n".join(lines), task_ids=[t.id for t in tasks], plan=plan)
+        lines += [f"تحذير: {w}" for w in warnings]
+        await self._reply(db, job, "\n".join(lines), task_ids=[t.id for t in tasks], plan=plan, warnings=warnings)
         for task in tasks:
             await event_bus.emit("task.created", {"task_id": task.id, "source": "manager_arena"})
         # Dispatch to the workers' Arena sessions through the existing R3 flow.
         await task_scheduler.run_orchestration_cycle(db)
+        return tasks
+
+    async def approve_draft(self, db: AsyncSession, job: ManagerJob) -> list[Task]:
+        """Owner approved the draft: create its tasks now (the same checks run again first)."""
+        if job.status != "draft" or not (job.result or {}).get("draft"):
+            raise ValueError("Only a draft plan can be approved.")
+        plan = job.result["draft"]
+        team_ids = {m["id"] for m in await self._team(db, job.project_id)}
+        missing = sorted({t["assignee"] for t in plan["tasks"]} - team_ids)
+        if missing:
+            raise ValueError(f"Assignees are no longer on the team: {', '.join(missing)}.")
+        return await self._create_plan_tasks(db, job, plan, raw=job.raw_reply, warnings=list((job.result or {}).get("warnings") or []))
+
+    async def edit_draft(self, db: AsyncSession, job: ManagerJob, data: dict[str, Any]) -> ManagerJob:
+        """Owner edited the draft: validate the new plan exactly like a model plan; it stays a draft."""
+        if job.status != "draft":
+            raise ValueError("Only a draft plan can be edited.")
+        known = {m["id"] for m in await self._team(db, job.project_id)}
+        plan, error = validate_manager_plan(data, known)
+        if plan is None:
+            raise ValueError(error)
+        if data.get("ambiguous") is True:
+            plan["ambiguous"] = True
+        refusal = policy_violation(" ".join([job.request_text or ""] + [f"{t['title']} {t['description']}" for t in plan["tasks"]]))
+        if refusal:
+            raise ValueError(POLICY_TEXT_EN[refusal])
+        errors = validate_plan_graph(plan["tasks"])
+        if errors:
+            raise ValueError(" ".join(errors))
+        await self._make_draft(db, job, plan, raw=job.raw_reply, warnings=plan_warnings(plan["tasks"]),
+                               reasons=plan_draft_reasons(plan["tasks"], job.request_text or "", bool(plan.get("ambiguous"))))
+        return job
+
+    async def reject_draft(self, db: AsyncSession, job: ManagerJob, *, actor: str) -> ManagerJob:
+        if job.status != "draft":
+            raise ValueError("Only a draft plan can be rejected.")
+        await self._finish(db, job, status="failed", error=f"draft rejected by {actor}")
+        await self._reply(db, job, "تم رفض المسودة؛ لم تُنشأ أي مهام.", failed=True)
+        return job
 
     async def _apply_review(self, db: AsyncSession, job: ManagerJob, verdict: dict[str, Any], *, raw: str) -> None:
         from app.orchestration.review import review_service

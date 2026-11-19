@@ -5,7 +5,7 @@ Arena Agent is the web coding agent that works directly on GitHub: it creates it
 session per employee through that employee's own Chrome profile (Tampermonkey userscript <-> local
 bridge). This adapter is the engine API the orchestrator (``app.orchestration.arena_runner``) uses:
 
-* ``new_session`` / ``submit`` / ``keep_working`` / ``read_last_reply`` / ``selector_test``;
+* ``new_session`` / ``submit`` / ``keep_working`` / ``stop`` / ``read_last_reply`` / ``selector_test``;
 * ``state`` / ``wait_for_state`` over the page states reported by the userscript;
 * ``generate`` runs one prompt as a complete session cycle (submit -> continue while Keep working is
   shown, within ``ARENA_AGENT_MAX_KEEP_WORKING`` where 0 = unlimited -> idle -> last reply).
@@ -30,7 +30,7 @@ from app.providers.base import (
     ProviderResponse,
 )
 
-COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
+COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "stop": 15.0, "read_last_reply": 20.0, "selector_test": 20.0}
 QUIET_STATES = {"idle", "ready"}
 MAX_REPLY_CHARS = 60_000
 
@@ -188,6 +188,13 @@ class ArenaAgentAdapter(BaseProviderAdapter):
 
     async def keep_working(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "keep_working")
+
+    async def stop(self, profile_id: str) -> dict[str, Any]:
+        """Stop an in-progress Arena generation after its task has been cancelled."""
+        result = await self.command(profile_id, "stop", timeout=COMMAND_TIMEOUTS["stop"])
+        if not result.get("stopped"):
+            raise ArenaAgentError("stop_failed", str(result.get("reason") or "Arena generation did not stop."))
+        return result
 
     async def transcript_mark(self, profile_id: str) -> dict[str, Any]:
         """Read-only fingerprint of the page, used to tell whether a prompt really reached it."""
