@@ -53,7 +53,7 @@ function applyFrame(previous: StationMap, frame: any, at: number): StationMap {
  * streaming code cannot trigger a render storm. When the tab is hidden the queue is left alone and
  * all CSS animations are paused by the root element class; the backlog is applied on return.
  */
-export function useBridgeFeed(agentIds: string[], demoMode = false) {
+export function useBridgeFeed(agentIds: string[]) {
   const [stations, setStations] = useState<StationMap>({})
   const queueRef = useRef<any[]>([])
   const hiddenRef = useRef(typeof document !== 'undefined' ? document.hidden : false)
@@ -68,8 +68,6 @@ export function useBridgeFeed(agentIds: string[], demoMode = false) {
 
   useEffect(() => {
     const onEvent = (event: Event) => {
-      // Demo frames come from `/demo/code-stream`; never mix them with real agent output.
-      if (demoMode) return
       const detail = (event as CustomEvent).detail
       if (!detail || detail.type !== 'agent.code') return
       const payload = detail.payload || {}
@@ -79,33 +77,7 @@ export function useBridgeFeed(agentIds: string[], demoMode = false) {
     }
     window.addEventListener(LIVE_EVENT, onEvent)
     return () => window.removeEventListener(LIVE_EVENT, onEvent)
-  }, [demoMode])
-
-  // Demo mode: poll the labelled scripted feed and push it through the same batch queue.
-  useEffect(() => {
-    if (!demoMode) return
-    let stopped = false
-    const pull = async () => {
-      try {
-        const payload = await apiFetch<any>('/demo/code-stream?limit=12')
-        if (stopped || !payload?.demo) return
-        const frames: any[] = []
-        for (const [agentId, list] of Object.entries(payload.agents || {})) {
-          for (const item of Array.isArray(list) ? list : []) frames.push({ ...(item as any), agent_id: agentId, demo: true })
-        }
-        queueRef.current.push(...frames)
-        if (queueRef.current.length > MAX_QUEUE) queueRef.current = queueRef.current.slice(-MAX_QUEUE)
-      } catch {
-        // The demo feed is optional; the bridge keeps rendering the real (empty) stations.
-      }
-    }
-    void pull()
-    const timer = window.setInterval(() => void pull(), 2500)
-    return () => {
-      stopped = true
-      window.clearInterval(timer)
-    }
-  }, [demoMode])
+  }, [])
 
   useEffect(() => {
     const timer = window.setInterval(() => {

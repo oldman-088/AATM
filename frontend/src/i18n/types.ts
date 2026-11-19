@@ -79,6 +79,11 @@ export interface Translations {
     liveConnected: string
     liveConnecting: string
     liveOffline: string
+    emptyTitle: string
+    emptyHint: string
+    errorTitle: string
+    errorHint: string
+    retry: string
   }
   dashboard: {
     title: string
@@ -99,6 +104,9 @@ export interface Translations {
     noModelBannerTitle: string
     noModelBannerText: string
     openSetupWizard: string
+    providersSublabel: string
+    profilesSublabel: string
+    approvalsSublabel: string
   }
   chat: {
     title: string
@@ -650,7 +658,5 @@ export interface Translations {
     connectorBusy: string
     connectorIdle: string
     connectorOffline: string
-    demoMode: string
-    demoHint: string
   }
 }

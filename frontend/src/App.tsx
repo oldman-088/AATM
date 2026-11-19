@@ -73,6 +73,7 @@ function AATMWorkspace() {
   const [authError, setAuthError] = useState<string | null>(null)
 
   const [overview, setOverview] = useState<any>(null)
+  const [errors, setErrors] = useState<Record<string, string | null>>({})
   const [agents, setAgents] = useState<any[]>([])
   const [templates, setTemplates] = useState<any[]>([])
   const [tasks, setTasks] = useState<any[]>([])
@@ -105,61 +106,74 @@ function AATMWorkspace() {
   }, [theme])
 
   const loadAll = useCallback(async (memQuery = '') => {
-    try {
-      const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, sp, ap, au, nf, mm] = await Promise.all([
-        apiFetch<any>('/dashboard/overview'),
-        apiFetch<any[]>('/agents'),
-        apiFetch<any[]>('/employees/templates'),
-        apiFetch<any[]>('/tasks'),
-        apiFetch<any[]>('/messages'),
-        apiFetch<any[]>('/projects'),
-        apiFetch<any[]>('/chat'),
-        apiFetch<any[]>('/browsers'),
-        apiFetch<any>('/browsers/capabilities'),
-        apiFetch<any[]>('/browsers/engines'),
-        apiFetch<any[]>('/userscripts'),
-        apiFetch<any[]>('/providers'),
-        apiFetch<any>('/providers/usage'),
-        apiFetch<any[]>('/accounts'),
-        apiFetch<any[]>('/sessions'),
-        apiFetch<any[]>('/devices'),
-        apiFetch<any>('/git/status'),
-        apiFetch<any>('/qa/summary'),
-        apiFetch<any>('/governance/security-posture').catch(() => null),
-        apiFetch<any[]>('/approvals'),
-        apiFetch<any[]>('/audit'),
-        apiFetch<any[]>('/notifications'),
-        apiFetch<any[]>(`/memory?q=${encodeURIComponent(memQuery)}`),
-      ])
-      setOverview(ov)
-      setAgents(ag)
-      setTemplates(tpl)
-      setTasks(tk)
-      setAgentMessages(am)
-      setProjects(pr)
-      if (!activeProjectId && pr.length > 0) setActiveProjectId(pr[0].id)
-      setChatMessages(ch)
-      setBrowsers(br)
-      setBrowserCaps(bc)
-      setBrowserEngines(be)
-      setUserscripts(us)
-      setProviders(pv)
-      setProviderUsage(pu)
-      setAccounts(ac)
-      setSessions(ss)
-      setDevices(dv)
-      setGitData(gt)
-      setQaData(qa)
-      setSecurityPosture(sp)
-      setApprovals(ap)
-      setAuditLogs(au)
-      setNotifications(nf)
-      setMemories(mm)
-      setErrorBanner(null)
-    } catch (err: any) {
-      setErrorBanner(err?.message || t.common.loadFailed)
+    // Load each dataset independently so one failing endpoint never blanks the
+    // others. Per-dataset errors are tracked so each page can render a clear
+    // Arabic error state instead of a silent loading placeholder.
+    const nextErrors: Record<string, string | null> = {}
+    const track = async <T,>(key: string, run: () => Promise<T>, fallback: T): Promise<T> => {
+      try {
+        const value = await run()
+        nextErrors[key] = null
+        return value
+      } catch (err: any) {
+        nextErrors[key] = err?.message || t.common.loadFailed
+        return fallback
+      }
     }
-  }, [activeProjectId])
+
+    const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, sp, ap, au, nf, mm] = await Promise.all([
+      track('overview', () => apiFetch<any>('/dashboard/overview'), null),
+      track('agents', () => apiFetch<any[]>('/agents'), []),
+      track('templates', () => apiFetch<any[]>('/employees/templates'), []),
+      track('tasks', () => apiFetch<any[]>('/tasks'), []),
+      track('messages', () => apiFetch<any[]>('/messages'), []),
+      track('projects', () => apiFetch<any[]>('/projects'), []),
+      track('chat', () => apiFetch<any[]>('/chat'), []),
+      track('browsers', () => apiFetch<any[]>('/browsers'), []),
+      track('browserCaps', () => apiFetch<any>('/browsers/capabilities'), null),
+      track('browserEngines', () => apiFetch<any[]>('/browsers/engines'), []),
+      track('userscripts', () => apiFetch<any[]>('/userscripts'), []),
+      track('providers', () => apiFetch<any[]>('/providers'), []),
+      track('providerUsage', () => apiFetch<any>('/providers/usage'), null),
+      track('accounts', () => apiFetch<any[]>('/accounts'), []),
+      track('sessions', () => apiFetch<any[]>('/sessions'), []),
+      track('devices', () => apiFetch<any[]>('/devices'), []),
+      track('git', () => apiFetch<any>('/git/status'), null),
+      track('qa', () => apiFetch<any>('/qa/summary'), null),
+      track('securityPosture', () => apiFetch<any>('/governance/security-posture'), null),
+      track('approvals', () => apiFetch<any[]>('/approvals'), []),
+      track('audit', () => apiFetch<any[]>('/audit'), []),
+      track('notifications', () => apiFetch<any[]>('/notifications'), []),
+      track('memory', () => apiFetch<any[]>(`/memory?q=${encodeURIComponent(memQuery)}`), []),
+    ])
+    setErrors(nextErrors)
+    setOverview(ov)
+    setAgents(ag)
+    setTemplates(tpl)
+    setTasks(tk)
+    setAgentMessages(am)
+    setProjects(pr)
+    if (!activeProjectId && pr.length > 0) setActiveProjectId(pr[0].id)
+    setChatMessages(ch)
+    setBrowsers(br)
+    setBrowserCaps(bc)
+    setBrowserEngines(be)
+    setUserscripts(us)
+    setProviders(pv)
+    setProviderUsage(pu)
+    setAccounts(ac)
+    setSessions(ss)
+    setDevices(dv)
+    setGitData(gt)
+    setQaData(qa)
+    setSecurityPosture(sp)
+    setApprovals(ap)
+    setAuditLogs(au)
+    setNotifications(nf)
+    setMemories(mm)
+    const failed = Object.entries(nextErrors).filter(([, v]) => v).map(([k]) => k)
+    setErrorBanner(failed.length ? t.common.loadFailed : null)
+  }, [activeProjectId, t.common.loadFailed])
 
   const loadAllRef = useRef(loadAll)
   loadAllRef.current = loadAll
@@ -580,6 +594,7 @@ function AATMWorkspace() {
           {tab === 'dashboard' && (
             <DashboardView
               overview={overview}
+              error={errors.overview}
               onRefresh={() => loadAll()}
               onRunCycle={() => apiFetch('/orchestration/cycle', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
               onSelfHeal={() => apiFetch('/qa/self-heal', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
@@ -587,19 +602,19 @@ function AATMWorkspace() {
             />
           )}
           {tab === 'chat' && (
-            <ManagerChatView messages={chatMessages} projectId={activeProjectId} onReload={() => loadAll()} />
+            <ManagerChatView messages={chatMessages} projectId={activeProjectId} error={errors.chat} onReload={() => loadAll()} />
           )}
           {tab === 'agents' && (
             <div className="space-y-6">
               <TeamScalingPanel onReload={() => loadAll()} />
               <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={() => loadAll()} />
-              <AgentsView agents={agents} providers={providers} onReload={() => loadAll()} />
+              <AgentsView agents={agents} providers={providers} error={errors.agents} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'tasks' && (
             <div className="space-y-6">
               <AgentMessagingPanel agents={agents} messages={agentMessages} projectId={activeProjectId} onReload={() => loadAll()} />
-              <TasksView tasks={tasks} projectId={activeProjectId} onReload={() => loadAll()} />
+              <TasksView tasks={tasks} projectId={activeProjectId} error={errors.tasks} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'workspaces' && <WorkspacesView agents={agents} />}
@@ -608,12 +623,12 @@ function AATMWorkspace() {
               <ArenaAgentDashboard />
               <ArenaConnectorPanel />
               <UserscriptsEnginesPanel engines={browserEngines} userscripts={userscripts} onReload={() => loadAll()} />
-              <BrowserWallView browsers={browsers} capabilities={browserCaps} onReload={() => loadAll()} />
+              <BrowserWallView browsers={browsers} capabilities={browserCaps} error={errors.browsers} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'providers' && (
             <div className="space-y-6">
-              <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} onReload={() => loadAll()} />
+              <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} error={errors.providers} onReload={() => loadAll()} />
               <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
             </div>
           )}
@@ -632,23 +647,24 @@ function AATMWorkspace() {
           {tab === 'git' && (
             <div className="space-y-6">
               <PullRequestsView projectId={activeProjectId} />
-              <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} onReload={() => loadAll()} />
+              <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} error={errors.git} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'qa' && (
             <div className="space-y-6">
-              <QAView qaData={qaData} securityPosture={securityPosture} onReload={() => loadAll()} />
+              <QAView qaData={qaData} securityPosture={securityPosture} error={errors.qa} onReload={() => loadAll()} />
               <MultiDeviceNodesPanel devices={devices} onReload={() => loadAll()} />
               <PromptInjectionGuardPanel />
             </div>
           )}
           {tab === 'approvals' && (
-            <ApprovalsAuditView approvals={approvals} auditLogs={auditLogs} onReload={() => loadAll()} />
+            <ApprovalsAuditView approvals={approvals} auditLogs={auditLogs} error={errors.approvals} onReload={() => loadAll()} />
           )}
           {tab === 'settings' && (
             <SettingsNotificationsView
               notifications={notifications}
               theme={theme}
+              error={errors.notifications}
               onToggleTheme={handleThemeToggle}
               onChangeLanguage={handleLanguageChange}
               onReload={() => loadAll()}

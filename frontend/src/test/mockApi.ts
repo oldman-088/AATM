@@ -32,6 +32,9 @@ export const fixtures: Record<string, RouteValue> = {
     kpis: {
       active_workers: 2,
       idle_workers: 1,
+      total_agents: 4,
+      total_tasks: 10,
+      completed_tasks: 8,
       completion_rate: 87,
       healthy_providers: 2,
       total_providers: 2,

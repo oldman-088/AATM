@@ -165,7 +165,9 @@ test('390×844 shows the station cards on screen', async ({ page }) => {
   await page.screenshot({ path: '../docs/design/bridge-mobile-focus-390x844-ar.png' })
 })
 
-test('demo mode is clearly badged and renders the scripted feed', async ({ page }) => {
+test('never badges demo mode or renders the scripted feed, even when the backend reports it', async ({ page }) => {
+  // The demo code-stream and its badge are display-fake surfaces and are removed.
+  // Even if the backend still advertises demo_mode, the bridge must not render it.
   await mockApi(page, {
     '/api/health': {
       status: 'ok',
@@ -191,8 +193,7 @@ test('demo mode is clearly badged and renders the scripted feed', async ({ page 
     },
   })
   await page.goto('/')
-  await expect(page.getByTestId('bridge-demo-chip')).toBeVisible()
-  await expect(page.getByTestId('bridge-demo-chip')).toHaveText('وضع العرض')
-  await expect(page.getByTestId('bridge-screen-worker-1')).toContainText('demo_frame')
-  await page.screenshot({ path: '../docs/design/bridge-demo-1440x900-ar.png' })
+  await expect(page.getByTestId('command-bridge')).toBeVisible()
+  await expect(page.getByTestId('bridge-demo-chip')).toHaveCount(0)
+  await expect(page.getByTestId('bridge-screen-worker-1')).not.toContainText('demo_frame')
 })
