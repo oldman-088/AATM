@@ -2,6 +2,7 @@
 
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
@@ -15,7 +16,7 @@ from app.employees.catalog import (
 from app.models import (
     User,
 )
-from app.orchestration.replacement import replacement_service
+from app.orchestration.replacement import NoFreeWorkerError, replacement_service
 from app.schemas.common import (
     EmployeeCreate,
     EmployeeSkillGapRequest,
@@ -109,5 +110,29 @@ async def replace_employee_endpoint(
 ):
     try:
         return await replacement_service.replace_employee(db, agent_id, reason=reason, actor=user.email)
+    except NoFreeWorkerError as exc:
+        # 409: the request is valid, but there is no free worker to take over (the manager never does).
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": " / ".join(exc.messages.values()),
+                "code": "no_free_worker",
+                "agent_id": exc.failing_agent_id,
+                "messages": exc.messages,
+            },
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/employees/requeue-manager-tasks", dependencies=[Depends(require_role("admin", "operator"))])
+async def requeue_manager_tasks_endpoint(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Move the tasks assigned to the manager back to `queued` so a worker can pick them up.
+
+    Explicit operator command: it is never run automatically by the scheduler, the QA engine or
+    the Arena runner. It reports how many tasks were moved back to the queue.
+    """
+    return await replacement_service.requeue_manager_tasks(db, actor=user.email)

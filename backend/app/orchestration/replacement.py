@@ -126,6 +126,35 @@ def copy_workspace_handoff(source_agent_id: str, recipient_agent_id: str) -> tup
 # inspects "in_progress" tasks.
 EMERGENCY_STOP_MARKER = "Emergency stop"
 
+# The manager plans, reviews and coordinates; it never executes implementation work, so it is
+# never a replacement candidate. A replacement must also be *free* (idle): a busy worker cannot
+# start the task it would inherit and the scheduler only dispatches to idle workers.
+REPLACEMENT_EXCLUDED_ROLES = ("manager",)
+FREE_AGENT_STATUSES = ("idle",)
+MANAGER_AGENT_ID = "manager-0"
+
+# Task states that are finished for good: they are never requeued.
+FINISHED_TASK_STATUSES = frozenset({"completed", "done", "merged", "cancelled", "failed"})
+
+# The refusal is shown to the operator in the three supported languages.
+NO_FREE_WORKER_MESSAGES: dict[str, str] = {
+    "en": ("No free worker is available to take over this employee's tasks. "
+           "The manager never executes implementation work: free a worker or retry later."),
+    "ar": ("لا يوجد عامل متاح لتوليد مهام هذا الموظف. "
+           "لا ينفّذ المدير مهام التنفيذ: أفرِغ أحد العمال أو أعد المحاولة لاحقًا."),
+    "fa": ("هیچ کارگر آزادی برای انجام کارهای این کارمند وجود ندارد. "
+           "مدیر هرگز کارهای اجرایی را انجام نمی‌دهد: یک کارگر را آزاد کنید یا بعداً دوباره تلاش کنید."),
+}
+
+
+class NoFreeWorkerError(ValueError):
+    """Raised when no free (idle, non-manager) employee can take over the failing employee's work."""
+
+    def __init__(self, failing_agent_id: str) -> None:
+        self.failing_agent_id = failing_agent_id
+        self.messages: dict[str, str] = dict(NO_FREE_WORKER_MESSAGES)
+        super().__init__(NO_FREE_WORKER_MESSAGES["en"])
+
 
 class ReplacementAndEmergencyService:
     """Smart Employee Replacement & Scoped/Global Emergency Stop."""
@@ -146,12 +175,14 @@ class ReplacementAndEmergencyService:
                 Agent.id != failing_agent_id,
                 Agent.is_enabled.is_(True),
                 Agent.is_emergency_stopped.is_(False),
-                Agent.status.in_(["idle", "working"]),
+                Agent.role.notin_(REPLACEMENT_EXCLUDED_ROLES),
+                Agent.status.in_(FREE_AGENT_STATUSES),
             )
         )
         candidates = list(candidates_res.scalars().all())
         if not candidates:
-            raise ValueError("No healthy replacement employee available.")
+            # No worker is free: refuse instead of falling back to the manager.
+            raise NoFreeWorkerError(failing_agent_id)
 
         failing_skills = set(failing.skills or [])
         failing_divs = set(failing.divisions or [])
@@ -159,9 +190,8 @@ class ReplacementAndEmergencyService:
         def score(cand: Agent) -> tuple[int, int]:
             skill_overlap = len(failing_skills & set(cand.skills or []))
             div_overlap = len(failing_divs & set(cand.divisions or []))
-            idle_bonus = 2 if cand.status == "idle" else 0
             # performance_score is a legacy default, not measured telemetry.
-            return (skill_overlap + div_overlap + idle_bonus, -cand.tasks_failed)
+            return (skill_overlap + div_overlap, -cand.tasks_failed)
 
         replacement = max(candidates, key=score)
 
@@ -279,6 +309,64 @@ class ReplacementAndEmergencyService:
             "stopped_browsers": stopped_browsers,
             "worktree_cleanup": worktree_cleanup,
         }
+
+    async def requeue_manager_tasks(
+        self,
+        db: AsyncSession,
+        *,
+        actor: str = "admin@aatm.local",
+        agent_id: str = MANAGER_AGENT_ID,
+    ) -> dict[str, Any]:
+        """Move the tasks the manager holds back to the queue so that a worker can pick them up.
+
+        The manager plans and coordinates; it must not keep implementation tasks assigned to it.
+        This is an explicit operator command (see `POST /employees/requeue-manager-tasks`):
+        nothing in the scheduler, the QA engine or the Arena runner calls it automatically.
+        """
+        res = await db.execute(
+            select(Task).where(
+                Task.assigned_agent_id == agent_id,
+                Task.status.notin_(FINISHED_TASK_STATUSES),
+            )
+        )
+        tasks = list(res.scalars().all())
+        requeued: list[str] = []
+        for task in tasks:
+            task.status = "queued"
+            task.assigned_agent_id = None
+            task.lock_owner = None
+            task.locked_at = None
+            task.error_message = None
+            task.checkpoints = list(task.checkpoints or []) + [
+                {
+                    "ts": utcnow().isoformat(),
+                    "event": "manager_task_requeued",
+                    "actor": actor,
+                    "from_agent_id": agent_id,
+                }
+            ]
+            requeued.append(task.id)
+
+        manager = await db.get(Agent, agent_id)
+        if manager is not None and manager.current_task_id in requeued:
+            manager.current_task_id = None
+            if manager.status == "working":
+                manager.status = "idle"
+
+        if requeued:
+            db.add(
+                AuditLog(
+                    actor=actor,
+                    action="tasks.manager_requeued",
+                    resource_type="agent",
+                    resource_id=agent_id,
+                    details={"requeued_tasks": requeued, "count": len(requeued)},
+                    severity="warning",
+                )
+            )
+            await db.commit()
+            logger.info("Requeued %d task(s) from %s back to the queue", len(requeued), agent_id)
+        return {"agent_id": agent_id, "requeued": len(requeued), "task_ids": requeued}
 
     async def _ensure_replacement_session(
         self,
