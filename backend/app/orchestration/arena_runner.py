@@ -34,6 +34,7 @@ from app.browser.arena_sessions import (
     close_session,
     session_for_task,
 )
+from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
@@ -75,6 +76,10 @@ logger = logging.getLogger(__name__)
 
 MONITORED_PHASES = {"working", "correcting", "reporting"}
 RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starting", "submitting", "needs_human"}
+# Sessions that wait for a human decision: they are not monitored any more, but their pull request
+# can still be merged or closed outside AATM, so its state is polled separately.
+PR_STATE_PHASES = ("reviewing", "awaiting_approval")
+PR_STATE_POLL_SECONDS = 300.0  # poll the PR state of those sessions every 5 minutes
 STALL_MINUTES = 20
 NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is escalated to the owner
 AGENT_ACTIVE_STATES = {"generating", "keep_working_visible", "tool_call_limit", "pr_ready"}
@@ -166,7 +171,12 @@ class ArenaAgentRunner:
         self.adapter = adapter or ArenaAgentAdapter()
         self.github_poll_seconds = 30.0
         self.stall_minutes = float(STALL_MINUTES)
+        try:
+            self.pr_state_poll_seconds = float(get_settings().ARENA_PR_STATE_POLL_SECONDS)
+        except Exception:  # noqa: BLE001 - the default interval is used when settings are unavailable
+            self.pr_state_poll_seconds = float(PR_STATE_POLL_SECONDS)
         self._github_checked: dict[str, float] = {}
+        self._pr_state_checked: dict[str, float] = {}
         self._quiet_misses: dict[str, int] = {}
         # R4 live code: per session, the last published head, publish time, file patch hashes and summary.
         self.live_code_seconds = LIVE_CODE_MIN_SECONDS
@@ -575,6 +585,127 @@ class ArenaAgentRunner:
             await self.publish_live_code(session, parent, project)
         return {"ok": True, "pr": pr}
 
+    # ------------------------------------------------------------------ PR state outside AATM
+    def _pr_state_due(self, session: ArenaSession, *, force: bool = False) -> bool:
+        """The PR state of a waiting session is polled every `pr_state_poll_seconds` (5 minutes)."""
+        # No entry yet means "never checked": a monotonic clock can be small on a freshly booted machine.
+        last = self._pr_state_checked.get(session.id)
+        if force or last is None or time.monotonic() - last >= self.pr_state_poll_seconds:
+            self._pr_state_checked[session.id] = time.monotonic()
+            return True
+        return False
+
+    async def poll_pr_states(self, db: AsyncSession, *, force: bool = False) -> dict[str, Any]:
+        """Watch the pull request of the sessions that wait for a human decision.
+
+        A PR merged outside AATM must still finish its task (merged, session closed, queued
+        correction rounds cancelled); a PR closed without merging blocks the task with a reason.
+        """
+        session_ids = list((await db.execute(
+            select(ArenaSession.id).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(PR_STATE_PHASES))
+        )).scalars())
+        results: dict[str, Any] = {}
+        for session_id in session_ids:
+            try:
+                session = await db.get(ArenaSession, session_id)  # re-loaded: a rollback expires earlier rows
+                if session is None or not session.is_open:
+                    continue
+                if not self._pr_state_due(session, force=force):
+                    continue
+                results[session_id] = await self._check_pr_state(db, session)
+            except Exception as exc:  # noqa: BLE001 - one broken session must not stop the others
+                logger.warning("PR state poll failed for session %s: %s", session_id, type(exc).__name__, exc_info=True)
+                await db.rollback()
+                results[session_id] = {"error": type(exc).__name__}
+        return results
+
+    async def _check_pr_state(self, db: AsyncSession, session: ArenaSession) -> dict[str, Any]:
+        """Read the PR state on GitHub and apply it to the task (merged / closed without merge)."""
+        parent = await db.get(Task, session.task_id) if session.task_id else None
+        if parent is None:
+            return {"skipped": "no task"}
+        if parent.status in {"merged", "done", "completed", "cancelled", "failed"}:
+            return {"skipped": "task already finished"}
+        project = await self._project(db, parent)
+        slug = repo_slug(project)
+        if not slug:
+            return {"ok": False, "reason": "project has no GitHub repository"}
+        found = await git_workflow_manager.find_task_pull_request(
+            repo_slug=slug, task_id=parent.id, cwd=project.repo_path if project else ".",
+        )
+        pr = found.get("pull_request") if found.get("ok") else None
+        if pr is None:
+            return {"ok": bool(found.get("ok")), "pr": None}
+        state = str(pr.get("state") or "").upper()
+        if state == "MERGED":
+            await self._pr_merged_outside(db, session, parent, pr)
+            return {"ok": True, "pr": pr, "merged": True}
+        if state == "CLOSED":
+            await self._pr_closed_without_merge(db, session, parent, pr)
+            return {"ok": True, "pr": pr, "closed": True}
+        return {"ok": True, "pr": pr, "state": state}
+
+    async def _pr_merged_outside(self, db: AsyncSession, session: ArenaSession, parent: Task, pr: dict[str, Any]) -> None:
+        """The PR was merged outside AATM: the task is merged, the session ends, corrections stop."""
+        reason = f"PR {pr.get('url')} was merged outside AATM."
+        append_event(session, "pr_merged_outside", reason)
+        parent.status = "merged"
+        parent.pr_status = "merged"
+        parent.progress_percent = 100
+        parent.lock_owner = None
+        parent.locked_at = None
+        parent.completed_at = parent.completed_at or _now()
+        parent.checkpoints = list(parent.checkpoints or []) + [
+            {"ts": _now().isoformat(), "event": "pr_merged_outside", "pr_url": pr.get("url"), "pr_number": pr.get("number")}
+        ]
+        cancelled = await self._cancel_queued_corrections(db, parent)
+        await close_session(db, session, phase="merged", reason=reason)
+        self._pr_state_checked.pop(session.id, None)
+        self._audit(db, "arena-runner", "arena.pr_merged_outside", parent,
+                    {"pr": pr.get("url"), "pr_number": pr.get("number"), "cancelled_corrections": cancelled})
+        await self._notify(db, "Pull request merged outside AATM", reason, severity="warning", link="/tasks")
+        await db.commit()
+        await event_bus.emit("task.updated", {"task_id": parent.id, "status": parent.status})
+
+    async def _cancel_queued_corrections(self, db: AsyncSession, parent: Task) -> list[str]:
+        """Cancel the correction rounds that are still queued for a merged pull request."""
+        res = await db.execute(
+            select(Task).where(
+                Task.parent_task_id == parent.id,
+                Task.task_type == "follow_up",
+                Task.status.in_(["queued", "assigned"]),
+            )
+        )
+        cancelled: list[str] = []
+        for follow_up in res.scalars().all():
+            follow_up.status = "cancelled"
+            follow_up.lock_owner = None
+            follow_up.locked_at = None
+            follow_up.checkpoints = list(follow_up.checkpoints or []) + [
+                {"ts": _now().isoformat(), "event": "cancelled_pr_merged_outside"}
+            ]
+            cancelled.append(follow_up.id)
+        return cancelled
+
+    async def _pr_closed_without_merge(self, db: AsyncSession, session: ArenaSession, parent: Task, pr: dict[str, Any]) -> None:
+        """The PR was closed without merging: the task is blocked and a human decides what happens next."""
+        reason = f"PR {pr.get('url')} was closed without being merged."
+        if any(e.get("kind") == "pr_closed_without_merge" for e in session.events or []):
+            return
+        append_event(session, "pr_closed_without_merge", reason)
+        parent.status = "blocked"
+        parent.error_message = reason
+        parent.lock_owner = None
+        parent.locked_at = None
+        parent.checkpoints = list(parent.checkpoints or []) + [
+            {"ts": _now().isoformat(), "event": "pr_closed_without_merge", "pr_url": pr.get("url"), "reason": reason}
+        ]
+        session.phase = "escalated"
+        self._audit(db, "arena-runner", "arena.pr_closed_without_merge", parent, {"pr": pr.get("url")})
+        await self._notify(db, "Pull request closed without merging", reason, severity="warning", link="/tasks")
+        await db.commit()
+        await event_bus.emit("task.updated", {"task_id": parent.id, "status": parent.status})
+
     # ------------------------------------------------------------------ R4 live code
     async def publish_live_code(self, session: ArenaSession, parent: Task, project: Project | None, *, force: bool = False) -> dict[str, Any]:
         """Stream the branch's changes against the base as redacted ``agent.code`` frames (throttled)."""
@@ -672,10 +803,13 @@ class ArenaAgentRunner:
     # ------------------------------------------------------------------ monitoring
     async def tick(self, db: AsyncSession) -> dict[str, Any]:
         """Advance every open Arena session one step (called each orchestration cycle)."""
+        results: dict[str, Any] = {}
+        # Sessions that wait for a human decision are not monitored any more, but their pull request
+        # can still be merged or closed outside AATM: poll its state (throttled to every 5 minutes).
+        results["pr_states"] = await self.poll_pr_states(db)
         session_ids = list((await db.execute(
             select(ArenaSession.id).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(MONITORED_PHASES))
         )).scalars())
-        results: dict[str, Any] = {}
         for session_id in session_ids:
             try:
                 session = await db.get(ArenaSession, session_id)  # re-loaded: a rollback expires earlier rows
