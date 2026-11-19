@@ -25,9 +25,22 @@ from app.models import (
     Userscript,
 )
 
+# Demo rows: the placeholder browser profiles, the Arena account, the sample userscript, the sample
+# task plan, the greeting, the sample approval/notification/git record. Only written when
+# SEED_DEMO_DATA=true. `remove_demo_data` deletes exactly these rows and nothing else.
+DEMO_PROFILE_IDS = frozenset({"profile-backend-docs", "profile-frontend-preview", "profile-qa-e2e"})
+DEMO_ACCOUNT_ID = "acct-arena-primary"
+DEMO_USERSCRIPT_ID = "us-aatm-telemetry"
+DEMO_GIT_BRANCH = "arena/b15bbe5c-aatm"
+DEMO_APPROVAL_TITLE = "Authorize Release Merge to Protected Branch `main`"
+DEMO_NOTIFICATION_TITLE = "AATM Four-Worker Team Ready"
+DEMO_TASK_SUFFIX = "core engineering deliverable for AATM."
+DEMO_GREETING_PREFIX = "Chief AI Engineering Manager online."
+
 
 async def seed_initial_data(db: AsyncSession) -> None:
     settings = get_settings()
+    demo = bool(settings.SEED_DEMO_DATA)
 
     # 1. Default Admin User & startup placeholder-password check
     user_res = await db.execute(select(User).where(User.email == settings.DEFAULT_ADMIN_EMAIL))
@@ -181,6 +194,8 @@ async def seed_initial_data(db: AsyncSession) -> None:
         )
     )
     for bp in profiles:
+        if bp.id in DEMO_PROFILE_IDS and not demo:
+            continue
         if not await db.get(BrowserProfile, bp.id):
             db.add(bp)
 
@@ -276,7 +291,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
 
     # 6. Initial Tasks covering all 12 Divisions
     existing_tasks = await db.execute(select(Task).limit(1))
-    if not existing_tasks.scalar_one_or_none():
+    if demo and not existing_tasks.scalar_one_or_none():
         division_tasks = [
             ("D01", "System Foundation & Shared Contracts", "worker-1", "completed", "critical", 100),
             ("D02", "FastAPI Core, SQLAlchemy Models, Auth & REST APIs", "worker-1", "completed", "critical", 100),
@@ -336,7 +351,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
     # language (AR/EN/FA) instead of the English text stored here. `content` stays as the fallback for
     # API consumers and for clients that do not resolve the key.
     existing_chat = await db.execute(select(ChatMessage).limit(1))
-    if not existing_chat.scalar_one_or_none():
+    if demo and not existing_chat.scalar_one_or_none():
         db.add(
             ChatMessage(
                 project_id=project.id,
@@ -376,7 +391,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             message.metadata_json = meta
 
     existing_git = await db.execute(select(GitWorkflowRecord).limit(1))
-    if not existing_git.scalar_one_or_none():
+    if demo and not existing_git.scalar_one_or_none():
         db.add(
             GitWorkflowRecord(
                 project_id=project.id,
@@ -392,7 +407,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
         )
 
     existing_app = await db.execute(select(ApprovalRequest).limit(1))
-    if not existing_app.scalar_one_or_none():
+    if demo and not existing_app.scalar_one_or_none():
         db.add(
             ApprovalRequest(
                 project_id=project.id,
@@ -407,7 +422,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
         )
 
     existing_notif = await db.execute(select(Notification).limit(1))
-    if not existing_notif.scalar_one_or_none():
+    if demo and not existing_notif.scalar_one_or_none():
         db.add(
             Notification(
                 category="orchestration",
@@ -464,7 +479,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             )
         )
 
-    if not await db.get(ProviderAccount, "acct-arena-primary"):
+    if demo and not await db.get(ProviderAccount, DEMO_ACCOUNT_ID):
         db.add(
             ProviderAccount(
                 id="acct-arena-primary",
@@ -484,14 +499,14 @@ async def seed_initial_data(db: AsyncSession) -> None:
         ag = await db.get(Agent, aid)
         if ag:
             ag.workspace_path = str(ws)
-            ag.provider_account_id = ag.provider_account_id or "acct-arena-primary"
-            if not ag.provider_session_id:
+            ag.provider_account_id = ag.provider_account_id or (DEMO_ACCOUNT_ID if demo else None)
+            if demo and not ag.provider_session_id:
                 sid = f"sess-{aid}"
                 if not await db.get(ProviderSession, sid):
                     db.add(
                         ProviderSession(
                             id=sid,
-                            account_id="acct-arena-primary",
+                            account_id=DEMO_ACCOUNT_ID,
                             agent_id=aid,
                             project_id=project.id,
                             browser_profile_id=ag.browser_profile_id,
@@ -500,7 +515,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
                     )
                 ag.provider_session_id = sid
 
-    if not await db.get(Userscript, "us-aatm-telemetry"):
+    if demo and not await db.get(Userscript, DEMO_USERSCRIPT_ID):
         db.add(
             Userscript(
                 id="us-aatm-telemetry",

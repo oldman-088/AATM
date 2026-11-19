@@ -115,6 +115,8 @@ export interface Translations {
     quickOrchestrate: string
     quickPlanTask: string
     quickProtectedMerge: string
+    projectLabel: string
+    projectRequired: string
   }
   agents: {
     title: string
@@ -434,6 +436,8 @@ export interface Translations {
     needsHuman: string
     noProfiles: string
     runUserscriptDisabled: string
+    installLink: string
+    installLinkHint: string
     statusReady: string
     statusBusy: string
     statusOffline: string
