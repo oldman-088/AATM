@@ -235,3 +235,17 @@ def test_the_poll_interval_is_five_minutes_by_default() -> None:
 
     assert PR_STATE_POLL_SECONDS == 300.0
     assert ArenaAgentRunner().pr_state_poll_seconds == 300.0
+
+
+def test_first_pr_state_check_is_due_even_on_a_freshly_booted_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """monotonic() can be below 300 s on a fresh CI runner; the first check must still happen."""
+    from types import SimpleNamespace
+
+    from app.orchestration import arena_runner as runner_module
+
+    monkeypatch.setattr(runner_module, "time", SimpleNamespace(monotonic=lambda: 10.0))
+    runner = ArenaAgentRunner()
+    session = SimpleNamespace(id="session-fresh-boot")
+
+    assert runner._pr_state_due(session) is True
+    assert runner._pr_state_due(session) is False

@@ -588,8 +588,9 @@ class ArenaAgentRunner:
     # ------------------------------------------------------------------ PR state outside AATM
     def _pr_state_due(self, session: ArenaSession, *, force: bool = False) -> bool:
         """The PR state of a waiting session is polled every `pr_state_poll_seconds` (5 minutes)."""
-        last = self._pr_state_checked.get(session.id, -1.0)
-        if force or time.monotonic() - last >= self.pr_state_poll_seconds:
+        # No entry yet means "never checked": a monotonic clock can be small on a freshly booted machine.
+        last = self._pr_state_checked.get(session.id)
+        if force or last is None or time.monotonic() - last >= self.pr_state_poll_seconds:
             self._pr_state_checked[session.id] = time.monotonic()
             return True
         return False
