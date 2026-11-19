@@ -10,6 +10,7 @@ from app.git_workflows.manager import git_workflow_manager
 from app.models import Agent, AuditLog, ChatMessage, GitWorkflowRecord, Project, Task, User
 from app.models.project import project_base_branch
 from app.orchestration.scheduler import task_scheduler
+from app.orchestration.self_heal import release_worker_for_task
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
 
 router = APIRouter(tags=["agents-tasks-orchestration"], dependencies=[Depends(get_current_user)])
@@ -265,6 +266,7 @@ async def update_task(
     if body.status in {"cancelled", "merged"}:
         task.lock_owner = None
         task.locked_at = None
+        await release_worker_for_task(db, task)
         if body.status == "merged":
             task.pr_status = "merged"
             task.progress_percent = 100
