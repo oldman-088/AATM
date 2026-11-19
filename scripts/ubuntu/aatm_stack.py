@@ -223,14 +223,18 @@ def readiness() -> tuple[int, int, list[str], list[Window]]:
     connected = 0
     for window in windows:
         state = live.get(window.profile_id) or {}
-        if state.get("connected"):
+        page_state = state.get("agent_state") or state.get("page_state")
+        ready = page_state in {"ready", "idle", "generating", "pr_ready", "keep_working_visible"}
+        if state.get("connected") and ready and state.get("status") != "needs_human":
             connected += 1
-        if state.get("status") == "needs_human":
+        if state.get("status") == "needs_human" or page_state == "needs_human":
             problems.append(f"{window.title}: يحتاج تدخلك ({state.get('needs_human_reason') or 'فحص بشري'})")
         elif not state.get("connected"):
             problems.append(f"{window.title}: غير متصل، تأكد من تسجيل الدخول إلى Arena وتفعيل السكربت في نافذته")
             if bridge_up:
                 missing.append(window)
+        elif not ready:
+            problems.append(f"{window.title}: loading (الصفحة لا تزال قيد التحميل)")
     return connected, len(windows), problems, missing
 
 
@@ -263,6 +267,7 @@ def wait_ready(timeout: float) -> int:
     deadline = started + timeout
     retry_after = float(os.environ.get("AATM_WINDOW_RETRY_SECONDS", "45"))
     retried = False
+    shown_loading: set[str] = set()
     while True:
         connected, total, problems, missing = readiness()
         if not problems and total:
@@ -272,6 +277,10 @@ def wait_ready(timeout: float) -> int:
             notify(title, dashboard_url())
             record_ready(title, [])
             return 0
+        for problem in problems:
+            if "loading" in problem and problem not in shown_loading:
+                print(f"[AATM] {problem}", flush=True)
+                shown_loading.add(problem)
         now = time.monotonic()
         if now >= deadline:
             break
@@ -301,7 +310,7 @@ def main() -> int:
         return open_windows()
     if args.command == "close-windows":
         return close_windows()
-    return wait_ready(float(os.environ.get("AATM_READY_TIMEOUT", "180")))
+    return wait_ready(float(os.environ.get("AATM_READY_TIMEOUT", "60")))
 
 
 if __name__ == "__main__":

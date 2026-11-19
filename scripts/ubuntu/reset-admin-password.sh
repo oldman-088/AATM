@@ -210,6 +210,7 @@ if not chosen:
     print(f"[AATM Reset] New password (shown once — save it now): {password}")
 if force_change:
     print("[AATM Reset] A password change is required at the next login (must_change_password=true).")
+print("[AATM Reset] .env was NOT updated; its configured password may no longer match the database.")
 print("[AATM Reset] All previously issued tokens are now invalid (token_version bumped).")
 print(f"[AATM Reset] SUCCESS: password changed for {email} (token_version is now {version}, confirmed in the database).")
 log_line(f"SUCCESS: {email} token_version={version}")
