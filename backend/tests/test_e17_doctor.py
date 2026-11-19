@@ -24,10 +24,10 @@ _spec.loader.exec_module(doctor)
 
 NOW = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
 OLD = NOW - timedelta(hours=2)
-CURRENT = "2.2.0"
+CURRENT = "2.3.0"  # the connector script version this checkout ships (app.browser.arena_connector)
 BRIDGE = {
     "profile-b": {"connected": True, "script_version": "2.1.0"},   # connected, old script, worker-b offline
-    "profile-c": {"connected": False, "script_version": "2.2.0"},
+    "profile-c": {"connected": False, "script_version": CURRENT},
 }
 ALL_CHECKS = {
     "worker_working_without_task",
