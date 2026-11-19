@@ -63,10 +63,6 @@ async def run_inprocess(args: argparse.Namespace) -> int:
     os.environ.setdefault("AATM_SANDBOX_MODE", "process")
     tmp = Path(tempfile.mkdtemp(prefix="aatm-load-"))
 
-    from httpx import ASGITransport, AsyncClient
-    from sqlalchemy import event, func, select, update
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
     from app.core.config import get_settings
     from app.core.security import create_access_token
     from app.db.base import Base
@@ -79,6 +75,9 @@ async def run_inprocess(args: argparse.Namespace) -> int:
     from app.queue import reset_wake_bus
     from app.queue.base import InProcessWakeBus
     from app.runtime.agent_loop import AgentLoop
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy import event, func, select, update
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     locked = _LockedCounter()
     logging.getLogger().addHandler(locked)

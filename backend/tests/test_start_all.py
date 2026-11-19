@@ -57,7 +57,7 @@ class _Services:
                     return
                 data = {"status": "ok"}
                 if self.path == "/v1/connector/profiles":
-                    data = {"profiles": [{"profile_id": p, "connected": True, "status": "ready"} for p in owner.connected]}
+                    data = {"profiles": [{"profile_id": p, "connected": True, "status": "ready", "agent_state": "ready"} for p in owner.connected]}
                 body = json.dumps(data).encode()
                 self.send_response(200)
                 self.end_headers()
