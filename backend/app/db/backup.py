@@ -27,8 +27,9 @@ def _default_source() -> Path:
     raise RuntimeError("database backup supports only SQLite; take a server-side dump for other databases")
 
 
-def _default_backups_dir() -> Path:
-    return get_settings().DATA_DIR / "backups"
+def _default_backups_dir(source: Path) -> Path:
+    # Next to the database: data/backups/ for the app's own data/aatm.db.
+    return source.parent / "backups"
 
 
 def _safe_reason(reason: str) -> str:
@@ -53,7 +54,7 @@ def backup_database(
     src = Path(source_path) if source_path is not None else _default_source()
     if not src.is_file():
         raise FileNotFoundError(f"database not found: {src}")
-    out_dir = Path(backups_dir) if backups_dir is not None else _default_backups_dir()
+    out_dir = Path(backups_dir) if backups_dir is not None else _default_backups_dir(src)
     out_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(out_dir, 0o700)
 
@@ -78,3 +79,19 @@ def backup_database(
 
     _prune(out_dir, keep)
     return dest
+
+
+async def backup_before(reason: str) -> str:
+    """Back up before a destructive admin action; refuse the action (503) when no backup can be taken."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    try:
+        path = await asyncio.to_thread(backup_database, reason)
+    except (RuntimeError, OSError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "backup_failed", "message": f"No backup could be taken, so nothing was changed: {type(exc).__name__}"},
+        ) from exc
+    return str(path)
