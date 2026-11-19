@@ -23,6 +23,7 @@ from app.api.routes import (
     devices,
     governance,
     infra,
+    lookups,
     orchestration,
     platform,
     projects,
@@ -206,6 +207,7 @@ app.include_router(reviews.router, prefix=API_PREFIX)
 app.include_router(scaling.router, prefix=API_PREFIX)
 app.include_router(arena.router, prefix=API_PREFIX)
 app.include_router(dashboard.router, prefix=API_PREFIX)
+app.include_router(lookups.router, prefix=API_PREFIX)
 app.include_router(code_stream.router, prefix=API_PREFIX)
 app.include_router(demo.router, prefix=API_PREFIX)
 
