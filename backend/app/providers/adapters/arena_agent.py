@@ -113,7 +113,7 @@ class ArenaAgentAdapter(BaseProviderAdapter):
 
     # ------------------------------------------------------------------ engine API
     async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None,
-                      repo: str | None = None, branch: str | None = None) -> dict[str, Any]:
+                      repo: str | None = None, branch: str | None = None, url: str | None = None) -> dict[str, Any]:
         """Run one validated command on the profile's Arena page; raises ArenaAgentError on failure."""
         from app.browser.arena_connector import bridge_call
 
@@ -123,6 +123,8 @@ class ArenaAgentAdapter(BaseProviderAdapter):
             args["repo"] = repo
         if branch:
             args["branch"] = branch
+        if url:
+            args["url"] = url
         res = await bridge_call("POST", f"/v1/connector/profiles/{profile_id}/command",
                                 {"command": command, "args": args, "timeout_seconds": wait}, timeout=wait + 15)
         if not res.get("ok"):
@@ -156,6 +158,10 @@ class ArenaAgentAdapter(BaseProviderAdapter):
             await asyncio.sleep(1.0)  # let the old page unload before waiting for the new one
         await self.wait_for_state(profile_id, {"ready"}, timeout=ready_timeout)
         return result
+
+    async def open_chat(self, profile_id: str, url: str) -> dict[str, Any]:
+        """Load an existing chat in this window (same-origin navigation; the bridge checks the origin)."""
+        return await self.command(profile_id, "new_session", url=url)
 
     async def select_repo(self, profile_id: str, repo: str) -> dict[str, Any]:
         """Select the task's repository for this chat; raises unless the page confirms it.
