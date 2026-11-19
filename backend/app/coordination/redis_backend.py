@@ -114,6 +114,10 @@ class RedisCoordinator(Coordinator):
 
         self.url = url
         self._redis = redis_asyncio.from_url(url, decode_responses=True, socket_timeout=5, socket_connect_timeout=5)
+        # Waiting for events is normal, so the subscriber has no read timeout; pings detect a dead link.
+        self._subscriber = redis_asyncio.from_url(
+            url, decode_responses=True, socket_timeout=None, socket_connect_timeout=5, health_check_interval=30,
+        )
         self.instance_id = secrets.token_hex(8)
 
     async def acquire_lock(self, key: str, ttl_seconds: float) -> str | None:
@@ -139,28 +143,44 @@ class RedisCoordinator(Coordinator):
         await self._redis.publish(EVENTS_CHANNEL, json.dumps({"origin": self.instance_id, "event": event}, default=str))
 
     async def subscribe_events(self, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> asyncio.Task:
-        pubsub = self._redis.pubsub()
+        pubsub = self._subscriber.pubsub()
         await pubsub.subscribe(EVENTS_CHANNEL)
 
+        async def _listen(active: Any) -> None:
+            async for message in active.listen():
+                if message.get("type") != "message":
+                    continue
+                try:
+                    data = json.loads(message["data"])
+                except (TypeError, ValueError):
+                    continue
+                if data.get("origin") == self.instance_id:
+                    continue  # already delivered locally
+                await handler(data.get("event") or {})
+
         async def _reader() -> None:
+            active = pubsub
+            delay = 1.0
             try:
-                async for message in pubsub.listen():
-                    if message.get("type") != "message":
-                        continue
+                while True:
                     try:
-                        data = json.loads(message["data"])
-                    except (TypeError, ValueError):
-                        continue
-                    if data.get("origin") == self.instance_id:
-                        continue  # already delivered locally
-                    await handler(data.get("event") or {})
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Redis event fan-out subscriber stopped")
+                        await _listen(active)
+                        return
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - events still work in this process; keep retrying
+                        logger.warning("Redis event fan-out lost its connection (%s); retrying", type(exc).__name__)
+                    with contextlib.suppress(Exception):
+                        await active.aclose()
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30.0)
+                    with contextlib.suppress(Exception):
+                        active = self._subscriber.pubsub()
+                        await active.subscribe(EVENTS_CHANNEL)
+                        delay = 1.0
             finally:
                 with contextlib.suppress(Exception):
-                    await pubsub.aclose()
+                    await active.aclose()
 
         return asyncio.create_task(_reader(), name="aatm-redis-fanout")
 

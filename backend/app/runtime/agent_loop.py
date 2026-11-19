@@ -22,6 +22,7 @@ from app.models import (
     Project,
     Task,
 )
+from app.models.project import project_base_branch
 from app.orchestration.review import review_service
 from app.orchestration.scheduler import task_scheduler
 from app.providers.base import ProviderRequest, ProviderResponse
@@ -370,7 +371,7 @@ class AgentLoop(ClaimMixin, ContextMixin, ActionsMixin, ApprovalsMixin):
                             pr_res = await git_workflow_manager.push_and_create_draft_pr(
                                 task.worktree_path,
                                 branch_name=task.branch_name,
-                                base_branch=project.default_branch if project else "main",
+                                base_branch=project_base_branch(project),
                                 title=f"AATM({agent.name}): {task.title}",
                                 body=(
                                     f"{done_summary}\n\n"

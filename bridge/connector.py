@@ -39,6 +39,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -52,13 +53,17 @@ MAX_ANSWER_CHARS = 200_000
 MAX_PROMPT_CHARS = 120_000
 MAX_EVENTS = 50
 
-AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "needs_human", "offline")
+AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "tool_call_limit", "pr_ready", "needs_human", "offline")
 # Commands the bridge may send to an Arena Agent page. Anything else is refused before it
 # reaches the browser. Read-only commands still run while the profile waits for a human.
-AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo")
+AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo",
+                  "create_pr", "close_feedback")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REPO_CHECK_MIN_SCRIPT = (2, 1, 0)  # older scripts ignore the repository check
 READ_ONLY_COMMANDS = ("read_last_reply", "selector_test")
+# A page may connect before its profile is known (first start, or an unreadable state file).
+# Userscripts before 2.2.0 stop retrying on 4401 and 4410, so this case must use another code.
+CLOSE_NOT_REGISTERED_YET = 4404
 
 # Sent to the userscript as configuration data. The userscript never solves anything: when one
 # of these appears it reports ``needs_human`` and stops.
@@ -162,6 +167,7 @@ class ProfileState:
     dom: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_DOM))
     stop_selectors: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_SELECTORS))
     stop_phrases: list[str] = field(default_factory=lambda: list(DEFAULT_STOP_PHRASES))
+    registration: dict[str, Any] = field(default_factory=dict)  # what the backend sent; holds only the token hash
     status: str = "offline"  # offline | ready | busy | needs_human
     needs_human_reason: str | None = None
     origin: str | None = None
@@ -234,8 +240,55 @@ class ProfileState:
 
 
 class ConnectorHub:
-    def __init__(self) -> None:
+    def __init__(self, state_file: str | Path | None = None) -> None:
         self.profiles: dict[str, ProfileState] = {}
+        self.state_file = Path(state_file) if state_file else None
+        self._loading = False
+        self._load()
+
+    # ------------------------------------------------------------------ persistence
+    def _load(self) -> None:
+        """Restore registrations so pages can reconnect as soon as a restarted bridge listens."""
+        if self.state_file is None or not self.state_file.exists():
+            return
+        try:
+            items = json.loads(self.state_file.read_text(encoding="utf-8"))["profiles"]
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning("connector state file is unreadable; waiting for the backend to register profiles")
+            return
+        self._loading = True
+        try:
+            for item in items:
+                try:
+                    state = self.register(str(item["profile_id"]), ProfileRegistration.model_validate(item["registration"]))
+                except (ConnectorError, ValueError, KeyError, TypeError):
+                    logger.warning("connector state: skipped an invalid profile entry")
+                    continue
+                if item.get("needs_human_reason"):  # a human check must survive the restart
+                    state.status = "needs_human"
+                    state.needs_human_reason = str(item["needs_human_reason"])[:200]
+                    state.set_agent_state("needs_human", state.needs_human_reason)
+        finally:
+            self._loading = False
+
+    def _save(self) -> None:
+        if self.state_file is None or self._loading:
+            return
+        payload = {"version": 1, "profiles": [
+            {"profile_id": s.profile_id, "registration": s.registration, "needs_human_reason": s.needs_human_reason}
+            for s in self.profiles.values()
+        ]}
+        tmp = self.state_file.with_name(f"{self.state_file.name}.{os.getpid()}.tmp")
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            os.replace(tmp, self.state_file)
+        except OSError as exc:
+            logger.warning("connector state could not be saved: %s", type(exc).__name__)
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
     # ------------------------------------------------------------------ registration
     def register(self, profile_id: str, body: ProfileRegistration) -> ProfileState:
@@ -271,6 +324,7 @@ class ConnectorHub:
             dom={**DEFAULT_DOM, **(body.dom or {})},
             stop_selectors=list(dict.fromkeys(DEFAULT_STOP_SELECTORS + list(body.extra_stop_selectors or []))),
             stop_phrases=list(dict.fromkeys(DEFAULT_STOP_PHRASES + list(body.extra_stop_phrases or []))),
+            registration=body.model_dump(),
         )
         if existing is not None:
             # Session history survives re-registration (token rotation, backend restart).
@@ -291,6 +345,7 @@ class ConnectorHub:
         self.profiles[profile_id] = state
         if existing is not None and state.ws is None:
             state.set_agent_state("offline", "re-registered")
+        self._save()
         logger.info("connector profile registered profile=%s origins=%d real=%s mode=%s", profile_id, len(origins), body.real_enabled, body.mode)
         return state
 
@@ -298,6 +353,7 @@ class ConnectorHub:
         state = self.profiles.pop(profile_id, None)
         if state is None:
             return False
+        self._save()
         self._fail_pending(state, ConnectorError("offline", "Profile was unregistered.", 503))
         if state.ws is not None:
             await self._close(state, 4410, "unregistered")
@@ -311,6 +367,7 @@ class ConnectorHub:
         if state.agent_state == "needs_human":
             state.set_agent_state("ready" if state.ws is not None else "offline", "resumed by a human")
         state.record("resumed", "needs_human cleared by a human")
+        self._save()
         if state.ws is not None:
             # The page stopped itself when it saw the check; tell it to monitor again.
             asyncio.ensure_future(self._send_quiet(state, {"type": "resumed"}))
@@ -333,6 +390,10 @@ class ConnectorHub:
                 hello = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=HELLO_TIMEOUT_SECONDS))
             except (asyncio.TimeoutError, TimeoutError, ValueError):
                 await websocket.close(code=4400)
+                return
+            if isinstance(hello, dict) and hello.get("type") == "hello" and hello.get("profile_id") \
+                    and str(hello["profile_id"]) not in self.profiles:
+                await websocket.close(code=CLOSE_NOT_REGISTERED_YET)
                 return
             state = self._authenticate(hello, websocket.headers.get("origin"))
             if state is None:
@@ -458,6 +519,7 @@ class ConnectorHub:
         state.status = "needs_human"
         state.needs_human_reason = reason[:200]
         state.set_agent_state("needs_human", state.needs_human_reason)
+        self._save()
         logger.warning("connector needs_human profile=%s", state.profile_id)
         # A chat prompt in flight is abandoned; an Agent command keeps waiting for the page's own
         # result (e.g. a submit that was sent just before the check appeared really was sent).

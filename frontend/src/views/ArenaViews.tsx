@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { AlertTriangle, BookOpen, ExternalLink, FileDiff, GitBranch, KeyRound, ListChecks, Play, PlayCircle, Plus, RefreshCw, Send, Workflow } from 'lucide-react'
 import { Badge, Button, Card } from '../components/ui'
+import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 import { LIVE_EVENT } from './DashboardViews'
@@ -49,12 +50,14 @@ export function ArenaConnectorPanel() {
       <h3 className="text-sm font-semibold text-white">{t.arena.title}</h3>
       <Button variant="secondary" onClick={load}><RefreshCw className="me-1 h-4 w-4" />{t.common.refresh}</Button>
     </div>
+    {!wall && error && <EmptyState variant="error" onRetry={load} testId="arena-connector-error" />}
+    {!wall && !error && <EmptyState variant="loading" testId="arena-connector-loading" />}
     {gate && <div role="status" data-testid="arena-gate" className={`rounded-lg border p-2 text-start text-xs ${gate.real_enabled ? 'border-emerald-500/40 text-emerald-200' : gate.mode === 'mock' ? 'border-sky-500/40 text-sky-200' : 'border-amber-500/40 bg-amber-500/10 text-amber-200'}`}>
       {gate.real_enabled ? t.arena.approved : gate.mode === 'mock' ? t.arena.mockMode : t.arena.waiting}
     </div>}
     <p className="text-xs text-slate-500">{t.arena.runUserscriptDisabled}</p>
     <div className="grid gap-2 md:grid-cols-2">
-      {(wall?.profiles || []).length === 0 && <p className="text-xs text-slate-400">{t.arena.noProfiles}</p>}
+      {(wall?.profiles || []).length === 0 && <EmptyState variant="empty" testId="arena-connector-empty" />}
       {(wall?.profiles || []).map((p: any) => <div key={p.profile_id} data-testid={`arena-profile-${p.profile_id}`} className="rounded-lg border border-slate-700 p-2" style={{ borderInlineStartColor: p.color, borderInlineStartWidth: 4 }}>
         <div className="flex items-center justify-between gap-2">
           <span className="truncate text-sm text-white">{p.agent_name}</span>
@@ -84,7 +87,7 @@ export function ArenaConnectorPanel() {
 // ----------------------------------------------------------------------------- R5 Arena Agent dashboard
 
 const PAGE_TONE: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'neutral'> = {
-  ready: 'success', idle: 'success', generating: 'info', keep_working_visible: 'warning', needs_human: 'danger', offline: 'neutral',
+  ready: 'success', idle: 'success', generating: 'info', keep_working_visible: 'warning', tool_call_limit: 'warning', pr_ready: 'success', needs_human: 'danger', offline: 'neutral',
 }
 const MAX_LIVE_FRAMES = 40
 
@@ -226,6 +229,9 @@ export function ArenaAgentDashboard() {
   const connectorText = !gate ? '—' : gate.real_enabled ? a.connectorOn : gate.mode === 'mock' ? a.connectorMock : a.connectorOff
   const label = (map: Record<string, string>, key?: string | null) => (key && map[key]) || key || a.none
 
+  if (!data && error) return <section data-testid="arena-agent-dashboard"><EmptyState variant="error" onRetry={load} testId="arena-agent-error" /></section>
+  if (!data) return <section data-testid="arena-agent-dashboard"><EmptyState variant="loading" testId="arena-agent-loading" /></section>
+
   return <section data-testid="arena-agent-dashboard" className="space-y-4"><Card className="space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <div className="text-start">
@@ -310,7 +316,7 @@ export function ArenaAgentDashboard() {
       </div>
     })()}
 
-    {rows.length === 0 && <p className="text-xs text-slate-400">{a.noEmployees}</p>}
+    {rows.length === 0 && <EmptyState variant="empty" testId="arena-agent-empty" />}
     <div className="grid gap-3 lg:grid-cols-2">
       {rows.map((r) => {
         const s = r.session

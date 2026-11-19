@@ -94,6 +94,30 @@ async def set_arena_mode(db: AsyncSession, agent: Agent, mode: str, *, actor: st
     return {"agent_id": agent.id, "profile_id": profile.id, "mode": mode, "previous": previous, "bridge_registration": registration}
 
 
+async def sync_profiles_with_bridge(db: AsyncSession) -> list[str]:
+    """Register enabled employees' profiles the bridge does not know, e.g. after it restarted.
+
+    A bridge without its state file starts empty. Tokens are not changed, so installed userscripts
+    stay valid. Returns the profile ids registered by this call.
+    """
+    if not arena_gate()["enabled"]:
+        return []
+    listed = await bridge_call("GET", "/v1/connector/profiles")
+    if not listed.get("ok"):
+        return []
+    known = {str(item.get("profile_id")) for item in listed.get("profiles") or []}
+    profiles = (await db.execute(
+        select(BrowserProfile).join(Agent, Agent.id == BrowserProfile.agent_id).where(
+            Agent.is_enabled.is_(True), BrowserProfile.connector_token_hash.is_not(None),
+        )
+    )).scalars()
+    registered: list[str] = []
+    for profile in profiles:
+        if profile.id not in known and (await register_profile_with_bridge(profile)).get("ok"):
+            registered.append(profile.id)
+    return registered
+
+
 async def open_session_for(db: AsyncSession, profile_id: str) -> ArenaSession | None:
     return (
         await db.execute(

@@ -343,8 +343,8 @@ async def _fresh_start(env, runner, task_id, session_id, agent_id):
 async def test_worker_prompt_is_sent_only_after_the_task_repo_is_selected(env, arena_settings, monkeypatch, tmp_path):
     page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
     await _fresh_start(env, runner, task_id, session_id, agent_id)
-    assert [c for c, _ in page.commands] == ["new_session", "select_repo", "submit"]
-    assert page.repos[1:] == [("select_repo", REPO_SLUG), ("submit", REPO_SLUG)]
+    assert [c for c, _ in page.commands] == ["new_session", "select_repo", "selector_test", "submit"]
+    assert page.repos[1:] == [("select_repo", REPO_SLUG), ("selector_test", None), ("submit", REPO_SLUG)]
 
 
 async def test_repo_picker_that_renders_late_is_retried(env, arena_settings, monkeypatch, tmp_path):

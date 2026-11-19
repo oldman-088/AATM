@@ -11,6 +11,7 @@ from app.api.deps import get_current_user, require_role
 from app.db.session import get_db
 from app.git_workflows.manager import git_workflow_manager
 from app.models import ApprovalRequest, AuditLog, Project, Task, User
+from app.models.project import project_base_branch
 from app.orchestration.review import review_service
 
 router = APIRouter(tags=["reviews"], dependencies=[Depends(get_current_user)])
@@ -81,7 +82,7 @@ async def get_pull_request_diff(task_id: str, db: AsyncSession = Depends(get_db)
     project = await db.get(Project, task.project_id)
     if not task.worktree_path:
         return {"available": False, "code": "not_available", "detail": "Worktree was cleaned up (PR merged or closed)."}
-    diff = await git_workflow_manager.branch_diff(task.worktree_path, (project.default_branch if project else "main"))
+    diff = await git_workflow_manager.branch_diff(task.worktree_path, project_base_branch(project))
     return {"available": bool(diff.get("ok")), **diff}
 
 

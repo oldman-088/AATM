@@ -415,41 +415,43 @@ describe('Command Bridge (جسر القيادة)', () => {
     expect(screen.getByTestId('bridge-chat').textContent).not.toContain('Chief AI Engineering Manager online')
   })
 
-  it('shows labelled demo frames in demo mode and never mixes them with live ones', async () => {
-    const demoFrames = {
-      demo: true,
-      tick_seconds: 3,
-      agents: {
-        'worker-1': [
-          {
-            agent_id: 'worker-1',
-            demo: true,
-            action: 'write',
-            path: 'demo/stream.py',
-            language: 'python',
-            content: 'def demo_frame():\n    return True\n',
-          },
-        ],
-      },
-    }
+  it('never shows a demo badge or polls the scripted demo feed, even when the backend reports demo mode', async () => {
+    // The demo code-stream and its badge are display-fake surfaces and are removed.
+    // Even if the backend still advertises demo_mode, the bridge must not render it.
     const { calls } = await renderBridge('en', {
       '/api/health': {
         status: 'ok',
         demo_mode: true,
         model_status: { status: 'CONFIGURED', configured: true, configured_providers: ['demo'], reason: null },
       },
-      '/api/v1/demo/code-stream': demoFrames,
     })
 
-    expect(screen.getByTestId('bridge-demo-chip').textContent).toBe('Demo mode')
-    await waitFor(() => expect(calls.some((call) => call.path.startsWith('/api/v1/demo/code-stream'))).toBe(true))
-    await waitFor(() => expect(screen.getByTestId('bridge-screen-worker-1').textContent).toContain('def demo_frame'))
-  })
-
-  it('does not poll the demo feed outside demo mode', async () => {
-    const { calls } = await renderBridge('en')
     expect(screen.queryByTestId('bridge-demo-chip')).toBeNull()
     await settle()
+    expect(calls.some((call) => call.path.includes('/demo/code-stream'))).toBe(false)
+    // The worker station shows its real (empty) state — no scripted demo code.
+    expect(screen.getByTestId('bridge-screen-worker-1').textContent).not.toContain('def demo_frame')
+  })
+
+  it('loads real code-stream frames (not the demo feed) into station screens', async () => {
+    const realFrames = {
+      agents: {
+        'worker-1': [
+          {
+            agent_id: 'worker-1',
+            action: 'write',
+            path: 'real/stream.py',
+            language: 'python',
+            content: 'def real_frame():\n    return True\n',
+          },
+        ],
+      },
+      pending: 0,
+    }
+    const { calls } = await renderBridge('en', { '/api/v1/code-stream': realFrames })
+
+    expect(screen.queryByTestId('bridge-demo-chip')).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('bridge-screen-worker-1').textContent).toContain('def real_frame'))
     expect(calls.some((call) => call.path.includes('/demo/code-stream'))).toBe(false)
   })
 

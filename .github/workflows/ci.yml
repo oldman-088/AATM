@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - develop
+      - r8-aatm
       - "arena/**"
       - "feature/**"
       - "fix/**"
@@ -14,6 +15,7 @@ on:
     branches:
       - main
       - develop
+      - r8-aatm
 
 permissions:
   contents: read

@@ -9,6 +9,7 @@ from app.api.deps import get_current_user, require_role
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.git_workflows.manager import PROTECTED_BRANCHES, git_workflow_manager
+from app.github_client.client import validate_branch_name
 from app.memory.engine import memory_engine
 from app.models import Agent, AuditLog, GitWorkflowRecord, MemoryEntry, Project, User
 from app.schemas.common import GitWorkflowCreate, MemoryCreate, ProjectCreate, ProjectUpdate
@@ -47,6 +48,8 @@ async def _validate_registered_repo_path(repo_path: str | None, db: AsyncSession
 @router.get("/projects")
 async def list_projects(db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(Project).order_by(Project.created_at.asc()))
+    # The UI opens the first project, so the one marked active comes first.
+    ordered = sorted(res.scalars().all(), key=lambda p: not (p.config or {}).get("active"))
     return [
         {
             "id": p.id,
@@ -62,7 +65,7 @@ async def list_projects(db: AsyncSession = Depends(get_db)):
             "status": p.status,
             "created_at": p.created_at,
         }
-        for p in res.scalars().all()
+        for p in ordered
     ]
 
 
@@ -117,6 +120,22 @@ async def update_project(
         proj.repo_url = body.repo_url
     if body.default_branch is not None:
         proj.default_branch = body.default_branch
+    if body.base_branch is not None:
+        valid, branch = validate_branch_name(body.base_branch)
+        if not valid:
+            raise HTTPException(status_code=422, detail=branch)
+        cfg["base_branch"] = branch
+    if body.status is not None:
+        proj.status = body.status
+    if body.active and proj.status != "active":
+        raise HTTPException(status_code=409, detail="Only an active project can be the default project")
+    if body.active:
+        for other in (await db.execute(select(Project).where(Project.id != proj.id))).scalars():
+            if (other.config or {}).get("active"):
+                other.config = {k: v for k, v in other.config.items() if k != "active"}
+        cfg["active"] = True
+    elif body.active is False or proj.status != "active":
+        cfg.pop("active", None)
     if body.worktree_mode is not None:
         cfg["worktree_mode"] = body.worktree_mode
     if body.auto_pr is not None:

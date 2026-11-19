@@ -17,8 +17,9 @@ state lives in ``arena_sessions`` / ``tasks``, so a backend or bridge restart re
 from __future__ import annotations
 
 import logging
+import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -46,7 +47,9 @@ from app.models import (
     Project,
     Task,
 )
+from app.models.project import configured_base_branch, project_base_branch
 from app.orchestration.arena_prompts import (
+    base_branch_publish_steps,
     build_correction_prompt,
     build_report_request,
     build_task_prompt,
@@ -57,7 +60,12 @@ from app.orchestration.arena_prompts import (
     report_is_complete,
     reports_github_blocked,
 )
-from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError, keep_working_allowed
+from app.providers.adapters.arena_agent import (
+    TOOL_LIMIT_CONTINUE,
+    ArenaAgentAdapter,
+    ArenaAgentError,
+    keep_working_allowed,
+)
 from app.runtime.agent_protocol import redact_secrets
 from app.runtime.temporal import to_naive_utc
 
@@ -67,11 +75,18 @@ MONITORED_PHASES = {"working", "correcting", "reporting"}
 RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starting", "submitting", "needs_human"}
 STALL_MINUTES = 20
 NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is escalated to the owner
+AGENT_ACTIVE_STATES = {"generating", "keep_working_visible", "tool_call_limit", "pr_ready"}
+CREATE_PR_WAIT_MINUTES = 5  # after pressing Arena's Create PR, before falling back to asking the agent
 NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
 LIVE_CODE_MIN_SECONDS = 10.0   # at most one GitHub live-diff publish per session per interval
 LIVE_CODE_MAX_FILES = 20       # files streamed per new head (the summary lists all of them)
+FOLLOW_UP_FAILURES_BEFORE_HUMAN = 3  # failed follow-up sends in a row before the owner is asked to look
+CHAT_CHECK_SECONDS = 300.0     # how often a quiet window is checked to still show the task's chat
+CHAT_REOPEN_ATTEMPTS = 3       # navigations back to the task's chat before the owner is asked
+# A chat URL has an id segment (e.g. /agent/01a1ef92-...); the empty new-session page does not.
+CHAT_PATH_RE = re.compile(r"^(/[A-Za-z0-9_.-]+)+/([A-Za-z0-9-]{8,})/?$")
 
 
 def _now() -> datetime:
@@ -96,6 +111,21 @@ async def arena_reservations(db: AsyncSession) -> dict[str, str]:
         select(ArenaSession).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(RESERVING_PHASES))
     )).scalars()
     return {s.agent_id: s.task_id for s in rows if s.task_id}
+
+
+def task_chat_path(session: ArenaSession) -> str | None:
+    """The Arena chat this session's work lives in, recorded after AATM sent the task prompt."""
+    for event in reversed(session.events or []):
+        if event.get("kind") in {"chat_path", "chat_url"}:
+            path = str(event.get("detail") or "")
+            return path if CHAT_PATH_RE.match(path) else None
+    return None
+
+
+def chat_path_matches_branch(path: str, branch: str | None) -> bool:
+    """Arena names its branch arena/<last 8 characters of the chat id>-<repo>."""
+    match = re.match(r"^arena/([A-Za-z0-9]{8})-", branch or "")
+    return match is None or path.rstrip("/")[-8:] == match.group(1)
 
 
 def live_diff_summary(session: ArenaSession, parent: Task, changes: dict[str, Any]) -> dict[str, Any]:
@@ -219,6 +249,11 @@ class ArenaAgentRunner:
             raise ArenaRunnerError(str(exc)) from exc
         session.active_task_id = task.id
         profile_id = session.profile_id
+        if fresh and session.phase == "submitting" and await self._submit_landed(session):
+            # Restarted right after sending: the page has the prompt, so it must not be sent again.
+            session.submitted_at = _now()
+            append_event(session, "submit_recovered")
+            fresh = False
         try:
             if fresh:
                 session.phase = "starting"
@@ -233,12 +268,14 @@ class ArenaAgentRunner:
                 append_event(session, "repo_selected", repo)
                 prompt = build_task_prompt(task, project, agent)
                 session.phase = "submitting"
+                append_event(session, "submit_started", (await self.adapter.transcript_mark(profile_id)).get("mark"))
                 await db.commit()
                 await self.adapter.submit(profile_id, prompt, repo=repo)
                 session.submitted_at = _now()
                 session.last_state_change_at = session.submitted_at
                 session.phase = "working"
                 append_event(session, "submitted", f"{len(prompt)} chars", title_prefix=pr_title_prefix(task.id))
+                self._chat_state()["unrecorded"].add(session.id)  # remember this chat once its URL is known
                 self._audit(db, agent.id, "arena.task_submitted", task, {"session_id": session.id, "prompt_chars": len(prompt)})
             else:
                 session.phase = "working" if not session.pr_number else "reporting"
@@ -268,6 +305,112 @@ class ArenaAgentRunner:
         ]
         await db.commit()
         await event_bus.emit("arena.session", {"session_id": session.id, "agent_id": agent.id, "task_id": task.id, "phase": session.phase})
+
+    def _chat_state(self) -> dict[str, Any]:
+        """In-memory chat bookkeeping (kept off ``__init__`` so test doubles built with ``__new__`` work)."""
+        return self.__dict__.setdefault("_chat", {"unrecorded": set(), "checked": {}, "reopened": {}, "failures": {}})
+
+    async def _record_chat_path(self, session: ArenaSession) -> None:
+        """After AATM sent the prompt, store the chat's URL so the window can be brought back to it later."""
+        pending = self._chat_state()["unrecorded"]
+        if session.id not in pending:
+            return
+        if task_chat_path(session):
+            pending.discard(session.id)
+            return
+        try:
+            page = await self.adapter.selector_test(session.profile_id)
+        except ArenaAgentError:
+            return
+        path = str((page.get("page") or {}).get("path") or "")
+        if CHAT_PATH_RE.match(path) and chat_path_matches_branch(path, session.branch_name):
+            append_event(session, "chat_path", path)
+            pending.discard(session.id)
+
+    async def _on_task_chat(self, db: AsyncSession, session: ArenaSession, active: Task, changed: bool) -> bool:
+        """True when the window shows this task's chat (or that cannot be known).
+
+        After a restart the window opens on Arena's start page, so replies and follow-ups would reach
+        another chat. A quiet window is sent back to the recorded chat; a busy one is never touched."""
+        path = task_chat_path(session)
+        if not path:
+            return True
+        chat = self._chat_state()
+        now = time.monotonic()
+        if not changed and now - chat["checked"].get(session.id, float("-inf")) < CHAT_CHECK_SECONDS:
+            return True
+        try:
+            page = await self.adapter.selector_test(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "chat_check_failed", f"{exc.code}: {exc.message}")
+            await db.commit()
+            return False
+        where = page.get("page") or {}
+        current = str(where.get("path") or "")
+        if current.rstrip("/") == path.rstrip("/"):
+            chat["checked"][session.id] = now
+            chat["reopened"].pop(session.id, None)
+            return True
+        chat["checked"].pop(session.id, None)
+        if page.get("state") == "generating":  # never interrupt whatever runs there
+            await self._block_needs_human(db, session, active, f"the window is busy in another chat ({current or 'unknown'}); "
+                                                                 f"the task's chat is {path}")
+            return False
+        attempts = chat["reopened"].get(session.id, 0)
+        if attempts >= CHAT_REOPEN_ATTEMPTS:
+            await self._block_needs_human(db, session, active, f"the window stays on {current or 'another page'}; "
+                                                                 f"open the task's chat {path} in it, then press Resume")
+            return False
+        origin = str(where.get("origin") or "")
+        try:
+            await self.adapter.open_chat(session.profile_id, f"{origin}{path}")
+        except ArenaAgentError as exc:
+            await self._block_needs_human(db, session, active, f"could not return the window to the task's chat {path} "
+                                                                 f"({exc.code})")
+            return False
+        chat["reopened"][session.id] = attempts + 1
+        append_event(session, "chat_reopened", f"{current or '?'} -> {path}")
+        await db.commit()
+        return False
+
+    async def _submit_landed(self, session: ArenaSession) -> bool:
+        started = [e for e in session.events or [] if e.get("kind") == "submit_started"]
+        if not started:
+            return False
+        try:
+            page = await self.adapter.transcript_mark(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "submit_check_failed", exc.code)
+            return False
+        return page.get("state") in AGENT_ACTIVE_STATES or page.get("mark") != started[-1].get("detail")
+
+    async def recover_after_restart(self, db: AsyncSession) -> dict[str, int]:
+        """Called once at startup: downtime is not a stall, and unfinished sends are checked again."""
+        sessions = list((await db.execute(select(ArenaSession).where(
+            ArenaSession.is_open.is_(True), ArenaSession.kind != "manager",
+            ArenaSession.phase.in_(MONITORED_PHASES | {"starting", "submitting"}),
+        ))).scalars())
+        monitored = requeued = 0
+        for session in sessions:
+            task = await db.get(Task, session.active_task_id or session.task_id) if session.task_id else None
+            if task is None:
+                continue
+            if session.phase in MONITORED_PHASES:
+                session.last_state_change_at = _now()
+                task.updated_at = _now()  # self-healing must not treat the downtime as a dead task
+                append_event(session, "monitoring_restored")
+                monitored += 1
+            elif task.status == "in_progress":
+                task.status = "queued"
+                task.lock_owner = None
+                running = (await db.execute(select(AgentMessage).where(
+                    AgentMessage.task_id == task.id, AgentMessage.execution_status == "running"))).scalars()
+                for message in running:
+                    message.execution_status = "cancelled"
+                append_event(session, "requeued_after_restart")
+                requeued += 1
+        await db.commit()
+        return {"monitored": monitored, "requeued": requeued}
 
     async def _start_correction(self, db: AsyncSession, message: AgentMessage, follow_up: Task, agent: Agent) -> None:
         from app.runtime.loop.common import NeedsHumanError
@@ -318,7 +461,7 @@ class ArenaAgentRunner:
         slug = repo_slug(project)
         if not slug or not session.branch_name:
             return {"ok": False, "files": []}
-        base = (project.default_branch if project else None) or "main"
+        base = project_base_branch(project)
         return await git_workflow_manager.compare_branch(repo_slug=slug, base=base, head=session.branch_name,
                                                          cwd=project.repo_path if project else ".")
 
@@ -354,6 +497,22 @@ class ArenaAgentRunner:
         if pr.get("state") == "MERGED" and parent.status not in {"approved", "merged", "done"}:
             await self._merged_without_approval(db, session, parent, pr)
             return {"ok": True, "pr": pr, "merged_outside": True}
+        expected_base = configured_base_branch(project)
+        if expected_base and pr.get("baseRefName") != expected_base:
+            corrected = None
+            if pr.get("state") == "OPEN":
+                fixed = await git_workflow_manager.ensure_task_pull_request(
+                    repo_slug=slug, task_id=parent.id, title=parent.title, branch=str(pr.get("headRefName") or ""),
+                    base=expected_base, cwd=cwd,
+                )
+                if fixed.get("ok"):
+                    append_event(session, "pr_base_corrected", ", ".join(fixed.get("actions") or []))
+                    again = await git_workflow_manager.find_task_pull_request(repo_slug=slug, task_id=parent.id, cwd=cwd)
+                    corrected = again.get("pull_request") if again.get("ok") else None
+            if not corrected or corrected.get("baseRefName") != expected_base:
+                await self._wrong_base_pull_request(db, session, parent, pr, expected_base)
+                return {"ok": True, "pr": pr, "wrong_base": True}
+            pr = corrected
         if session.pr_number != pr.get("number"):
             await self._associate_pr(db, session, parent, project, pr)
         head = pr.get("headRefOid")
@@ -428,7 +587,7 @@ class ArenaAgentRunner:
         if wf is None:
             wf = GitWorkflowRecord(project_id=parent.project_id, task_id=parent.id, branch_name=session.branch_name or "",
                                    owner_agent_id=session.agent_id,
-                                   base_branch=(project.default_branch if project else None) or "main")
+                                   base_branch=project_base_branch(project))
             db.add(wf)
         wf.branch_name = session.branch_name or wf.branch_name
         wf.owner_agent_id = session.agent_id
@@ -449,6 +608,17 @@ class ArenaAgentRunner:
         session.phase = "escalated"
         self._audit(db, "arena-runner", "arena.pr_merged_without_approval", parent, {"pr": pr.get("url")})
         await self._notify(db, "Pull request merged without approval", reason, severity="critical", link="/approvals")
+        await db.commit()
+
+    async def _wrong_base_pull_request(self, db: AsyncSession, session: ArenaSession, parent: Task, pr: dict[str, Any],
+                                       expected_base: str) -> None:
+        if any(e.get("kind") == "pr_wrong_base" for e in session.events or []):
+            return
+        reason = f"PR {pr.get('url')} targets {pr.get('baseRefName')}, but this project only accepts {expected_base}."
+        append_event(session, "pr_wrong_base", reason)
+        session.phase = "escalated"
+        self._audit(db, "arena-runner", "arena.pr_wrong_base", parent, {"pr": pr.get("url"), "base": pr.get("baseRefName")})
+        await self._notify(db, "Pull request targets the wrong branch", reason, severity="critical", link="/approvals")
         await db.commit()
 
     # ------------------------------------------------------------------ monitoring
@@ -492,20 +662,41 @@ class ArenaAgentRunner:
             await self._block_needs_human(db, session, active, session.needs_human_reason or "human check on the Arena page")
             return {"phase": session.phase}
 
+        await self._record_chat_path(session)
+        if page not in {"generating", "offline"} and not await self._on_task_chat(db, session, active, changed):
+            return {"phase": session.phase, "chat": "returning"}
+
         # The agent says it cannot reach GitHub: Keep working or nudges cannot help, a human must connect it.
         if not session.pr_number and session.submitted_at is not None and (
-            page == "keep_working_visible" or (changed and page in {"idle", "ready"})
+            page in {"keep_working_visible", "tool_call_limit"} or (changed and page in {"idle", "ready"})
         ) and await self._reports_github_blocked(session):
             slug = repo_slug(project) or "the project repository"
             await self._block_needs_human(db, session, active, f"Arena agent has no GitHub access to {slug}: connect GitHub for this account")
             return {"phase": session.phase, "github_blocked": True}
 
         reference = max(filter(None, [_naive(session.last_state_change_at), _naive(session.submitted_at)]), default=None)
+        if reference and page == "generating" and (
+            timedelta(minutes=self.stall_minutes / 2) < _naive(_now()) - reference <= timedelta(minutes=self.stall_minutes)
+        ):
+            await self._note_page_mark(session, reference)
         if reference and _naive(_now()) - reference > timedelta(minutes=self.stall_minutes) and not (page in {"idle", "ready"} and session.pr_number):
+            if page == "generating" and await self._page_progressed(session, reference):
+                session.last_state_change_at = _now()  # a long turn keeps "generating" while it really works
+                await db.commit()
+                return {"phase": session.phase, "page": page}
+            if page == "generating" and session.pr_number and await self._report_on_page(session):
+                # The page still shows Stop, but the work is done: a PR exists and the report has not changed.
+                append_event(session, "finished_while_generating")
+                await self._close_feedback_once(session)
+                return await self._collect_report(db, session, parent, active, project)
             await self._block_needs_human(db, session, active, f"stalled: no Arena activity or new commits for {int(self.stall_minutes)} minutes")
             return {"phase": session.phase, "stalled": True}
 
         github: dict[str, Any] = {}
+        if page == "tool_call_limit":
+            handled, github = await self._handle_tool_call_limit(db, session, parent, active, project)
+            if handled is not None:
+                return handled
         if page == "keep_working_visible":
             # Arena shows this option after every reply, so its presence does not mean the agent stopped early.
             decision, github = await self._keep_working_decision(db, session, parent, project)
@@ -534,7 +725,7 @@ class ArenaAgentRunner:
                     append_event(session, "keep_working_skipped", decision)
 
         # Quiet = the agent stopped: idle, or Keep working shown when it must not be pressed.
-        quiet = page in {"idle", "ready", "keep_working_visible"}
+        quiet = page in {"idle", "ready", "keep_working_visible", "tool_call_limit", "pr_ready"}
         if not github and session.submitted_at is not None and self._github_due(session, force=quiet and changed):
             github = await self._poll_github(db, session, parent, project)
             if github.get("merged_outside"):
@@ -547,6 +738,10 @@ class ArenaAgentRunner:
             if not github:
                 await db.commit()
                 return {"phase": session.phase, "waiting": "github"}
+            secured = await self._secure_pull_request(db, session, parent, project, page)
+            if secured is not None:
+                await db.commit()
+                return {"phase": session.phase, **secured}
             misses = self._quiet_misses.get(session.id, 0) + 1
             self._quiet_misses[session.id] = misses
             if misses < NO_PR_QUIET_CHECKS:
@@ -560,11 +755,13 @@ class ArenaAgentRunner:
             await self._follow_up(db, session, "pr_nudge", "\n".join([
                 f"You have not opened the pull request for {pr_title_prefix(parent.id)} yet.",
                 f"Push your work and open ONE pull request whose title starts with {pr_title_prefix(parent.id)}. Do NOT merge it.",
+                *base_branch_publish_steps(project),
             ]))
             self._quiet_misses[session.id] = 0
             return {"phase": session.phase, "nudged": nudges + 1}
 
         self._quiet_misses.pop(session.id, None)
+        await self._close_feedback_once(session)
         return await self._collect_report(db, session, parent, active, project)
 
     async def _keep_working_decision(self, db: AsyncSession, session: ArenaSession, parent: Task,
@@ -593,6 +790,121 @@ class ArenaAgentRunner:
             return "github_unknown", github
         return "press", github
 
+    async def _handle_tool_call_limit(self, db: AsyncSession, session: ArenaSession, parent: Task, active: Task,
+                                      project: Project | None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Arena paused the agent mid-turn: continue it under the Keep working safeguards."""
+        decision, github = await self._keep_working_decision(db, session, parent, project)
+        if decision == "merged_outside":
+            return {"phase": session.phase}, github
+        if decision == "press":
+            if await self._follow_up(db, session, "tool_limit_continue", TOOL_LIMIT_CONTINUE):
+                session.keep_working_count += 1
+                await db.commit()
+            return {"phase": session.phase, "keep_working": session.keep_working_count}, github
+        if decision == "limit":
+            await self._block_needs_human(
+                db, session, active,
+                f"Arena tool-call limit: the task is not finished and all {session.keep_working_count} "
+                "automatic continues were used",
+            )
+            return {"phase": session.phase, "limit": True}, github
+        skipped = [e for e in session.events or [] if e.get("kind") == "tool_limit_skipped"]
+        if not skipped or skipped[-1].get("detail") != decision:
+            append_event(session, "tool_limit_skipped", decision)
+        return None, github
+
+    async def _report_on_page(self, session: ArenaSession) -> bool:
+        try:
+            return report_is_complete(str((await self.adapter.read_last_reply(session.profile_id)).get("text") or ""))
+        except ArenaAgentError as exc:
+            append_event(session, "read_reply_failed", exc.code)
+            return False
+
+    async def _transcript_mark(self, session: ArenaSession) -> str | None:
+        try:
+            latest = (await self.adapter.selector_test(session.profile_id)).get("latest_reply") or {}
+        except ArenaAgentError as exc:
+            append_event(session, "stall_check_failed", exc.code)
+            return None
+        return f"{latest.get('count')}:{latest.get('chars')}"
+
+    @staticmethod
+    def _mark_since(session: ArenaSession, reference: datetime) -> str | None:
+        marks = [e for e in session.events or [] if e.get("kind") == "page_mark"
+                 and _naive(datetime.fromisoformat(e["ts"])) >= reference]
+        return marks[-1].get("detail") if marks else None
+
+    async def _note_page_mark(self, session: ArenaSession, reference: datetime) -> None:
+        """Halfway to a stall, remember the transcript. Stored on the session, so a restart keeps it."""
+        if self._mark_since(session, reference) is None:
+            mark = await self._transcript_mark(session)
+            if mark:
+                append_event(session, "page_mark", mark)
+
+    async def _page_progressed(self, session: ArenaSession, reference: datetime) -> bool:
+        """Read-only: did the transcript change since the halfway mark?"""
+        earlier = self._mark_since(session, reference)
+        return earlier is not None and (await self._transcript_mark(session)) not in {None, earlier}
+
+    async def _close_feedback_once(self, session: ArenaSession) -> None:
+        """A finished task: dismiss "Was this task successful?" without answering it."""
+        if any(e.get("kind") == "feedback_closed" for e in session.events or []):
+            return
+        try:
+            closed = await self.adapter.close_feedback(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "feedback_close_failed", exc.code)
+            return
+        if closed.get("closed"):
+            append_event(session, "feedback_closed")
+
+    async def _secure_pull_request(self, db: AsyncSession, session: ArenaSession, parent: Task, project: Project | None,
+                                   page: str) -> dict[str, Any] | None:
+        """The agent finished without a usable PR: publish its work and open the PR from AATM."""
+        slug = repo_slug(project)
+        if not slug or not project:
+            return None
+        try:
+            finished = page == "pr_ready" or reply_has_final_report(
+                str((await self.adapter.read_last_reply(session.profile_id)).get("text") or ""))
+            if not finished:
+                return None
+            path = str(((await self.adapter.selector_test(session.profile_id)).get("page") or {}).get("path") or "")
+        except ArenaAgentError as exc:
+            append_event(session, "secure_pr_failed", exc.code)
+            return None
+        suffix = path.rstrip("/").rsplit("/", 1)[-1][-8:]
+        cwd = project.repo_path
+        listed = await git_workflow_manager.list_arena_branches(repo_slug=slug, cwd=cwd)
+        branch = next((b["name"] for b in listed.get("branches", []) if suffix and b["name"].startswith(f"arena/{suffix}-")), None)
+        if not branch:
+            return None
+        base = project_base_branch(project)
+        ahead = await git_workflow_manager.commits_ahead(repo_slug=slug, base=base, head=branch, cwd=cwd)
+        if not ahead.get("ok"):
+            return None
+        if ahead["ahead"] <= 0:
+            clicks = [e for e in session.events or [] if e.get("kind") == "arena_create_pr"]
+            if clicks:
+                clicked_at = datetime.fromisoformat(clicks[-1]["ts"])
+                waited = datetime.now(timezone.utc) - clicked_at
+                return {"waiting": "arena_push"} if waited < timedelta(minutes=CREATE_PR_WAIT_MINUTES) else None
+            try:
+                await self.adapter.create_pr(session.profile_id, repo=slug, branch=branch)
+            except ArenaAgentError as exc:
+                append_event(session, "arena_create_pr_failed", exc.code)
+                return None
+            append_event(session, "arena_create_pr", branch)
+            return {"waiting": "arena_push"}
+        result = await git_workflow_manager.ensure_task_pull_request(
+            repo_slug=slug, task_id=parent.id, title=parent.title, branch=branch, base=base, cwd=cwd)
+        if not result.get("ok"):
+            append_event(session, "pr_ensure_failed", str(result.get("code")))
+            return None
+        append_event(session, "pr_ensured", ", ".join(result.get("actions") or []) or "already correct")
+        await self._poll_github(db, session, parent, project)
+        return {"pr_ensured": True}
+
     async def _reports_github_blocked(self, session: ArenaSession) -> bool:
         try:
             reply = await self.adapter.read_last_reply(session.profile_id)
@@ -604,12 +916,26 @@ class ArenaAgentRunner:
     async def _follow_up(self, db: AsyncSession, session: ArenaSession, kind: str, text: str) -> bool:
         parent = await db.get(Task, session.task_id) if session.task_id else None
         repo = repo_slug(await self._project(db, parent)) if parent else None
+        failures = self._chat_state()["failures"]
         try:
             await self.adapter.submit(session.profile_id, text, repo=repo)
         except ArenaAgentError as exc:
             append_event(session, f"{kind}_failed", f"{exc.code}: {exc.message}")
-            await db.commit()
+            failures[session.id] = failures.get(session.id, 0) + 1
+            active = await db.get(Task, session.active_task_id) if session.active_task_id else parent
+            if active is not None and (exc.code == "needs_human" or exc.code in REPO_SAFETY_CODES):
+                # Retrying cannot help: the window shows another chat or repository.
+                failures.pop(session.id, None)
+                await self._block_needs_human(db, session, active, f"follow-up not sent: {exc.message}. Open the task's chat "
+                                                                   "in this window, then press Resume")
+            elif active is not None and failures[session.id] >= FOLLOW_UP_FAILURES_BEFORE_HUMAN:
+                failures.pop(session.id, None)
+                await self._block_needs_human(db, session, active, f"follow-up failed {FOLLOW_UP_FAILURES_BEFORE_HUMAN} times in a row "
+                                                                   f"({exc.code}: {exc.message})")
+            else:
+                await db.commit()
             return False
+        failures.pop(session.id, None)
         session.follow_up_count += 1
         session.last_state_change_at = _now()
         append_event(session, kind)

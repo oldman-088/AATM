@@ -123,3 +123,75 @@ def test_stuck_tasks_reads_database_read_only(wd, tmp_path):
     assert list(found) == ["t1"]
     assert "25" in found["t1"]
     assert db.read_bytes() == before
+
+
+REDIS_TRACE = [
+    "Traceback (most recent call last):", '  File "a.py", line 1, in x', "    await fail(error)", "    raise error",
+    "TimeoutError: first", "", "During handling of the above exception, another exception occurred:", "",
+    "Traceback (most recent call last):", '  File "b.py", line 2, in y', "    raise error",
+    "redis.exceptions.TimeoutError: Timeout reading", "",
+]
+
+
+def test_traceback_gives_one_alert_with_its_final_error(wd):
+    scanner = wd.LogScanner()
+    assert scanner.feed(REDIS_TRACE) == []
+    assert scanner.feed([]) == ["redis.exceptions.TimeoutError: Timeout reading"]
+
+
+@pytest.mark.parametrize("line", [
+    'INFO:     127.0.0.1:1 - "GET /api/health HTTP/1.1" 401 Unauthorized',
+    'INFO:     127.0.0.1:1 - "GET /api/v1/x?limit=500 HTTP/1.1" 200 OK',
+    "    await fail(error)", "raise error",
+])
+def test_normal_lines_stay_quiet(wd, line):
+    scanner = wd.LogScanner()
+    assert scanner.feed([line]) == [] and scanner.feed([]) == []
+
+
+def test_shutdown_tracebacks_stay_quiet_but_real_errors_alert(wd):
+    scanner = wd.LogScanner()
+    assert scanner.feed(["Traceback (most recent call last):", "  x", "asyncio.exceptions.CancelledError"]) == []
+    assert scanner.feed([]) == []
+    assert scanner.feed(['INFO: 1 - "GET /x HTTP/1.1" 500 Internal Server Error']) != []
+    assert scanner.feed(["ERROR:    something broke"]) == ["ERROR:    something broke"]
+    assert scanner.feed(["Background orchestration cycle failed; the next interval will retry"]) != []
+
+
+def _monitor(wd, monkeypatch, now):
+    sent = []
+    alerter = wd.Alerter(send=lambda key, message: sent.append(key), clock=lambda: now[0])
+    monkeypatch.setattr(wd, "_parse_db_path", lambda _env: Path("/nonexistent"))
+    return wd.Watchdog(alerter, {}), sent
+
+
+def test_short_outage_is_quiet_and_a_lasting_one_alerts(wd, monkeypatch):
+    now = [0.0]
+    monitor, sent = _monitor(wd, monkeypatch, now)
+    monkeypatch.setattr(wd, "http_get", lambda *_a, **_k: (0, b""))
+    monkeypatch.setattr(wd, "port_open", lambda *_a, **_k: True)
+    monkeypatch.setattr(wd, "container_running", lambda _name: True)
+    monitor.check_services()
+    now[0] = 60.0
+    monitor.check_services()
+    assert sent == []
+    now[0] = 91.0
+    monitor.check_services()
+    assert sent == ["service:backend"]
+
+
+def test_log_lines_right_after_a_restart_are_ignored(wd, monkeypatch, tmp_path):
+    now = [0.0]
+    monitor, sent = _monitor(wd, monkeypatch, now)
+    log = tmp_path / "backend.log"
+    log.write_text("old old old old\n")
+    monitor.logs = {"backend": wd.LogTail(log)}
+    monitor.scanners = {"backend": wd.LogScanner()}
+    log.write_text("ERROR: a\n")
+    monitor.check_logs()
+    assert sent == []
+    now[0] = 100.0
+    with log.open("a") as handle:
+        handle.write("ERROR: b\n")
+    monitor.check_logs()
+    assert len(sent) == 1

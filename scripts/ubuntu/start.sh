@@ -87,6 +87,7 @@ if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
     fi
     echo "[AATM] Starting local Arena bridge on 127.0.0.1:${ARENA_BRIDGE_PORT:-4100}..."
     (set -a; [[ -f .env ]] && . ./.env; set +a; \
+      ARENA_CONNECTOR_STATE_FILE="${ARENA_CONNECTOR_STATE_FILE:-$HOME/.aatm/bridge/connector-profiles.json}" \
       ARENA_BRIDGE_HOST=127.0.0.1 nohup "$ROOT_DIR/.venv/bin/python" -m bridge.server \
       > "$ROOT_DIR/logs/bridge.log" 2>&1 & echo $! > "$ROOT_DIR/logs/bridge.pid")
   fi
@@ -116,7 +117,7 @@ else
   # credential refs and the backend -> bridge ARENA_BRIDGE_TOKEN are read from the process
   # environment, so both processes must get the same token from the same file.
   (set -a; [[ -f .env ]] && . ./.env; set +a; \
-    nohup "$ROOT_DIR/.venv/bin/uvicorn" app.main:app \
+    AATM_AUTO_SNAPSHOT="${AATM_AUTO_SNAPSHOT:-1}" nohup "$ROOT_DIR/.venv/bin/uvicorn" app.main:app \
     --app-dir "$ROOT_DIR/backend" --host 0.0.0.0 --port "$BACKEND_PORT" \
     > "$ROOT_DIR/logs/backend.log" 2>&1 & echo $! > "$ROOT_DIR/logs/backend.pid")
 fi
@@ -137,16 +138,19 @@ if [[ $backend_ready -ne 1 ]]; then
 fi
 echo "[AATM] Backend healthy: http://localhost:${BACKEND_PORT}/api/health"
 
-if command -v npm >/dev/null 2>&1 && [[ -d frontend ]]; then
+if [[ -x frontend/node_modules/.bin/vite ]]; then
   if [[ -f logs/frontend.pid ]] && kill -0 "$(cat logs/frontend.pid)" 2>/dev/null; then
     echo "[AATM] Frontend already running (PID $(cat logs/frontend.pid))."
+  elif bridge_port_open "$FRONTEND_PORT"; then
+    echo "[AATM] Port ${FRONTEND_PORT} is already serving; not starting another frontend."
   else
     echo "[AATM] Starting Frontend Dev Server on 0.0.0.0:${FRONTEND_PORT}..."
-    (cd frontend && nohup npm run --silent dev -- --port "$FRONTEND_PORT" \
-      > "$ROOT_DIR/logs/frontend.log" 2>&1 & echo $! > "$ROOT_DIR/logs/frontend.pid")
+    # Start vite directly so the PID file names the real server and stop.sh can stop it.
+    (cd frontend; nohup ./node_modules/.bin/vite --host 0.0.0.0 --port "$FRONTEND_PORT" --strictPort \
+      > "$ROOT_DIR/logs/frontend.log" 2>&1 < /dev/null & echo $! > "$ROOT_DIR/logs/frontend.pid")
   fi
 else
-  echo "[AATM] Frontend skipped (npm not available or frontend/ missing)."
+  echo "[AATM] Frontend skipped (frontend/node_modules is missing)."
 fi
 
 # Read-only watchdog (notifications + logs/watchdog.log). It never restarts or changes anything.
@@ -157,6 +161,17 @@ if [[ "${WATCHDOG_AUTOSTART:-true}" == "true" ]]; then
     echo "[AATM] Starting watchdog (log: logs/watchdog.log)..."
     nohup "$ROOT_DIR/scripts/ubuntu/watchdog.sh" >> "$ROOT_DIR/logs/watchdog.out" 2>&1 &
     echo $! > "$ROOT_DIR/logs/watchdog.pid"
+  fi
+fi
+
+# Optional send-only Telegram alerts (TELEGRAM_BOT_ENABLED=true in .env). No webhook and no open port.
+if "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/ubuntu/telegram_alerts.py" --check-enabled; then
+  if [[ -f logs/telegram.pid ]] && kill -0 "$(cat logs/telegram.pid)" 2>/dev/null; then
+    echo "[AATM] Telegram alerts already running (PID $(cat logs/telegram.pid))."
+  else
+    echo "[AATM] Starting Telegram alerts (log: logs/telegram.log)..."
+    nohup "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/ubuntu/telegram_alerts.py" >> "$ROOT_DIR/logs/telegram.log" 2>&1 < /dev/null &
+    echo $! > "$ROOT_DIR/logs/telegram.pid"
   fi
 fi
 

@@ -85,6 +85,9 @@ class ArenaAgentError(Exception):
         self.message = message
 
 
+TOOL_LIMIT_CONTINUE = "continue"  # Arena's tool-call limit pause resumes only on a new message
+
+
 def keep_working_allowed(count: int) -> bool:
     """``ARENA_AGENT_MAX_KEEP_WORKING`` = 0 means unlimited continuation."""
     limit = get_settings().ARENA_AGENT_MAX_KEEP_WORKING
@@ -110,7 +113,7 @@ class ArenaAgentAdapter(BaseProviderAdapter):
 
     # ------------------------------------------------------------------ engine API
     async def command(self, profile_id: str, command: str, text: str | None = None, *, timeout: float | None = None,
-                      repo: str | None = None) -> dict[str, Any]:
+                      repo: str | None = None, branch: str | None = None, url: str | None = None) -> dict[str, Any]:
         """Run one validated command on the profile's Arena page; raises ArenaAgentError on failure."""
         from app.browser.arena_connector import bridge_call
 
@@ -118,6 +121,10 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         args: dict[str, Any] = {"text": text} if text is not None else {}
         if repo:
             args["repo"] = repo
+        if branch:
+            args["branch"] = branch
+        if url:
+            args["url"] = url
         res = await bridge_call("POST", f"/v1/connector/profiles/{profile_id}/command",
                                 {"command": command, "args": args, "timeout_seconds": wait}, timeout=wait + 15)
         if not res.get("ok"):
@@ -152,6 +159,10 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         await self.wait_for_state(profile_id, {"ready"}, timeout=ready_timeout)
         return result
 
+    async def open_chat(self, profile_id: str, url: str) -> dict[str, Any]:
+        """Load an existing chat in this window (same-origin navigation; the bridge checks the origin)."""
+        return await self.command(profile_id, "new_session", url=url)
+
     async def select_repo(self, profile_id: str, repo: str) -> dict[str, Any]:
         """Select the task's repository for this chat; raises unless the page confirms it.
 
@@ -178,6 +189,19 @@ class ArenaAgentAdapter(BaseProviderAdapter):
     async def keep_working(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "keep_working")
 
+    async def transcript_mark(self, profile_id: str) -> dict[str, Any]:
+        """Read-only fingerprint of the page, used to tell whether a prompt really reached it."""
+        page = await self.selector_test(profile_id)
+        latest = page.get("latest_reply") or {}
+        return {"mark": f"{latest.get('count')}:{latest.get('chars')}", "state": page.get("state")}
+
+    async def create_pr(self, profile_id: str, *, repo: str, branch: str) -> dict[str, Any]:
+        """Press Arena's Create PR for this chat after the page confirms it is the task's branch."""
+        return await self.command(profile_id, "create_pr", repo=repo, branch=branch)
+
+    async def close_feedback(self, profile_id: str) -> dict[str, Any]:
+        return await self.command(profile_id, "close_feedback")
+
     async def read_last_reply(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "read_last_reply")
 
@@ -201,7 +225,12 @@ class ArenaAgentAdapter(BaseProviderAdapter):
                     return {"state": current, "keep_working": continued, "limit_reached": True}
                 clicked = await self.keep_working(profile_id)
                 continued += 1 if clicked.get("clicked") else 0
-            elif current == "idle":
+            elif current == "tool_call_limit":
+                if not keep_working_allowed(keep_working_used + continued):
+                    return {"state": current, "keep_working": continued, "limit_reached": True}
+                await self.submit(profile_id, TOOL_LIMIT_CONTINUE)
+                continued += 1
+            elif current in {"idle", "pr_ready"}:
                 return {"state": current, "keep_working": continued, "limit_reached": False}
             await asyncio.sleep(poll)
         raise ArenaAgentError("timeout", "Arena Agent did not finish in time.")

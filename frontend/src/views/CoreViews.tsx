@@ -12,25 +12,29 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { Badge, Button, Card, Input, Progress, Select } from '../components/ui'
+import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 import { messageText } from '../lib/chat'
 
 export function DashboardView({
   overview,
+  error,
   onRefresh,
   onRunCycle,
   onSelfHeal,
   onOpenProvidersWizard,
 }: {
   overview: any
+  error?: string | null
   onRefresh: () => void
   onRunCycle: () => void
   onSelfHeal: () => void
   onOpenProvidersWizard?: () => void
 }) {
   const { t, formatNumber, formatDate } = useI18n()
-  if (!overview) return <div className="text-slate-400">{t.common.loading}</div>
+  if (error) return <EmptyState variant="error" onRetry={onRefresh} testId="dashboard-error" />
+  if (!overview) return <EmptyState variant="loading" testId="dashboard-loading" />
   const { kpis, divisions, resources, recommendations, recent_events, sandbox, model_status } = overview
 
   return (
@@ -115,7 +119,7 @@ export function DashboardView({
         <Card>
           <div className="text-xs text-slate-400">{t.dashboard.activeWorkers}</div>
           <div className="mt-1 text-2xl font-bold text-sky-400">
-            {formatNumber(kpis.active_workers)} / {formatNumber(4)}
+            {formatNumber(kpis.active_workers)} / {formatNumber(kpis.total_agents)}
           </div>
           <div className="mt-1 text-xs text-slate-500">
             {formatNumber(kpis.idle_workers)} {t.common.idle}
@@ -133,19 +137,19 @@ export function DashboardView({
           <div className="mt-1 text-2xl font-bold text-indigo-400">
             {formatNumber(kpis.healthy_providers)} / {formatNumber(kpis.total_providers)}
           </div>
-          <div className="mt-1 text-xs text-slate-500">Arena + Anthropic</div>
+          <div className="mt-1 text-xs text-slate-500">{t.dashboard.providersSublabel}</div>
         </Card>
         <Card>
           <div className="text-xs text-slate-400">{t.dashboard.runningBrowsers}</div>
           <div className="mt-1 text-2xl font-bold text-cyan-400">
             {formatNumber(kpis.running_browsers)} / {formatNumber(kpis.total_browsers)}
           </div>
-          <div className="mt-1 text-xs text-slate-500">Persistent Profiles</div>
+          <div className="mt-1 text-xs text-slate-500">{t.dashboard.profilesSublabel}</div>
         </Card>
         <Card>
           <div className="text-xs text-slate-400">{t.dashboard.pendingApprovals}</div>
           <div className="mt-1 text-2xl font-bold text-amber-400">{formatNumber(kpis.pending_approvals)}</div>
-          <div className="mt-1 text-xs text-slate-500">Approval Center</div>
+          <div className="mt-1 text-xs text-slate-500">{t.dashboard.approvalsSublabel}</div>
         </Card>
       </div>
 
@@ -247,10 +251,12 @@ export function DashboardView({
 export function ManagerChatView({
   messages,
   projectId,
+  error,
   onReload,
 }: {
   messages: any[]
   projectId: string | null
+  error?: string | null
   onReload: () => void
 }) {
   const { t, formatDate } = useI18n()
@@ -294,7 +300,11 @@ export function ManagerChatView({
 
       <Card className="flex h-[520px] flex-col justify-between">
         <div className="flex-1 space-y-3 overflow-y-auto pe-2">
-          {messages.map((m) => (
+          {error ? (
+            <EmptyState variant="error" onRetry={onReload} testId="chat-error" />
+          ) : messages.length === 0 ? (
+            <EmptyState variant="empty" testId="chat-empty" />
+          ) : messages.map((m) => (
             <div
               key={m.id}
               className={`rounded-xl border p-3 text-sm ${
@@ -337,15 +347,20 @@ export function ManagerChatView({
 export function AgentsView({
   agents,
   providers = [],
+  error,
   onReload,
 }: {
   agents: any[]
   providers?: any[]
+  error?: string | null
   onReload: () => void
 }) {
   const { t, formatNumber } = useI18n()
   const [modelEdits, setModelEdits] = useState<Record<string, { provider_id: string; model_name: string }>>({})
   const [savedAgentId, setSavedAgentId] = useState<string | null>(null)
+
+  if (error) return <EmptyState variant="error" onRetry={onReload} testId="agents-error" />
+  if (!agents.length) return <EmptyState variant="empty" testId="agents-empty" />
 
   const toggleStatus = async (ag: any) => {
     const nextStatus = ag.status === 'paused' ? 'idle' : 'paused'
@@ -490,10 +505,12 @@ export function AgentsView({
 export function TasksView({
   tasks,
   projectId,
+  error,
   onReload,
 }: {
   tasks: any[]
   projectId: string | null
+  error?: string | null
   onReload: () => void
 }) {
   const { t } = useI18n()
@@ -569,7 +586,12 @@ export function TasksView({
         </form>
       </Card>
 
-      <div className="space-y-2.5">
+      {error ? (
+        <EmptyState variant="error" onRetry={onReload} testId="tasks-error" />
+      ) : tasks.length === 0 ? (
+        <EmptyState variant="empty" testId="tasks-empty" />
+      ) : (
+        <div className="space-y-2.5">
         {tasks.map((task) => (
           <Card key={task.id} className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
@@ -631,7 +653,8 @@ export function TasksView({
             </div>
           </Card>
         ))}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

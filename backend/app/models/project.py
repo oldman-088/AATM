@@ -27,6 +27,17 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+def configured_base_branch(project: Project | None) -> str | None:
+    """The branch explicitly set for this project's work (``config.base_branch``), if any."""
+    config = project.config if project is not None and isinstance(project.config, dict) else {}
+    return str(config.get("base_branch") or "").strip() or None
+
+
+def project_base_branch(project: Project | None) -> str:
+    """The branch work starts from and pull requests target."""
+    return configured_base_branch(project) or (project.default_branch if project is not None else "") or "main"
+
+
 class MemoryEntry(Base):
     __tablename__ = "memory_entries"
 

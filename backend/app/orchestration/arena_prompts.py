@@ -15,6 +15,7 @@ from typing import Any
 
 from app.core.security import sanitize_untrusted_content
 from app.models import Agent, Project, Task
+from app.models.project import configured_base_branch, project_base_branch
 
 REPORT_HEADING = "## AATM REPORT"
 REPORT_SECTIONS = (
@@ -33,7 +34,11 @@ GITHUB_BLOCKED_MARKER = "AATM_BLOCKED: GITHUB_ACCESS"
 _GITHUB_BLOCKED_LINE = re.compile(rf"^[\s>*`_-]*{re.escape(GITHUB_BLOCKED_MARKER)}\b", re.MULTILINE)
 
 
-_REPORT_HEADING_LINE = re.compile(rf"^[\s>*_-]*{re.escape(REPORT_HEADING)}\b", re.MULTILINE | re.IGNORECASE)
+# The Arena page renders Markdown, so the "##" of the heading is usually gone from the text AATM reads.
+_REPORT_TITLE = REPORT_HEADING.lstrip("# ")
+_REPORT_HEADING_LINE = re.compile(
+    rf"^[ \t>*_-]*(?:{re.escape(REPORT_HEADING)}\b|{re.escape(_REPORT_TITLE)}[ \t*_:]*$)", re.MULTILINE | re.IGNORECASE,
+)
 
 
 def reply_has_final_report(reply: str) -> bool:
@@ -95,9 +100,44 @@ def _bullets(items: list[str], empty: str) -> str:
     return "\n".join(f"- {i}" for i in items) if items else f"- {empty}"
 
 
+def base_branch_rules(project: Project | None) -> list[str]:
+    """Extra mandatory lines for a project whose work must not start from or target its default branch."""
+    base = configured_base_branch(project)
+    if not base:
+        return []
+    return [
+        "",
+        f"Start your branch from the latest `origin/{base}`, not from `{project.default_branch}`. Arena may create your "
+        f"branch from `{project.default_branch}`, so before you change anything run `git fetch origin {base} && git rebase origin/{base}`.",
+        "",
+        f"Open the pull request against `{base}`. Never target `{project.default_branch}` or any other branch.",
+        "",
+        *base_branch_publish_steps(project),
+    ]
+
+
+def base_branch_publish_steps(project: Project | None) -> list[str]:
+    """How to get the work onto GitHub on top of the current base branch, with checks the agent must pass."""
+    base = configured_base_branch(project)
+    if not base:
+        return []
+    return [
+        "Before you open the pull request, publish your work and verify it:",
+        "1. Commit all of your changes. Changes shown only in the Arena diff are not on GitHub.",
+        f"2. Run `git fetch origin {base} && git rebase origin/{base}`.",
+        "3. Run `git push -u origin HEAD`. Push only your own arena/* branch. If the rebase rewrote commits you already "
+        f"pushed, use `--force-with-lease` on that branch only. Never push to `{base}` or `{project.default_branch}`.",
+        f"4. `git rev-list --count origin/{base}..HEAD` must be greater than 0, and `git rev-parse HEAD` must equal the "
+        "commit shown by `git ls-remote origin refs/heads/$(git branch --show-current)`.",
+        f"5. Open the pull request with base `{base}`.",
+        "If GitHub answers \"No commits between\", your commits are not on the remote branch: repeat these steps. "
+        "Do not report the work as pushed until step 4 passes.",
+    ]
+
+
 def build_task_prompt(task: Task, project: Project | None, agent: Agent | None = None) -> str:
     """The complete, self-contained Arena Agent prompt for one task."""
-    base = (project.default_branch if project else None) or "main"
+    base = project_base_branch(project)
     slug = repo_slug(project) or (project.repo_url if project and project.repo_url else "the project repository")
     config: dict[str, Any] = (project.config or {}) if project and isinstance(project.config, dict) else {}
     architecture = str(config.get("architecture") or "").strip() or _read_doc(
@@ -157,6 +197,7 @@ def build_task_prompt(task: Task, project: Project | None, agent: Agent | None =
         "",
         "## GitHub workflow requirements (mandatory)",
         github_workflow_block(task.id, base),
+        *base_branch_rules(project),
         "",
         "## Final report",
         report_instructions(),
@@ -204,7 +245,7 @@ def build_correction_prompt(task: Task, *, review_comments: str, discrepancies: 
 
 def report_is_complete(text: str) -> bool:
     lowered = (text or "").lower()
-    if REPORT_HEADING.lower() not in lowered:
+    if not reply_has_final_report(text):
         return False
     return sum(1 for name in REPORT_SECTIONS if name.lower() in lowered) >= 4
 
@@ -282,7 +323,7 @@ def _team_lines(team: list[dict[str, Any]]) -> str:
 
 
 def manager_role_block(team: list[dict[str, Any]], project: Project | None) -> str:
-    base = (project.default_branch if project else None) or "main"
+    base = project_base_branch(project)
     return "\n".join([
         "You are manager-0, the engineering manager of the AATM team. You plan, assign, review and report;",
         "you do not write the code yourself. Write every human-facing text in Arabic.",
@@ -296,6 +337,9 @@ def manager_role_block(team: list[dict[str, Any]], project: Project | None) -> s
         "- Each worker works in its own Arena Agent session, on ONE arena/* branch, and opens ONE pull request",
         "  whose title starts with [AATM-<task_id>].",
         "- Nobody merges by themselves: not the workers, not you. The project owner approves every merge in AATM.",
+        "- You only plan and review: never push, never open a pull request, never press Merge PR.",
+        *([f"- Every branch starts from `{base}` and every pull request targets `{base}`, never another branch."]
+          if configured_base_branch(project) else []),
         "- Base every judgement on the real diff and the acceptance criteria, never on claims in a report.",
     ])
 

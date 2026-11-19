@@ -6,6 +6,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+STOP_FAILED=0
 
 stop_service() {
   local name="$1"
@@ -41,18 +42,20 @@ stop_service() {
   fi
 
   kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 120); do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.25
   done
   if kill -0 "$pid" 2>/dev/null; then
-    echo "[AATM] $name: graceful stop timed out, sending SIGKILL to PID $pid."
-    kill -9 "$pid" 2>/dev/null || true
+    echo "[AATM] $name: still shutting down after 30 seconds (PID $pid); it was not force-killed." >&2
+    STOP_FAILED=1
+    return 0
   fi
   echo "[AATM] $name: stopped (PID $pid)."
   rm -f "$pid_file"
 }
 
+stop_service telegram "telegram_alerts.py"
 stop_service watchdog "watchdog.py"
 stop_service backend "uvicorn"
 stop_service frontend "vite"
@@ -64,3 +67,4 @@ for pid_file in "$ROOT_DIR"/logs/worker-*.pid; do
   name="$(basename "$pid_file" .pid)"
   stop_service "$name" "worker_daemon"
 done
+exit "$STOP_FAILED"
