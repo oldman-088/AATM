@@ -235,6 +235,13 @@ class TaskScheduler:
     ) -> dict[str, Any]:
         """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
         session_recovery = await self.recover_sessions_if_needed(db, force=force_session_recovery)
+        try:
+            from app.orchestration.self_heal import heal_orphaned_state
+
+            await heal_orphaned_state(db)
+        except Exception as exc:  # noqa: BLE001 - healing must never stop dispatch
+            logger.warning("Self-heal failed: %s", type(exc).__name__)
+            await db.rollback()
         from app.orchestration.arena_runner import arena_reservations, arena_runner
         from app.orchestration.review import review_service
 
