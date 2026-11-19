@@ -349,9 +349,21 @@ USERSCRIPT_BODY = r"""(function () {
     var panels = suggestionPanels();
     var els = qa("button").filter(function (el) { return !inSuggestionPanel(el, panels); });
     for (var i = 0; i < els.length; i++) {
-      var label = labelOf(els[i]);
       var text = textOf(els[i]).toLowerCase();
-      if ((/stop|abort/.test(label) || /^stop( generating| response)?$/.test(text)) && isVisible(els[i])) return true;
+      if ((isStopLabel(labelOf(els[i])) || /^stop( generating| response)?$/.test(text)) && isVisible(els[i])) return true;
+    }
+    return false;
+  }
+
+  // "stop" or "abort" as a whole word of a control name. A file name such as the changed-file chip
+  // titled "scripts/ubuntu/stop.sh" is not a Stop button, so names with a path or a file extension
+  // never count.
+  function isStopLabel(label) {
+    var parts = label.split(/\s+/);
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i].replace(/[.,:;!?)]+$/, "");
+      if (!part || /[\/\\.]/.test(part)) continue;
+      if (/(^|[-_])(stop|abort)([-_]|$)/.test(part)) return true;
     }
     return false;
   }

@@ -201,3 +201,23 @@ async def test_failed_send_is_not_counted():
     session = _session(2)
     await runner._handle_tool_call_limit(_Db(), session, None, None, None)
     assert session.keep_working_count == 2
+
+
+@needs_chromium
+async def test_changed_file_chips_named_stop_are_not_a_stop_button(open_page):
+    # A task chat that changed scripts/ubuntu/stop.sh shows a chip titled with that path; the page must stay ready.
+    page = await open_page("file_chips=1")
+    state, human = await _report(page)
+    assert human is None and state == "ready"
+    tested = await _command(page, "selector_test")
+    assert tested["data"]["stop"]["found"] is False
+    sent = await _command(page, "submit", {"text": "continue"})
+    assert sent["ok"] is True, sent
+
+
+@needs_chromium
+async def test_a_real_stop_button_still_means_generating(open_page):
+    page = await open_page("file_chips=1&busy=1")
+    tested = await _command(page, "selector_test")
+    assert tested["data"]["stop"]["found"] is True
+    assert tested["data"]["state"] == "generating"
