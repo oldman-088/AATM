@@ -1,5 +1,6 @@
 from app.models.agent import Agent, ApprovalRequest, ChatMessage, Task
 from app.models.infra import AIProvider, ArenaSession, BrowserProfile, BrowserSession, ManagerJob, ProviderUsageLog
+from app.models.lookup import LookupJob, LookupResult, ProviderResult
 from app.models.platform import (
     AgentMessage,
     ExecutionDevice,
@@ -24,10 +25,13 @@ __all__ = [
     "ChatMessage",
     "ExecutionDevice",
     "GitWorkflowRecord",
+    "LookupJob",
+    "LookupResult",
     "MemoryEntry",
     "Notification",
     "Project",
     "ProviderAccount",
+    "ProviderResult",
     "ProviderSession",
     "ProviderUsageLog",
     "SystemSetting",
