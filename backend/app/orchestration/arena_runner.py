@@ -17,6 +17,7 @@ state lives in ``arena_sessions`` / ``tasks``, so a backend or bridge restart re
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -81,6 +82,11 @@ SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
 LIVE_CODE_MIN_SECONDS = 10.0   # at most one GitHub live-diff publish per session per interval
 LIVE_CODE_MAX_FILES = 20       # files streamed per new head (the summary lists all of them)
+FOLLOW_UP_FAILURES_BEFORE_HUMAN = 3  # failed follow-up sends in a row before the owner is asked to look
+CHAT_CHECK_SECONDS = 300.0     # how often a quiet window is checked to still show the task's chat
+CHAT_REOPEN_ATTEMPTS = 3       # navigations back to the task's chat before the owner is asked
+# A chat URL has an id segment (e.g. /agent/01a1ef92-...); the empty new-session page does not.
+CHAT_PATH_RE = re.compile(r"^(/[A-Za-z0-9_.-]+)+/([A-Za-z0-9-]{8,})/?$")
 
 
 def _now() -> datetime:
@@ -105,6 +111,21 @@ async def arena_reservations(db: AsyncSession) -> dict[str, str]:
         select(ArenaSession).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(RESERVING_PHASES))
     )).scalars()
     return {s.agent_id: s.task_id for s in rows if s.task_id}
+
+
+def task_chat_path(session: ArenaSession) -> str | None:
+    """The Arena chat this session's work lives in, recorded after AATM sent the task prompt."""
+    for event in reversed(session.events or []):
+        if event.get("kind") in {"chat_path", "chat_url"}:
+            path = str(event.get("detail") or "")
+            return path if CHAT_PATH_RE.match(path) else None
+    return None
+
+
+def chat_path_matches_branch(path: str, branch: str | None) -> bool:
+    """Arena names its branch arena/<last 8 characters of the chat id>-<repo>."""
+    match = re.match(r"^arena/([A-Za-z0-9]{8})-", branch or "")
+    return match is None or path.rstrip("/")[-8:] == match.group(1)
 
 
 def live_diff_summary(session: ArenaSession, parent: Task, changes: dict[str, Any]) -> dict[str, Any]:
@@ -254,6 +275,7 @@ class ArenaAgentRunner:
                 session.last_state_change_at = session.submitted_at
                 session.phase = "working"
                 append_event(session, "submitted", f"{len(prompt)} chars", title_prefix=pr_title_prefix(task.id))
+                self._chat_state()["unrecorded"].add(session.id)  # remember this chat once its URL is known
                 self._audit(db, agent.id, "arena.task_submitted", task, {"session_id": session.id, "prompt_chars": len(prompt)})
             else:
                 session.phase = "working" if not session.pr_number else "reporting"
@@ -283,6 +305,73 @@ class ArenaAgentRunner:
         ]
         await db.commit()
         await event_bus.emit("arena.session", {"session_id": session.id, "agent_id": agent.id, "task_id": task.id, "phase": session.phase})
+
+    def _chat_state(self) -> dict[str, Any]:
+        """In-memory chat bookkeeping (kept off ``__init__`` so test doubles built with ``__new__`` work)."""
+        return self.__dict__.setdefault("_chat", {"unrecorded": set(), "checked": {}, "reopened": {}, "failures": {}})
+
+    async def _record_chat_path(self, session: ArenaSession) -> None:
+        """After AATM sent the prompt, store the chat's URL so the window can be brought back to it later."""
+        pending = self._chat_state()["unrecorded"]
+        if session.id not in pending:
+            return
+        if task_chat_path(session):
+            pending.discard(session.id)
+            return
+        try:
+            page = await self.adapter.selector_test(session.profile_id)
+        except ArenaAgentError:
+            return
+        path = str((page.get("page") or {}).get("path") or "")
+        if CHAT_PATH_RE.match(path) and chat_path_matches_branch(path, session.branch_name):
+            append_event(session, "chat_path", path)
+            pending.discard(session.id)
+
+    async def _on_task_chat(self, db: AsyncSession, session: ArenaSession, active: Task, changed: bool) -> bool:
+        """True when the window shows this task's chat (or that cannot be known).
+
+        After a restart the window opens on Arena's start page, so replies and follow-ups would reach
+        another chat. A quiet window is sent back to the recorded chat; a busy one is never touched."""
+        path = task_chat_path(session)
+        if not path:
+            return True
+        chat = self._chat_state()
+        now = time.monotonic()
+        if not changed and now - chat["checked"].get(session.id, float("-inf")) < CHAT_CHECK_SECONDS:
+            return True
+        try:
+            page = await self.adapter.selector_test(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "chat_check_failed", f"{exc.code}: {exc.message}")
+            await db.commit()
+            return False
+        where = page.get("page") or {}
+        current = str(where.get("path") or "")
+        if current.rstrip("/") == path.rstrip("/"):
+            chat["checked"][session.id] = now
+            chat["reopened"].pop(session.id, None)
+            return True
+        chat["checked"].pop(session.id, None)
+        if page.get("state") == "generating":  # never interrupt whatever runs there
+            await self._block_needs_human(db, session, active, f"the window is busy in another chat ({current or 'unknown'}); "
+                                                                 f"the task's chat is {path}")
+            return False
+        attempts = chat["reopened"].get(session.id, 0)
+        if attempts >= CHAT_REOPEN_ATTEMPTS:
+            await self._block_needs_human(db, session, active, f"the window stays on {current or 'another page'}; "
+                                                                 f"open the task's chat {path} in it, then press Resume")
+            return False
+        origin = str(where.get("origin") or "")
+        try:
+            await self.adapter.open_chat(session.profile_id, f"{origin}{path}")
+        except ArenaAgentError as exc:
+            await self._block_needs_human(db, session, active, f"could not return the window to the task's chat {path} "
+                                                                 f"({exc.code})")
+            return False
+        chat["reopened"][session.id] = attempts + 1
+        append_event(session, "chat_reopened", f"{current or '?'} -> {path}")
+        await db.commit()
+        return False
 
     async def _submit_landed(self, session: ArenaSession) -> bool:
         started = [e for e in session.events or [] if e.get("kind") == "submit_started"]
@@ -573,6 +662,10 @@ class ArenaAgentRunner:
             await self._block_needs_human(db, session, active, session.needs_human_reason or "human check on the Arena page")
             return {"phase": session.phase}
 
+        await self._record_chat_path(session)
+        if page not in {"generating", "offline"} and not await self._on_task_chat(db, session, active, changed):
+            return {"phase": session.phase, "chat": "returning"}
+
         # The agent says it cannot reach GitHub: Keep working or nudges cannot help, a human must connect it.
         if not session.pr_number and session.submitted_at is not None and (
             page in {"keep_working_visible", "tool_call_limit"} or (changed and page in {"idle", "ready"})
@@ -823,12 +916,26 @@ class ArenaAgentRunner:
     async def _follow_up(self, db: AsyncSession, session: ArenaSession, kind: str, text: str) -> bool:
         parent = await db.get(Task, session.task_id) if session.task_id else None
         repo = repo_slug(await self._project(db, parent)) if parent else None
+        failures = self._chat_state()["failures"]
         try:
             await self.adapter.submit(session.profile_id, text, repo=repo)
         except ArenaAgentError as exc:
             append_event(session, f"{kind}_failed", f"{exc.code}: {exc.message}")
-            await db.commit()
+            failures[session.id] = failures.get(session.id, 0) + 1
+            active = await db.get(Task, session.active_task_id) if session.active_task_id else parent
+            if active is not None and (exc.code == "needs_human" or exc.code in REPO_SAFETY_CODES):
+                # Retrying cannot help: the window shows another chat or repository.
+                failures.pop(session.id, None)
+                await self._block_needs_human(db, session, active, f"follow-up not sent: {exc.message}. Open the task's chat "
+                                                                   "in this window, then press Resume")
+            elif active is not None and failures[session.id] >= FOLLOW_UP_FAILURES_BEFORE_HUMAN:
+                failures.pop(session.id, None)
+                await self._block_needs_human(db, session, active, f"follow-up failed {FOLLOW_UP_FAILURES_BEFORE_HUMAN} times in a row "
+                                                                   f"({exc.code}: {exc.message})")
+            else:
+                await db.commit()
             return False
+        failures.pop(session.id, None)
         session.follow_up_count += 1
         session.last_state_change_at = _now()
         append_event(session, kind)
