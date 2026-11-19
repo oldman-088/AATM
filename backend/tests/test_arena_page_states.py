@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +39,91 @@ window.WebSocket = class {
   close() {}
 };
 """
+
+
+@pytest.mark.skipif(
+    not shutil.which("node") or not (Path(__file__).resolve().parents[2] / "frontend" / "node_modules" / "jsdom").is_dir(),
+    reason="Node.js and frontend jsdom are required for the mock DOM probe",
+)
+def test_stop_command_clicks_mock_agent_button_and_exits_generating(tmp_path):
+    """Exercise the generated userscript against the local Arena Agent mock without Chromium."""
+    root = Path(__file__).resolve().parents[2]
+    config = {"type": "config", "profile_id": "probe", "dom": DEFAULT_DOM, "stop_selectors": [], "stop_phrases": [],
+              "offline_selectors": [], "offline_phrases": [], "status": "ready", "mode": "agent"}
+    userscript = USERSCRIPT_BODY.replace("__AATM_CONFIG__", json.dumps(
+        {"profileId": "probe", "token": "test-token", "bridge": "ws://mock.test/bridge", "version": SCRIPT_VERSION}))
+    userscript_path = tmp_path / "connector.js"
+    userscript_path.write_text(userscript, encoding="utf-8")
+    probe = r"""
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require(path.join(process.argv[1], 'frontend', 'node_modules', 'jsdom'));
+const html = fs.readFileSync(path.join(process.argv[1], 'bridge', 'mock_arena', 'agent.html'), 'utf8');
+const connector = fs.readFileSync(process.argv[2], 'utf8');
+const config = JSON.parse(process.env.AATM_PROBE_CONFIG);
+let socket;
+const sent = [];
+const dom = new JSDOM(html, {
+  url: 'http://mock.test/mock-arena/agent/?gen_ms=10000',
+  runScripts: 'dangerously',
+  pretendToBeVisual: true,
+  beforeParse(window) {
+    const getStyle = window.getComputedStyle.bind(window);
+    window.HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.closest('[hidden]')) return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+      return { width: 120, height: 30, top: 0, left: 0, right: 120, bottom: 30 };
+    };
+    window.HTMLElement.prototype.scrollIntoView = function () {};
+    window.getComputedStyle = el => {
+      const style = getStyle(el);
+      return new Proxy(style, { get(target, key) { return key === 'opacity' && target[key] === '' ? '1' : target[key]; } });
+    };
+    window.WebSocket = class {
+      constructor() { socket = this; this.readyState = 1; setTimeout(() => this.onopen && this.onopen(), 0); }
+      send(raw) {
+        const msg = JSON.parse(raw);
+        sent.push(msg);
+        if (msg.type === 'hello') setTimeout(() => this.onmessage({ data: JSON.stringify(config) }), 0);
+      }
+      close() {}
+    };
+  }
+});
+dom.window.eval(connector);
+async function command(command, request_id, args = {}) {
+  socket.onmessage({ data: JSON.stringify({ type: 'command', request_id, command, args }) });
+  for (let i = 0; i < 60; i++) {
+    const result = sent.find(msg => msg.type === 'result' && msg.request_id === request_id);
+    if (result) return result;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${command}`);
+}
+(async () => {
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const submitted = await command('submit', 'submit-1', { text: 'Long mock generation' });
+    if (!submitted.ok) throw new Error(JSON.stringify(submitted));
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const stopped = await command('stop', 'stop-1');
+    const buttonHidden = dom.window.document.querySelector('#stop').hidden;
+    const state = sent.filter(msg => msg.type === 'state').slice(-1)[0].state;
+    if (!stopped.ok || !stopped.data.stopped || !buttonHidden || state === 'generating') {
+      throw new Error(JSON.stringify({ stopped, buttonHidden, state }));
+    }
+    process.stdout.write(JSON.stringify({ stopped: true, state }));
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  } finally {
+    dom.window.close();
+  }
+})();
+"""
+    result = subprocess.run(["node", "-e", probe, str(root), str(userscript_path)], cwd=root,
+                            env={**os.environ, "AATM_PROBE_CONFIG": json.dumps(config)},
+                            capture_output=True, text=True, timeout=15, check=True)
+    assert json.loads(result.stdout) == {"stopped": True, "state": "ready"}
 
 
 @pytest.fixture
