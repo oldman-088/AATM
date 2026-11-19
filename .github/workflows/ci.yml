@@ -49,6 +49,7 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r backend/requirements.txt
+          .venv/bin/pip install -r scripts/ubuntu/requirements-verify.txt
 
       - name: Install Frontend dependencies
         working-directory: frontend
