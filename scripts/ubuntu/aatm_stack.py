@@ -146,12 +146,12 @@ def open_windows() -> int:
     """
     chrome = _chrome_binary()
     if not chrome:
-        print("[AATM] ERROR: Google Chrome was not found.", file=sys.stderr)
+        print("[AATM] خطأ: لم يُعثر على Google Chrome.", file=sys.stderr)
         return 1
     started: list[Window] = []
     for window in enabled_windows():
         if chrome_main_processes(window.directory):
-            print(f"[AATM] {window.title}: the window is already open.")
+            print(f"[AATM] {window.title}: النافذة مفتوحة مسبقاً.")
             continue
         _launch(chrome, window, "about:blank")
         started.append(window)
@@ -159,7 +159,7 @@ def open_windows() -> int:
         time.sleep(float(os.environ.get("AATM_WINDOW_SETTLE_SECONDS", "10")))
     for window in started:
         _launch(chrome, window, window.url)
-        print(f"[AATM] {window.title}: opened.")
+        print(f"[AATM] {window.title}: فُتحت.")
     return 0
 
 
@@ -174,9 +174,9 @@ def close_windows(timeout: float = 20.0) -> int:
     while time.monotonic() < deadline and any(pid in chrome_main_processes() for pid in processes):
         time.sleep(0.25)
     left = [name for pid, name in chrome_main_processes().items() if pid in processes]
-    print(f"[AATM] Closed {len(processes) - len(left)} Arena window(s).")
+    print(f"[AATM] أُغلقت نوافذ Arena: {len(processes) - len(left)}.")
     if left:
-        print(f"[AATM] WARNING: still closing: {', '.join(sorted(left))}", file=sys.stderr)
+        print(f"[AATM] تحذير: ما زالت تُغلق: {', '.join(sorted(left))}", file=sys.stderr)
         return 1
     return 0
 
@@ -245,13 +245,17 @@ def record_ready(title: str, problems: list[str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"ts": time.time(), "title": title, "problems": problems}, ensure_ascii=False), encoding="utf-8")
     except OSError:
-        print("[AATM] WARNING: could not record the start result.", file=sys.stderr)
+        print("[AATM] تحذير: تعذّر حفظ نتيجة التشغيل.", file=sys.stderr)
 
 
 def notify(title: str, body: str = "") -> None:
     sender = shutil.which("notify-send")
     if sender:
         subprocess.run([sender, "--app-name=AATM", title, body], check=False, capture_output=True, timeout=10)
+
+
+def dashboard_url() -> str:
+    return f"http://localhost:{env_value('FRONTEND_PORT', '5173')}"
 
 
 def wait_ready(timeout: float) -> int:
@@ -264,7 +268,8 @@ def wait_ready(timeout: float) -> int:
         if not problems and total:
             title = f"AATM جاهز ✅ ({connected}/{total} متصلين)"
             print(f"[AATM] {title}")
-            notify(title)
+            print(f"[AATM] اللوحة: {dashboard_url()}")
+            notify(title, dashboard_url())
             record_ready(title, [])
             return 0
         now = time.monotonic()
@@ -274,7 +279,7 @@ def wait_ready(timeout: float) -> int:
         if missing and chrome and not retried and now - started >= retry_after:
             retried = True  # loading the page again only re-runs the userscript; nothing is sent to Arena
             for window in missing:
-                print(f"[AATM] {window.title}: not connected yet, loading its page once more.")
+                print(f"[AATM] {window.title}: لم يتصل بعد، أعيد تحميل صفحته مرة واحدة.")
                 _launch(chrome, window, window.url)
         time.sleep(float(os.environ.get("AATM_READY_POLL_SECONDS", "3")))
     title = f"AATM غير جاهز ⚠️ ({connected}/{total} متصلين)"
@@ -282,6 +287,7 @@ def wait_ready(timeout: float) -> int:
     print(f"[AATM] {title}")
     for problem in problems:
         print(f"  - {problem}")
+    print(f"[AATM] اللوحة: {dashboard_url()}")
     notify(title, "\n".join(problems))
     record_ready(title, problems)
     return 1

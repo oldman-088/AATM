@@ -110,6 +110,9 @@ def test_start_all_starts_stopped_services_and_reports_ready(stack):
     assert "--window-name=المدير" in calls and "--window-name=Worker 1" in calls and "https://arena.ai/agent" in calls
     assert f"--user-data-dir={env['HOME']}/.aatm-profiles/worker-1" in calls
     assert "notify --app-name=AATM AATM جاهز ✅ (2/2 متصلين)" in calls
+    # Every line start-all prints itself is Arabic, and the dashboard link comes with the result.
+    assert f"[AATM] اللوحة: http://localhost:{env['FRONTEND_PORT']}" in result.stdout
+    assert "[AATM] المدير: فُتحت." in result.stdout and "opened." not in result.stdout
 
 
 def test_disabled_profiles_stay_closed_and_at_most_four_windows_open(stack):
@@ -124,6 +127,7 @@ def test_missing_connection_is_named_in_terminal_and_notification(stack):
     env, log = stack({"manager-0": True, "worker-1": True}, {"profile-manager-0"})
     result = _run("start-all.sh", env)
     assert result.returncode == 1 and "AATM غير جاهز ⚠️ (1/2 متصلين)" in result.stdout and "Worker 1: غير متصل" in result.stdout
+    assert f"[AATM] اللوحة: http://localhost:{env['FRONTEND_PORT']}" in result.stdout
     assert "Worker 1: غير متصل" in log.read_text()
 
 
@@ -160,6 +164,7 @@ def test_stop_all_closes_only_aatm_windows_and_containers_only_on_request(stack,
         assert other.poll() is None and helper.poll() is None
         assert "stop\n" in log.read_text()
         assert ("docker stop aatm-redis aatm-rabbitmq" in log.read_text()) is flag
+        assert ("توقف AATM والحاويتان" if flag else "Redis وRabbitMQ ما زالا يعملان") in result.stdout
     finally:
         for process in (ours, other, helper):
             if process.poll() is None:
