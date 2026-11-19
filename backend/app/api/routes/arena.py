@@ -299,7 +299,65 @@ class ManagerNewSessionBody(BaseModel):
     project_id: str | None = Field(default=None, max_length=36)
 
 
-ACTIVE_MANAGER_JOB_STATES = ("queued", "waiting_connection", "running", "needs_human")
+ACTIVE_MANAGER_JOB_STATES = ("queued", "waiting_connection", "running", "needs_human", "draft")
+
+
+async def _manager_job_or_404(db: AsyncSession, job_id: str) -> ManagerJob:
+    job = await db.get(ManagerJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Manager job not found")
+    return job
+
+
+@router.post("/arena/manager/jobs/{job_id}/draft/approve", dependencies=[Depends(require_role("admin"))])
+async def approve_manager_draft(job_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Approve a plan draft (more than 5 tasks, a one-line request with too many tasks, or an ambiguous goal): create its tasks."""
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    job = await _manager_job_or_404(db, job_id)
+    try:
+        tasks = await manager_arena_runtime.approve_draft(db, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "not_approvable", "message": str(exc)}) from exc
+    db.add(AuditLog(actor=user.email, action="manager_job.draft_approved", resource_type="manager_job", resource_id=job.id,
+                    details={"task_ids": [t.id for t in tasks]}))
+    await db.commit()
+    return {"id": job.id, "status": job.status, "task_ids": [t.id for t in tasks]}
+
+
+@router.put("/arena/manager/jobs/{job_id}/draft", dependencies=[Depends(require_role("admin"))])
+async def edit_manager_draft(job_id: str, body: dict[str, Any], user: User = Depends(get_current_user),
+                             db: AsyncSession = Depends(get_db)):
+    """Edit a plan draft. The new plan is validated like a model plan; it stays a draft until approved."""
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    job = await _manager_job_or_404(db, job_id)
+    if job.status != "draft":
+        raise HTTPException(status_code=409, detail={"code": "not_a_draft", "message": f"The job is '{job.status}', not a draft."})
+    try:
+        await manager_arena_runtime.edit_draft(db, job, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_plan", "message": str(exc)}) from exc
+    db.add(AuditLog(actor=user.email, action="manager_job.draft_edited", resource_type="manager_job", resource_id=job.id,
+                    details={"tasks": len((job.result or {}).get("draft", {}).get("tasks", []))}))
+    await db.commit()
+    result = job.result or {}
+    return {"id": job.id, "status": job.status, "draft": result.get("draft"), "warnings": result.get("warnings", []),
+            "draft_reasons": result.get("draft_reasons", [])}
+
+
+@router.post("/arena/manager/jobs/{job_id}/draft/reject", dependencies=[Depends(require_role("admin"))])
+async def reject_manager_draft(job_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    job = await _manager_job_or_404(db, job_id)
+    try:
+        await manager_arena_runtime.reject_draft(db, job, actor=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "not_a_draft", "message": str(exc)}) from exc
+    db.add(AuditLog(actor=user.email, action="manager_job.draft_rejected", resource_type="manager_job", resource_id=job.id, details={}))
+    await db.commit()
+    return {"id": job.id, "status": job.status}
 
 
 @router.post("/arena/manager/jobs/{job_id}/cancel", dependencies=[Depends(require_role("admin"))])
