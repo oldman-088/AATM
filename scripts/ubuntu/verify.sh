@@ -7,7 +7,7 @@
 #   3. Backend & Bridge lint (ruff)
 #   4. Backend & Bridge tests (pytest, including E2E verification & Arena Local Bridge suites)
 #   5. Static secret scan  (no secrets / .env / browser profiles committed)
-#   6. Frontend typecheck, unit tests and production build (skipped when node_modules is absent)
+#   6. Frontend typecheck, unit tests and production build (fail when node_modules is absent; --install installs it)
 #
 # Usage:  scripts/ubuntu/verify.sh [--install] [--skip-frontend]
 #   --install        install python/npm dependencies before verifying
@@ -92,6 +92,14 @@ fi
 
 if [[ $SKIP_FRONTEND -eq 0 ]]; then
   step "6/6 Frontend gates"
+  if [[ ! -d frontend/node_modules && $INSTALL -eq 1 ]]; then
+    # A clean copy has no node_modules; --install must cover the frontend too.
+    if (cd frontend && if [[ -f package-lock.json ]]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi) >/dev/null; then
+      ok "frontend dependencies installed"
+    else
+      fail "frontend dependency install"
+    fi
+  fi
   if [[ ! -d frontend/node_modules ]]; then
     fail "frontend/node_modules missing - run npm install in frontend/ (or use --skip-frontend)"
   else
