@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
 from app.browser.arena_connector import (
+    MANAGER_AGENT_ID,
     NOT_ENABLED_MESSAGE,
     SCRIPT_VERSION,
     arena_domains,
@@ -28,7 +29,9 @@ from app.browser.arena_connector import (
     register_profile_with_bridge,
 )
 from app.browser.arena_sessions import (
+    append_event,
     arena_agent_overview,
+    close_session,
     open_session_for,
     session_dict,
     set_arena_mode,
@@ -36,9 +39,10 @@ from app.browser.arena_sessions import (
 from app.browser.engines import validate_userscript_policy
 from app.browser.manager import browser_manager
 from app.core.events import event_bus
+from app.db.backup import backup_before
 from app.db.base import utcnow
 from app.db.session import get_db
-from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, Task, User, Userscript
+from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, ManagerJob, Task, User, Userscript
 from app.runtime.agent_protocol import redact_secrets
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
@@ -293,6 +297,144 @@ async def session_live_diff(session_id: str, refresh: bool = False, db: AsyncSes
 
 class ManagerNewSessionBody(BaseModel):
     project_id: str | None = Field(default=None, max_length=36)
+
+
+ACTIVE_MANAGER_JOB_STATES = ("queued", "waiting_connection", "running", "needs_human", "draft")
+
+
+async def _manager_job_or_404(db: AsyncSession, job_id: str) -> ManagerJob:
+    job = await db.get(ManagerJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Manager job not found")
+    return job
+
+
+@router.post("/arena/manager/jobs/{job_id}/draft/approve", dependencies=[Depends(require_role("admin"))])
+async def approve_manager_draft(job_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Approve a plan draft (more than 5 tasks, a one-line request with too many tasks, or an ambiguous goal): create its tasks."""
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    job = await _manager_job_or_404(db, job_id)
+    try:
+        tasks = await manager_arena_runtime.approve_draft(db, job)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "not_approvable", "message": str(exc)}) from exc
+    db.add(AuditLog(actor=user.email, action="manager_job.draft_approved", resource_type="manager_job", resource_id=job.id,
+                    details={"task_ids": [t.id for t in tasks]}))
+    await db.commit()
+    return {"id": job.id, "status": job.status, "task_ids": [t.id for t in tasks]}
+
+
+@router.put("/arena/manager/jobs/{job_id}/draft", dependencies=[Depends(require_role("admin"))])
+async def edit_manager_draft(job_id: str, body: dict[str, Any], user: User = Depends(get_current_user),
+                             db: AsyncSession = Depends(get_db)):
+    """Edit a plan draft. The new plan is validated like a model plan; it stays a draft until approved."""
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    job = await _manager_job_or_404(db, job_id)
+    if job.status != "draft":
+        raise HTTPException(status_code=409, detail={"code": "not_a_draft", "message": f"The job is '{job.status}', not a draft."})
+    try:
+        await manager_arena_runtime.edit_draft(db, job, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_plan", "message": str(exc)}) from exc
+    db.add(AuditLog(actor=user.email, action="manager_job.draft_edited", resource_type="manager_job", resource_id=job.id,
+                    details={"tasks": len((job.result or {}).get("draft", {}).get("tasks", []))}))
+    await db.commit()
+    result = job.result or {}
+    return {"id": job.id, "status": job.status, "draft": result.get("draft"), "warnings": result.get("warnings", []),
+            "draft_reasons": result.get("draft_reasons", [])}
+
+
+@router.post("/arena/manager/jobs/{job_id}/draft/reject", dependencies=[Depends(require_role("admin"))])
+async def reject_manager_draft(job_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    from app.orchestration.manager_arena import manager_arena_runtime
+
+    job = await _manager_job_or_404(db, job_id)
+    try:
+        await manager_arena_runtime.reject_draft(db, job, actor=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "not_a_draft", "message": str(exc)}) from exc
+    db.add(AuditLog(actor=user.email, action="manager_job.draft_rejected", resource_type="manager_job", resource_id=job.id, details={}))
+    await db.commit()
+    return {"id": job.id, "status": job.status}
+
+
+@router.post("/arena/manager/jobs/{job_id}/cancel", dependencies=[Depends(require_role("admin"))])
+async def cancel_manager_job(job_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Cancel a manager job that is waiting, queued or needs a human. A running prompt cannot be cancelled mid-flight.
+
+    A backup is taken first; its path is recorded in the audit entry. Cancelling frees manager-0 when no other job is active.
+    """
+    job = await db.get(ManagerJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Manager job not found")
+    if job.status == "running":
+        raise HTTPException(status_code=409, detail={"code": "job_running", "message": "The manager is answering this job; wait for it to finish."})
+    if job.status not in ACTIVE_MANAGER_JOB_STATES:
+        raise HTTPException(status_code=409, detail={"code": "job_finished", "message": f"The job is already '{job.status}'."})
+    backup_path = await backup_before("manager job cancel")
+    job.status = "failed"
+    job.error = f"cancelled by {user.email}"
+    job.finished_at = utcnow()
+    remaining = (await db.execute(select(ManagerJob.id).where(ManagerJob.status.in_(ACTIVE_MANAGER_JOB_STATES),
+                                                              ManagerJob.id != job.id))).first()
+    manager = await db.get(Agent, MANAGER_AGENT_ID)
+    freed = False
+    if manager is not None and remaining is None and manager.status in {"needs_human", "working"}:
+        manager.status = "idle"
+        manager.last_heartbeat = utcnow()
+        freed = True
+    db.add(AuditLog(actor=user.email, action="manager_job.cancel", resource_type="manager_job", resource_id=job.id,
+                    details={"kind": job.kind, "project_id": job.project_id, "backup_path": backup_path, "worker_freed": freed}))
+    await db.commit()
+    await event_bus.emit("manager.activity", {"id": job.id, "kind": job.kind, "status": job.status})
+    return {"id": job.id, "status": job.status, "backup_path": backup_path, "worker_freed": freed}
+
+
+async def _free_worker_after_session(db: AsyncSession, session: ArenaSession) -> dict[str, Any]:
+    """Release the employee bound to a closed session (the self-heal rule: an idle worker owns no session).
+
+    A task still in progress is blocked rather than re-run automatically, so closing never starts new work.
+    """
+    freed = False
+    task_id = None
+    agent = await db.get(Agent, session.agent_id)
+    if agent is not None and agent.status == "working":
+        agent.status = "idle"
+        agent.current_task_id = None
+        agent.last_heartbeat = utcnow()
+        freed = True
+    task = await db.get(Task, session.active_task_id or session.task_id) if (session.active_task_id or session.task_id) else None
+    if task is not None and task.status in {"in_progress", "assigned"}:
+        task.status = "blocked"
+        task.lock_owner = None
+        task.locked_at = None
+        task.error_message = "Arena session closed by an admin; re-queue the task when ready."
+        task.checkpoints = list(task.checkpoints or []) + [{"ts": utcnow().isoformat(), "event": "session_closed"}]
+        task_id = task.id
+    return {"agent_id": session.agent_id, "worker_freed": freed, "task_id": task_id}
+
+
+@router.post("/arena/sessions/{session_id}/close", dependencies=[Depends(require_role("admin"))])
+async def close_arena_session(session_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Close an open Arena session and free its worker. Admin only; a backup is taken first and recorded in the audit entry."""
+    session = await db.get(ArenaSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Arena session not found")
+    if not session.is_open:
+        raise HTTPException(status_code=409, detail={"code": "session_closed", "message": "The session is already closed."})
+    backup_path = await backup_before("arena session close")
+    await close_session(db, session, phase="closed", reason=f"closed by {user.email}")
+    freed = await _free_worker_after_session(db, session)
+    append_event(session, "closed_by_admin", user.email)
+    db.add(AuditLog(actor=user.email, action="arena.session_close", resource_type="arena_session", resource_id=session.id,
+                    details={"agent_id": session.agent_id, "task_id": freed["task_id"], "worker_freed": freed["worker_freed"],
+                             "backup_path": backup_path}))
+    await db.commit()
+    if freed["task_id"]:
+        await event_bus.emit("task.updated", {"task_id": freed["task_id"], "status": "blocked"})
+    return {"session_id": session.id, "is_open": False, "backup_path": backup_path, **freed}
 
 
 @router.post("/arena/manager/new-session", dependencies=[Depends(require_role("admin", "operator"))])

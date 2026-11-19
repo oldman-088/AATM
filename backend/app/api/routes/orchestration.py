@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
 from app.core.events import event_bus
+from app.db.backup import backup_before
 from app.db.base import utcnow
 from app.db.session import get_db
 from app.git_workflows.manager import git_workflow_manager
@@ -370,25 +371,77 @@ async def trigger_orchestration(
     return await task_scheduler.run_orchestration_cycle(db)
 
 
+def _chat_message_dict(m: ChatMessage) -> dict:
+    return {
+        "id": m.id,
+        "project_id": m.project_id,
+        "sender_type": m.sender_type,
+        "sender_id": m.sender_id,
+        "recipient_id": m.recipient_id,
+        "content": m.content,
+        "metadata": m.metadata_json,
+        "created_at": m.created_at,
+    }
+
+
+CHAT_PAGE_DEFAULT = 200
+CHAT_PAGE_MAX = 500
+
+
 @router.get("/chat")
-async def list_chat(project_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    stmt = select(ChatMessage)
+async def list_chat(
+    project_id: str | None = None,
+    limit: int = Query(default=CHAT_PAGE_DEFAULT, ge=1, le=CHAT_PAGE_MAX),
+    before: str | None = Query(default=None, max_length=36, description="message id: return the page of messages older than it"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The newest ``limit`` messages (oldest first). Pass ``before=<id>`` to page back. Archived messages are hidden."""
+    stmt = select(ChatMessage).where(ChatMessage.archived_at.is_(None))
     if project_id:
         stmt = stmt.where((ChatMessage.project_id == project_id) | (ChatMessage.project_id.is_(None)))
-    res = await db.execute(stmt.order_by(ChatMessage.created_at.asc()))
-    return [
-        {
-            "id": m.id,
-            "project_id": m.project_id,
-            "sender_type": m.sender_type,
-            "sender_id": m.sender_id,
-            "recipient_id": m.recipient_id,
-            "content": m.content,
-            "metadata": m.metadata_json,
-            "created_at": m.created_at,
-        }
-        for m in res.scalars().all()
-    ]
+    if before:
+        anchor = await db.get(ChatMessage, before)
+        if anchor is None:
+            raise HTTPException(status_code=404, detail="Chat message not found")
+        stmt = stmt.where(
+            (ChatMessage.created_at < anchor.created_at)
+            | ((ChatMessage.created_at == anchor.created_at) & (ChatMessage.id < anchor.id))
+        )
+    res = await db.execute(stmt.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(limit))
+    rows = list(res.scalars().all())
+    rows.reverse()
+    return [_chat_message_dict(m) for m in rows]
+
+
+@router.delete("/chat", dependencies=[Depends(require_role("admin"))])
+async def clear_chat(
+    project_id: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear the chat: archive its messages (hidden from GET /chat). Nothing is deleted and the audit log is untouched.
+
+    A database backup is taken first; its path is returned and recorded in the audit entry.
+    """
+    stmt = select(ChatMessage).where(ChatMessage.archived_at.is_(None))
+    if project_id:
+        stmt = stmt.where(ChatMessage.project_id == project_id)
+    rows = list((await db.execute(stmt)).scalars().all())
+    backup_path = await backup_before(reason="chat clear")
+    now = utcnow()
+    for message in rows:
+        message.archived_at = now
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="chat.clear",
+            resource_type="chat",
+            resource_id=project_id,
+            details={"archived": len(rows), "project_id": project_id, "backup_path": backup_path},
+        )
+    )
+    await db.commit()
+    return {"archived": len(rows), "project_id": project_id, "backup_path": backup_path}
 
 
 @router.post("/chat", status_code=201, dependencies=[Depends(require_role("admin", "operator"))])
