@@ -143,7 +143,7 @@ async def test_bridge_drives_many_independent_agent_profiles_with_validated_comm
             page = FakeAgentPage(bridge, pid, f"tok-{pid}")
             config = await page.connect()
             assert config["mode"] == "agent" and set(config["commands"]) == {
-                "new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo", "create_pr", "close_feedback"}
+                "new_session", "submit", "keep_working", "stop", "read_last_reply", "selector_test", "select_repo", "create_pr", "close_feedback"}
             pages.append(page)
 
         async def submit(pid: str, text: str):

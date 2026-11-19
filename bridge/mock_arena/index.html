@@ -108,7 +108,13 @@
   // Changed-file chips whose names contain "stop" (seen on real Arena task chats), and a real Stop button.
   if (params.get("file_chips")) formExtra('<button type="button" title="scripts/ubuntu/stop.sh">scripts/ubuntu/<br>stop.sh +6 −3</button>' +
                                           '<button type="button" title="scripts/ubuntu/stop-all.sh">stop-all.sh</button>');
-  if (params.get("busy")) formExtra('<button type="button" aria-label="Stop generating">&#9632;</button>');
+  if (params.get("busy")) {
+    formExtra('<button type="button" aria-label="Stop generating">&#9632;</button>');
+    document.addEventListener("click", function (ev) {
+      var stop = ev.target.closest("button[aria-label='Stop generating']");
+      if (stop) { stop.remove(); log.setAttribute("data-generating", "false"); }
+    });
+  }
   if (params.get("diff")) formExtra('<button type="button">+91</button>');
   if (params.get("create_pr")) formExtra('<button type="button" data-create-pr>Create PR</button>');
   if (params.get("merge_pr")) formExtra('<button type="button" data-merge>Merge PR</button>');

@@ -246,7 +246,7 @@ async def open_for_sign_in(profile_id: str, user: User = Depends(get_current_use
 # ---------------------------------------------------------------------------- Arena Agent mode
 
 MAX_REPLY_CHARS = 60_000
-COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "read_last_reply": 20.0, "selector_test": 20.0}
+COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "stop": 15.0, "read_last_reply": 20.0, "selector_test": 20.0}
 
 
 class ArenaModeBody(BaseModel):
@@ -254,7 +254,7 @@ class ArenaModeBody(BaseModel):
 
 
 class ArenaCommandBody(BaseModel):
-    command: str = Field(pattern="^(new_session|submit|keep_working|read_last_reply|selector_test|select_repo)$")
+    command: str = Field(pattern="^(new_session|submit|keep_working|stop|read_last_reply|selector_test|select_repo)$")
     text: str | None = Field(default=None, max_length=120_000)
     repo: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 

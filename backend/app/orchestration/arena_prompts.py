@@ -135,8 +135,11 @@ def base_branch_publish_steps(project: Project | None) -> list[str]:
     ]
 
 
-def build_task_prompt(task: Task, project: Project | None, agent: Agent | None = None) -> str:
+def build_task_prompt(task: Task, project: Project | None, agent: Agent | None = None, *, expected_head_sha: str) -> str:
     """The complete, self-contained Arena Agent prompt for one task."""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", expected_head_sha or ""):
+        raise ValueError("A worker prompt requires AATM's expected base head SHA.")
+    expected_head_sha = expected_head_sha.lower()
     base = project_base_branch(project)
     slug = repo_slug(project) or (project.repo_url if project and project.repo_url else "the project repository")
     config: dict[str, Any] = (project.config or {}) if project and isinstance(project.config, dict) else {}
@@ -158,6 +161,16 @@ def build_task_prompt(task: Task, project: Project | None, agent: Agent | None =
     ]
     description = sanitize_untrusted_content(task.description or "", source=f"task:{task.id}")["quarantined_text"]
     sections = [
+        "## Mandatory base-branch preflight",
+        f"Base branch: {base}",
+        f"Expected head SHA from AATM: {expected_head_sha}",
+        "Before reading or changing files, run these commands in order:",
+        f"1. `git fetch origin {base}`",
+        f"2. `git checkout -B {base} origin/{base}`",
+        f"3. `git pull --ff-only origin {base}`",
+        "4. Print the checked-out commit with `git rev-parse HEAD`.",
+        f"If the printed SHA differs from `{expected_head_sha}`, STOP immediately: do not read or modify files, create/push a work branch, or open a pull request. Report both the expected and actual SHA to AATM.",
+        "",
         f"# AATM task {pr_title_prefix(task.id)}: {task.title}",
         "",
         f"Repository: {slug}",

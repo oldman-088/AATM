@@ -20,6 +20,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -36,6 +37,7 @@ from app.browser.arena_sessions import (
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
+from app.github_client.client import validate_branch_name
 from app.models import (
     Agent,
     AgentMessage,
@@ -80,6 +82,7 @@ CREATE_PR_WAIT_MINUTES = 5  # after pressing Arena's Create PR, before falling b
 NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
+SENDABLE_TASK_STATUSES = {"queued", "assigned", "in_progress", "pr_open", "in_review", "changes_requested", "approved", "merged"}
 LIVE_CODE_MIN_SECONDS = 10.0   # at most one GitHub live-diff publish per session per interval
 LIVE_CODE_MAX_FILES = 20       # files streamed per new head (the summary lists all of them)
 FOLLOW_UP_FAILURES_BEFORE_HUMAN = 3  # failed follow-up sends in a row before the owner is asked to look
@@ -178,6 +181,40 @@ class ArenaAgentRunner:
         return await db.get(Project, task.project_id)
 
     @staticmethod
+    async def _expected_base_head(project: Project | None) -> str:
+        """Resolve the remote base SHA AATM embeds in each worker's mandatory preflight."""
+        base = project_base_branch(project)
+        valid, _ = validate_branch_name(base)
+        if not valid:
+            raise ArenaAgentError("invalid_base_branch", "The project's base branch name is invalid.")
+        cwd = Path(project.repo_path if project and project.repo_path else ".")
+        code, out, err = await git_workflow_manager._exec(
+            ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{base}"], cwd,
+        )
+        match = re.match(r"^([0-9a-fA-F]{40,64})\s+refs/heads/", out)
+        if code != 0 or match is None:
+            raise ArenaAgentError("base_head_unavailable", err or f"Could not resolve origin/{base}.")
+        return match.group(1).lower()
+
+    async def _refresh_send_target(self, db: AsyncSession, session: ArenaSession, *, task_id: str | None = None,
+                                   kind: str = "follow_up") -> tuple[ArenaSession | None, Task | None]:
+        """Reload session/task state immediately before any page-mutating send or continue action."""
+        current = await db.get(ArenaSession, session.id, populate_existing=True)
+        if current is None:
+            return None, None
+        active_id = task_id or current.active_task_id or current.task_id
+        active = await db.get(Task, active_id, populate_existing=True) if active_id else None
+        parent = await db.get(Task, current.task_id, populate_existing=True) if current.task_id else active
+        inactive = next((task for task in (active, parent) if task is not None and task.status not in SENDABLE_TASK_STATUSES), None)
+        if active is None or parent is None or inactive is not None:
+            status = inactive.status if inactive is not None else "missing"
+            logger.info("dropped: task %s", status)
+            append_event(current, "message_dropped", f"dropped: task {status}", message_kind=kind)
+            await db.commit()
+            return current, None
+        return current, active
+
+    @staticmethod
     def _audit(db: AsyncSession, actor: str, action: str, task: Task | None, details: dict[str, Any]) -> None:
         db.add(AuditLog(actor=actor, action=action, resource_type="task", resource_id=task.id if task else None, details=details))
 
@@ -266,10 +303,16 @@ class ArenaAgentRunner:
                 await self.adapter.new_session(profile_id)
                 await self.adapter.select_repo(profile_id, repo)
                 append_event(session, "repo_selected", repo)
-                prompt = build_task_prompt(task, project, agent)
+                expected_head = await self._expected_base_head(project)
+                prompt = build_task_prompt(task, project, agent, expected_head_sha=expected_head)
                 session.phase = "submitting"
                 append_event(session, "submit_started", (await self.adapter.transcript_mark(profile_id)).get("mark"))
                 await db.commit()
+                session, send_task = await self._refresh_send_target(db, session, task_id=task.id, kind="initial_submit")
+                if session is None or send_task is None:
+                    message.execution_status = "cancelled"
+                    await db.commit()
+                    return
                 await self.adapter.submit(profile_id, prompt, repo=repo)
                 session.submitted_at = _now()
                 session.last_state_change_at = session.submitted_at
@@ -434,6 +477,11 @@ class ArenaAgentRunner:
                                                   commits=changes.get("ahead_by") if changes.get("ok") else None)
         prompt = build_correction_prompt(parent, review_comments=follow_up.description or "", discrepancies=discrepancies,
                                          round_number=parent.review_round, pr_url=session.pr_url)
+        session, send_task = await self._refresh_send_target(db, session, task_id=follow_up.id, kind="correction_submit")
+        if session is None or send_task is None:
+            message.execution_status = "cancelled"
+            await db.commit()
+            return
         try:
             await self.adapter.submit(session.profile_id, prompt, repo=repo_slug(project))
         except ArenaAgentError as exc:
@@ -646,8 +694,18 @@ class ArenaAgentRunner:
             await close_session(db, session, phase="closed", reason="task removed")
             await db.commit()
             return {"closed": True}
-        if active.status in {"blocked", "cancelled"}:
-            return {"skipped": active.status}
+        if active.status in {"blocked", "cancelled"} or parent.status in {"blocked", "cancelled"}:
+            if active.status == "cancelled" or parent.status == "cancelled":
+                try:
+                    page_state = await self.adapter.state(session.profile_id)
+                    if page_state.get("agent_state") == "generating":
+                        await self.adapter.stop(session.profile_id)
+                        append_event(session, "cancel_stop", "Arena generation stopped after task cancellation")
+                        await db.commit()
+                except ArenaAgentError as exc:
+                    append_event(session, "cancel_stop_failed", f"{exc.code}: {exc.message}")
+                    await db.commit()
+            return {"skipped": active.status if active.status in {"blocked", "cancelled"} else parent.status}
         project = await self._project(db, parent)
         previous_state = session.page_state
         state = await self.adapter.state(session.profile_id)
@@ -703,6 +761,9 @@ class ArenaAgentRunner:
             if decision == "merged_outside":
                 return {"phase": session.phase}
             if decision == "press":
+                session, send_task = await self._refresh_send_target(db, session, kind="keep_working")
+                if session is None or send_task is None:
+                    return {"phase": session.phase if session else "closed", "dropped": True}
                 try:
                     clicked = await self.adapter.keep_working(session.profile_id)
                 except ArenaAgentError as exc:
@@ -914,8 +975,14 @@ class ArenaAgentRunner:
         return reports_github_blocked(str(reply.get("text") or ""))
 
     async def _follow_up(self, db: AsyncSession, session: ArenaSession, kind: str, text: str) -> bool:
-        parent = await db.get(Task, session.task_id) if session.task_id else None
+        session = await db.get(ArenaSession, session.id, populate_existing=True)
+        if session is None:
+            return False
+        parent = await db.get(Task, session.task_id, populate_existing=True) if session.task_id else None
         repo = repo_slug(await self._project(db, parent)) if parent else None
+        session, active = await self._refresh_send_target(db, session, kind=kind)
+        if session is None or active is None:
+            return False
         failures = self._chat_state()["failures"]
         try:
             await self.adapter.submit(session.profile_id, text, repo=repo)
