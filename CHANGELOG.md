@@ -2,6 +2,52 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.6.0] — 2026-11-19 — stable
+
+Stabilization release from the `r8-aatm` development branch: AATM starts with one command, reconnects and
+resumes on its own, and every fix landed through a reviewed PR with CI on `r8-aatm`.
+**Userscript 2.2.0 must be installed in every Arena profile** (generate it from the dashboard, then press
+Install once in each window).
+
+### Added
+- **One-command start and stop**: `scripts/ubuntu/start-all.sh` starts Redis/RabbitMQ when needed, the backend,
+  bridge, frontend and watchdog, waits for health and opens only the enabled Arena windows (at most 4).
+  `stop-all.sh` stops everything gracefully and closes only AATM's Chrome windows; `--containers` also
+  stops the containers. A ready notification ("AATM جاهز ✅ (N/4 متصلين)") or the exact missing profile is
+  shown on the desktop and in the terminal (#14, #15, #16).
+- **Per-project base branch**: worker PRs target the project's base branch (here `r8-aatm`) (#12).
+- **Auto-continue on Arena's tool-call limit**, counted against `ARENA_AGENT_MAX_KEEP_WORKING`, never during a
+  human check; the owner is asked once the limit is used (#18).
+- **Reliable PRs**: when Arena holds the work but the branch has no PR, AATM presses Create PR after checking the
+  chat, repository and branch, then makes sure one PR with the `[AATM-<task>]` title targets the base branch
+  (retarget, or close and recreate). Nothing ever merges from Arena; the manager only plans and reviews (#20).
+- **Rollback snapshots**: `snapshot.sh` / `rollback.sh <tag>`, tags `snapshot/r8-YYYYMMDD-NN`, a backup with
+  the database, and an automatic snapshot after the last task of a batch is merged (#22).
+- **Telegram alerts (optional, send-only)**: human checks, approvals, finished or failed work, the start result
+  and watchdog alerts, in Arabic. No commands, no webhook, no open port; off until `.env` is filled
+  (`docs/SETUP_AR.md` §13) (#27).
+
+### Changed
+- **No demo data**: `DEMO_MODE=false` by default; the frontend shows Arabic-first empty and error states instead
+  of display data (W1-T2, #17).
+- **Quiet watchdog**: normal 401s, restart tracebacks and single traceback lines no longer alert; Redis event
+  fan-out uses its own subscriber and survives idle timeouts (#25).
+- `verify.sh --install` also installs the frontend packages, so a clean copy verifies with no manual step (#29).
+- CI runs on `r8-aatm` pushes and pull requests.
+
+### Fixed
+- **Automatic reconnection**: connector registrations survive a bridge restart (token hashes only, outside git);
+  the userscript never gives up on recoverable close codes (#13, `ef20731`).
+- **Resume after a restart**: running manager jobs and Arena sessions continue; downtime is not a stall and a
+  prompt is never sent twice (#24). After a restart a quiet worker window is brought back to its task's chat,
+  and a follow-up that cannot be sent goes to the owner with the real reason instead of repeating (#30).
+- **No false human checks**: only a real captcha, login wall, terms dialog or rate-limit message stops a profile (#18).
+- **Suggestion chips** under Arena replies are never clicked or read as the composer or reply (#19).
+- **Report detection** accepts Arena's rendered "AATM REPORT" heading; PR edits use the REST API (#21).
+- **False stalls**: an agent that is still writing is not stopped after 20 minutes (#23); a finished task whose
+  page still shows Stop goes to review (#26).
+- Two tabs of one profile no longer replace each other's connection (#28).
+
 ## [3.5.0] — 2026-11-18
 
 First full end-to-end run on Arena: goal → manager plan → 3 parallel workers → 3 PRs → manager review →

@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "AATM — AI Agent Team Manager"
-    APP_VERSION: str = "3.5.0"
+    APP_VERSION: str = "3.6.0"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
     # B3 — scripted demo feed for the Command Bridge. Off by default, refused in production, and
