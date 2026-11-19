@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     # Local mock Arena page for end-to-end testing at any time (e.g. http://127.0.0.1:4100/mock-arena/).
     ARENA_MOCK_URL: str = ""
     ARENA_REPLY_TIMEOUT_SECONDS: float = Field(default=600.0, gt=0)
+    # How often the PR state of a session that waits for a human decision (reviewing /
+    # awaiting_approval) is polled on GitHub: a PR merged or closed outside AATM must still be
+    # noticed. 300 s = every 5 minutes.
+    ARENA_PR_STATE_POLL_SECONDS: float = Field(default=300.0, gt=0)
     # R7: which runtime answers as manager-0. arena_agent = the manager's own Arena session (no API key);
     # anthropic_claude / openai_compatible = the first enabled provider of that type; demo = labelled
     # demo replies that never create tasks. Empty = the provider assigned to manager-0 (wizard / DB).
