@@ -283,6 +283,29 @@ async def test_terms_link_row_is_not_a_human_check_but_a_real_terms_prompt_is(ha
             await browser.close()
 
 
+@needs_chromium
+async def test_stop_command_stops_generation_on_mock_agent_page(harness):
+    from playwright.async_api import async_playwright
+
+    pid, script = await harness.setup_profile("worker-1")
+    base = f"{harness.bridge.base}/mock-arena/agent/"
+    async with async_playwright() as pw:
+        browser = await _browser(pw)
+        try:
+            page = await _open(browser, script, f"{base}?gen_ms=10000")
+            await harness.wait_state(pid, "ready")
+            sent = await harness.cmd(pid, "submit", "Stop this mock generation.")
+            assert sent.status_code == 200, sent.text
+            await harness.wait_state(pid, "generating")
+            stopped = await harness.cmd(pid, "stop")
+            assert stopped.status_code == 200, stopped.text
+            assert stopped.json()["result"]["stopped"] is True
+            assert await page.locator("#stop").is_hidden()
+            assert (await harness.state(pid))["agent_state"] != "generating"
+        finally:
+            await browser.close()
+
+
 # --------------------------------------------------------------------------- human checks, login wall, offline
 
 

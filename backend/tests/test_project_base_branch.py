@@ -52,9 +52,23 @@ def test_base_branch_falls_back_to_the_default_branch():
     assert project_base_branch(_project()) == "r8-aatm" and configured_base_branch(_project()) == "r8-aatm"
 
 
+def test_worker_prompt_preflights_the_expected_base_head_before_any_task_instructions():
+    task = Task(id="task-1", title="Add x", description="Add x", priority="high", expected_deliverables=[], checkpoints=[])
+    expected_head = "a" * 40
+    prompt = build_task_prompt(task, _project(), expected_head_sha=expected_head)
+    assert prompt.startswith("## Mandatory base-branch preflight")
+    assert "git fetch origin r8-aatm" in prompt
+    assert "git checkout -B r8-aatm origin/r8-aatm" in prompt
+    assert "git pull --ff-only origin r8-aatm" in prompt
+    assert "git rev-parse HEAD" in prompt
+    assert "Base branch: r8-aatm" in prompt
+    assert f"Expected head SHA from AATM: {expected_head}" in prompt
+    assert "STOP" in prompt and "differs" in prompt
+
+
 def test_worker_and_manager_prompts_name_only_the_project_base_branch():
     task = Task(id="task-1", title="Add x", description="Add x", priority="high", expected_deliverables=[], checkpoints=[])
-    prompt = build_task_prompt(task, _project())
+    prompt = build_task_prompt(task, _project(), expected_head_sha="b" * 40)
     assert "Base branch: r8-aatm" in prompt
     assert "Start your branch from the latest `origin/r8-aatm`" in prompt
     assert "Open the pull request against `r8-aatm`. Never target `main`" in prompt
@@ -65,7 +79,7 @@ def test_worker_and_manager_prompts_name_only_the_project_base_branch():
 def test_project_without_a_base_branch_gets_no_extra_rules():
     task = Task(id="task-1", title="Add x", description="Add x", priority="high", expected_deliverables=[], checkpoints=[])
     plain = Project(name="p", slug="p", repo_path=".", repo_url=REPO_URL, default_branch="main", tech_stack=[], config={})
-    assert "Start your branch from" not in build_task_prompt(task, plain)
+    assert "Start your branch from" not in build_task_prompt(task, plain, expected_head_sha="c" * 40)
 
 
 async def test_merge_is_refused_when_the_pull_request_targets_another_branch(monkeypatch, tmp_path):

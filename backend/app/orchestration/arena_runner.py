@@ -20,6 +20,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -33,9 +34,11 @@ from app.browser.arena_sessions import (
     close_session,
     session_for_task,
 )
+from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
+from app.github_client.client import validate_branch_name
 from app.models import (
     Agent,
     AgentMessage,
@@ -73,6 +76,10 @@ logger = logging.getLogger(__name__)
 
 MONITORED_PHASES = {"working", "correcting", "reporting"}
 RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starting", "submitting", "needs_human"}
+# Sessions that wait for a human decision: they are not monitored any more, but their pull request
+# can still be merged or closed outside AATM, so its state is polled separately.
+PR_STATE_PHASES = ("reviewing", "awaiting_approval")
+PR_STATE_POLL_SECONDS = 300.0  # poll the PR state of those sessions every 5 minutes
 STALL_MINUTES = 20
 NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is escalated to the owner
 AGENT_ACTIVE_STATES = {"generating", "keep_working_visible", "tool_call_limit", "pr_ready"}
@@ -80,6 +87,7 @@ CREATE_PR_WAIT_MINUTES = 5  # after pressing Arena's Create PR, before falling b
 NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
+SENDABLE_TASK_STATUSES = {"queued", "assigned", "in_progress", "pr_open", "in_review", "changes_requested", "approved", "merged"}
 LIVE_CODE_MIN_SECONDS = 10.0   # at most one GitHub live-diff publish per session per interval
 LIVE_CODE_MAX_FILES = 20       # files streamed per new head (the summary lists all of them)
 FOLLOW_UP_FAILURES_BEFORE_HUMAN = 3  # failed follow-up sends in a row before the owner is asked to look
@@ -163,7 +171,12 @@ class ArenaAgentRunner:
         self.adapter = adapter or ArenaAgentAdapter()
         self.github_poll_seconds = 30.0
         self.stall_minutes = float(STALL_MINUTES)
+        try:
+            self.pr_state_poll_seconds = float(get_settings().ARENA_PR_STATE_POLL_SECONDS)
+        except Exception:  # noqa: BLE001 - the default interval is used when settings are unavailable
+            self.pr_state_poll_seconds = float(PR_STATE_POLL_SECONDS)
         self._github_checked: dict[str, float] = {}
+        self._pr_state_checked: dict[str, float] = {}
         self._quiet_misses: dict[str, int] = {}
         # R4 live code: per session, the last published head, publish time, file patch hashes and summary.
         self.live_code_seconds = LIVE_CODE_MIN_SECONDS
@@ -176,6 +189,40 @@ class ArenaAgentRunner:
     @staticmethod
     async def _project(db: AsyncSession, task: Task) -> Project | None:
         return await db.get(Project, task.project_id)
+
+    @staticmethod
+    async def _expected_base_head(project: Project | None) -> str:
+        """Resolve the remote base SHA AATM embeds in each worker's mandatory preflight."""
+        base = project_base_branch(project)
+        valid, _ = validate_branch_name(base)
+        if not valid:
+            raise ArenaAgentError("invalid_base_branch", "The project's base branch name is invalid.")
+        cwd = Path(project.repo_path if project and project.repo_path else ".")
+        code, out, err = await git_workflow_manager._exec(
+            ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{base}"], cwd,
+        )
+        match = re.match(r"^([0-9a-fA-F]{40,64})\s+refs/heads/", out)
+        if code != 0 or match is None:
+            raise ArenaAgentError("base_head_unavailable", err or f"Could not resolve origin/{base}.")
+        return match.group(1).lower()
+
+    async def _refresh_send_target(self, db: AsyncSession, session: ArenaSession, *, task_id: str | None = None,
+                                   kind: str = "follow_up") -> tuple[ArenaSession | None, Task | None]:
+        """Reload session/task state immediately before any page-mutating send or continue action."""
+        current = await db.get(ArenaSession, session.id, populate_existing=True)
+        if current is None:
+            return None, None
+        active_id = task_id or current.active_task_id or current.task_id
+        active = await db.get(Task, active_id, populate_existing=True) if active_id else None
+        parent = await db.get(Task, current.task_id, populate_existing=True) if current.task_id else active
+        inactive = next((task for task in (active, parent) if task is not None and task.status not in SENDABLE_TASK_STATUSES), None)
+        if active is None or parent is None or inactive is not None:
+            status = inactive.status if inactive is not None else "missing"
+            logger.info("dropped: task %s", status)
+            append_event(current, "message_dropped", f"dropped: task {status}", message_kind=kind)
+            await db.commit()
+            return current, None
+        return current, active
 
     @staticmethod
     def _audit(db: AsyncSession, actor: str, action: str, task: Task | None, details: dict[str, Any]) -> None:
@@ -266,10 +313,16 @@ class ArenaAgentRunner:
                 await self.adapter.new_session(profile_id)
                 await self.adapter.select_repo(profile_id, repo)
                 append_event(session, "repo_selected", repo)
-                prompt = build_task_prompt(task, project, agent)
+                expected_head = await self._expected_base_head(project)
+                prompt = build_task_prompt(task, project, agent, expected_head_sha=expected_head)
                 session.phase = "submitting"
                 append_event(session, "submit_started", (await self.adapter.transcript_mark(profile_id)).get("mark"))
                 await db.commit()
+                session, send_task = await self._refresh_send_target(db, session, task_id=task.id, kind="initial_submit")
+                if session is None or send_task is None:
+                    message.execution_status = "cancelled"
+                    await db.commit()
+                    return
                 await self.adapter.submit(profile_id, prompt, repo=repo)
                 session.submitted_at = _now()
                 session.last_state_change_at = session.submitted_at
@@ -434,6 +487,11 @@ class ArenaAgentRunner:
                                                   commits=changes.get("ahead_by") if changes.get("ok") else None)
         prompt = build_correction_prompt(parent, review_comments=follow_up.description or "", discrepancies=discrepancies,
                                          round_number=parent.review_round, pr_url=session.pr_url)
+        session, send_task = await self._refresh_send_target(db, session, task_id=follow_up.id, kind="correction_submit")
+        if session is None or send_task is None:
+            message.execution_status = "cancelled"
+            await db.commit()
+            return
         try:
             await self.adapter.submit(session.profile_id, prompt, repo=repo_slug(project))
         except ArenaAgentError as exc:
@@ -526,6 +584,127 @@ class ArenaAgentRunner:
         if head and self._live_head.get(session.id) != head:
             await self.publish_live_code(session, parent, project)
         return {"ok": True, "pr": pr}
+
+    # ------------------------------------------------------------------ PR state outside AATM
+    def _pr_state_due(self, session: ArenaSession, *, force: bool = False) -> bool:
+        """The PR state of a waiting session is polled every `pr_state_poll_seconds` (5 minutes)."""
+        # No entry yet means "never checked": a monotonic clock can be small on a freshly booted machine.
+        last = self._pr_state_checked.get(session.id)
+        if force or last is None or time.monotonic() - last >= self.pr_state_poll_seconds:
+            self._pr_state_checked[session.id] = time.monotonic()
+            return True
+        return False
+
+    async def poll_pr_states(self, db: AsyncSession, *, force: bool = False) -> dict[str, Any]:
+        """Watch the pull request of the sessions that wait for a human decision.
+
+        A PR merged outside AATM must still finish its task (merged, session closed, queued
+        correction rounds cancelled); a PR closed without merging blocks the task with a reason.
+        """
+        session_ids = list((await db.execute(
+            select(ArenaSession.id).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(PR_STATE_PHASES))
+        )).scalars())
+        results: dict[str, Any] = {}
+        for session_id in session_ids:
+            try:
+                session = await db.get(ArenaSession, session_id)  # re-loaded: a rollback expires earlier rows
+                if session is None or not session.is_open:
+                    continue
+                if not self._pr_state_due(session, force=force):
+                    continue
+                results[session_id] = await self._check_pr_state(db, session)
+            except Exception as exc:  # noqa: BLE001 - one broken session must not stop the others
+                logger.warning("PR state poll failed for session %s: %s", session_id, type(exc).__name__, exc_info=True)
+                await db.rollback()
+                results[session_id] = {"error": type(exc).__name__}
+        return results
+
+    async def _check_pr_state(self, db: AsyncSession, session: ArenaSession) -> dict[str, Any]:
+        """Read the PR state on GitHub and apply it to the task (merged / closed without merge)."""
+        parent = await db.get(Task, session.task_id) if session.task_id else None
+        if parent is None:
+            return {"skipped": "no task"}
+        if parent.status in {"merged", "done", "completed", "cancelled", "failed"}:
+            return {"skipped": "task already finished"}
+        project = await self._project(db, parent)
+        slug = repo_slug(project)
+        if not slug:
+            return {"ok": False, "reason": "project has no GitHub repository"}
+        found = await git_workflow_manager.find_task_pull_request(
+            repo_slug=slug, task_id=parent.id, cwd=project.repo_path if project else ".",
+        )
+        pr = found.get("pull_request") if found.get("ok") else None
+        if pr is None:
+            return {"ok": bool(found.get("ok")), "pr": None}
+        state = str(pr.get("state") or "").upper()
+        if state == "MERGED":
+            await self._pr_merged_outside(db, session, parent, pr)
+            return {"ok": True, "pr": pr, "merged": True}
+        if state == "CLOSED":
+            await self._pr_closed_without_merge(db, session, parent, pr)
+            return {"ok": True, "pr": pr, "closed": True}
+        return {"ok": True, "pr": pr, "state": state}
+
+    async def _pr_merged_outside(self, db: AsyncSession, session: ArenaSession, parent: Task, pr: dict[str, Any]) -> None:
+        """The PR was merged outside AATM: the task is merged, the session ends, corrections stop."""
+        reason = f"PR {pr.get('url')} was merged outside AATM."
+        append_event(session, "pr_merged_outside", reason)
+        parent.status = "merged"
+        parent.pr_status = "merged"
+        parent.progress_percent = 100
+        parent.lock_owner = None
+        parent.locked_at = None
+        parent.completed_at = parent.completed_at or _now()
+        parent.checkpoints = list(parent.checkpoints or []) + [
+            {"ts": _now().isoformat(), "event": "pr_merged_outside", "pr_url": pr.get("url"), "pr_number": pr.get("number")}
+        ]
+        cancelled = await self._cancel_queued_corrections(db, parent)
+        await close_session(db, session, phase="merged", reason=reason)
+        self._pr_state_checked.pop(session.id, None)
+        self._audit(db, "arena-runner", "arena.pr_merged_outside", parent,
+                    {"pr": pr.get("url"), "pr_number": pr.get("number"), "cancelled_corrections": cancelled})
+        await self._notify(db, "Pull request merged outside AATM", reason, severity="warning", link="/tasks")
+        await db.commit()
+        await event_bus.emit("task.updated", {"task_id": parent.id, "status": parent.status})
+
+    async def _cancel_queued_corrections(self, db: AsyncSession, parent: Task) -> list[str]:
+        """Cancel the correction rounds that are still queued for a merged pull request."""
+        res = await db.execute(
+            select(Task).where(
+                Task.parent_task_id == parent.id,
+                Task.task_type == "follow_up",
+                Task.status.in_(["queued", "assigned"]),
+            )
+        )
+        cancelled: list[str] = []
+        for follow_up in res.scalars().all():
+            follow_up.status = "cancelled"
+            follow_up.lock_owner = None
+            follow_up.locked_at = None
+            follow_up.checkpoints = list(follow_up.checkpoints or []) + [
+                {"ts": _now().isoformat(), "event": "cancelled_pr_merged_outside"}
+            ]
+            cancelled.append(follow_up.id)
+        return cancelled
+
+    async def _pr_closed_without_merge(self, db: AsyncSession, session: ArenaSession, parent: Task, pr: dict[str, Any]) -> None:
+        """The PR was closed without merging: the task is blocked and a human decides what happens next."""
+        reason = f"PR {pr.get('url')} was closed without being merged."
+        if any(e.get("kind") == "pr_closed_without_merge" for e in session.events or []):
+            return
+        append_event(session, "pr_closed_without_merge", reason)
+        parent.status = "blocked"
+        parent.error_message = reason
+        parent.lock_owner = None
+        parent.locked_at = None
+        parent.checkpoints = list(parent.checkpoints or []) + [
+            {"ts": _now().isoformat(), "event": "pr_closed_without_merge", "pr_url": pr.get("url"), "reason": reason}
+        ]
+        session.phase = "escalated"
+        self._audit(db, "arena-runner", "arena.pr_closed_without_merge", parent, {"pr": pr.get("url")})
+        await self._notify(db, "Pull request closed without merging", reason, severity="warning", link="/tasks")
+        await db.commit()
+        await event_bus.emit("task.updated", {"task_id": parent.id, "status": parent.status})
 
     # ------------------------------------------------------------------ R4 live code
     async def publish_live_code(self, session: ArenaSession, parent: Task, project: Project | None, *, force: bool = False) -> dict[str, Any]:
@@ -624,10 +803,13 @@ class ArenaAgentRunner:
     # ------------------------------------------------------------------ monitoring
     async def tick(self, db: AsyncSession) -> dict[str, Any]:
         """Advance every open Arena session one step (called each orchestration cycle)."""
+        results: dict[str, Any] = {}
+        # Sessions that wait for a human decision are not monitored any more, but their pull request
+        # can still be merged or closed outside AATM: poll its state (throttled to every 5 minutes).
+        results["pr_states"] = await self.poll_pr_states(db)
         session_ids = list((await db.execute(
             select(ArenaSession.id).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(MONITORED_PHASES))
         )).scalars())
-        results: dict[str, Any] = {}
         for session_id in session_ids:
             try:
                 session = await db.get(ArenaSession, session_id)  # re-loaded: a rollback expires earlier rows
@@ -646,8 +828,18 @@ class ArenaAgentRunner:
             await close_session(db, session, phase="closed", reason="task removed")
             await db.commit()
             return {"closed": True}
-        if active.status in {"blocked", "cancelled"}:
-            return {"skipped": active.status}
+        if active.status in {"blocked", "cancelled"} or parent.status in {"blocked", "cancelled"}:
+            if active.status == "cancelled" or parent.status == "cancelled":
+                try:
+                    page_state = await self.adapter.state(session.profile_id)
+                    if page_state.get("agent_state") == "generating":
+                        await self.adapter.stop(session.profile_id)
+                        append_event(session, "cancel_stop", "Arena generation stopped after task cancellation")
+                        await db.commit()
+                except ArenaAgentError as exc:
+                    append_event(session, "cancel_stop_failed", f"{exc.code}: {exc.message}")
+                    await db.commit()
+            return {"skipped": active.status if active.status in {"blocked", "cancelled"} else parent.status}
         project = await self._project(db, parent)
         previous_state = session.page_state
         state = await self.adapter.state(session.profile_id)
@@ -703,6 +895,9 @@ class ArenaAgentRunner:
             if decision == "merged_outside":
                 return {"phase": session.phase}
             if decision == "press":
+                session, send_task = await self._refresh_send_target(db, session, kind="keep_working")
+                if session is None or send_task is None:
+                    return {"phase": session.phase if session else "closed", "dropped": True}
                 try:
                     clicked = await self.adapter.keep_working(session.profile_id)
                 except ArenaAgentError as exc:
@@ -914,8 +1109,14 @@ class ArenaAgentRunner:
         return reports_github_blocked(str(reply.get("text") or ""))
 
     async def _follow_up(self, db: AsyncSession, session: ArenaSession, kind: str, text: str) -> bool:
-        parent = await db.get(Task, session.task_id) if session.task_id else None
+        session = await db.get(ArenaSession, session.id, populate_existing=True)
+        if session is None:
+            return False
+        parent = await db.get(Task, session.task_id, populate_existing=True) if session.task_id else None
         repo = repo_slug(await self._project(db, parent)) if parent else None
+        session, active = await self._refresh_send_target(db, session, kind=kind)
+        if session is None or active is None:
+            return False
         failures = self._chat_state()["failures"]
         try:
             await self.adapter.submit(session.profile_id, text, repo=repo)

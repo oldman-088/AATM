@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# aatm — command-line entry point for AATM maintenance (Ubuntu).
+#
+#   aatm doctor [--fix] [--json] [--db PATH] [--no-bridge]
+#       Report drifted state (stuck workers, sessions, queued tasks, outdated windows). Report-only unless
+#       --fix is given, which backs up the database first and repairs only the safe cases. See doctor.py.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PY="$ROOT_DIR/.venv/bin/python"
+[[ -x "$PY" ]] || PY="$(command -v python3)"
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift
+case "$cmd" in
+  doctor) exec "$PY" "$ROOT_DIR/scripts/ubuntu/doctor.py" "$@" ;;
+  ""|-h|--help|help)
+    echo "usage: aatm doctor [--fix] [--json] [--db PATH] [--no-bridge]"
+    ;;
+  *)
+    echo "aatm: unknown command '$cmd' (try: aatm doctor)" >&2
+    exit 2
+    ;;
+esac

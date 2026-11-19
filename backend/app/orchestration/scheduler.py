@@ -235,6 +235,13 @@ class TaskScheduler:
     ) -> dict[str, Any]:
         """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
         session_recovery = await self.recover_sessions_if_needed(db, force=force_session_recovery)
+        try:
+            from app.orchestration.self_heal import heal_orphaned_state
+
+            await heal_orphaned_state(db)
+        except Exception as exc:  # noqa: BLE001 - healing must never stop dispatch
+            logger.warning("Self-heal failed: %s", type(exc).__name__)
+            await db.rollback()
         from app.orchestration.arena_runner import arena_reservations, arena_runner
         from app.orchestration.review import review_service
 
@@ -286,6 +293,13 @@ class TaskScheduler:
         assigned: list[dict[str, str]] = []
         ceiling = settings.worker_ceiling()
         available_slots = len(workers) if ceiling is None else max(0, ceiling - working_count)
+        # Per-project concurrency (E9): project.config["max_concurrent_tasks"] caps how many of a project's
+        # tasks run at once; a project without the setting has no extra cap beyond the worker ceiling.
+        project_limit: dict[str | None, int | None] = {}
+        project_in_flight: dict[str | None, int] = {}
+        for t in tasks:
+            if t.status in {"assigned", "in_progress"}:
+                project_in_flight[t.project_id] = project_in_flight.get(t.project_id, 0) + 1
 
         for task in queued:
             if available_slots <= 0 or not idle_workers:
@@ -295,6 +309,16 @@ class TaskScheduler:
             if task.device_id and task.device_id != LOCAL_DEVICE_ID:
                 continue
             if not await self.dependencies_satisfied(db, task):
+                continue
+            if task.project_id not in project_limit:
+                project = await db.get(Project, task.project_id) if task.project_id else None
+                raw_limit = (project.config or {}).get("max_concurrent_tasks") if project is not None else None
+                try:
+                    project_limit[task.project_id] = int(raw_limit) if raw_limit and int(raw_limit) > 0 else None
+                except (TypeError, ValueError):
+                    project_limit[task.project_id] = None
+            limit = project_limit[task.project_id]
+            if limit is not None and project_in_flight.get(task.project_id, 0) >= limit:
                 continue
 
             chosen: Agent | None = None
@@ -388,6 +412,7 @@ class TaskScheduler:
 
             idle_workers.remove(chosen)
             available_slots -= 1
+            project_in_flight[task.project_id] = project_in_flight.get(task.project_id, 0) + 1
             assigned.append({"task_id": task.id, "title": task.title, "worker_id": chosen.id})
 
             db.add(

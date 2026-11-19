@@ -181,7 +181,7 @@ def test_task_prompt_is_complete_and_contains_the_verbatim_github_workflow(tmp_p
                       config={"test_command": "pytest -q", "acceptance_criteria": ["answer() returns 42"]})
     task = Task(id="task-123", title="Add answer()", description="Create answer() returning 42.", priority="high",
                 expected_deliverables=["answer.py", "tests/test_answer.py"])
-    prompt = build_task_prompt(task, project)
+    prompt = build_task_prompt(task, project, expected_head_sha="d" * 40)
     for needle in ("Repository: acme/demo", "Base branch: main", "Create answer() returning 42.", "## Expected implementation",
                    "- answer.py", "## Acceptance criteria", "answer() returns 42", "FastAPI backend + React frontend.",
                    "Use CSS logical properties.", "## Testing requirements", "pytest -q", "## Security requirements",
@@ -261,6 +261,9 @@ class ScriptedPage(ArenaAgentAdapter):
         if command == "keep_working":
             self.page_state = "generating"
             return {"clicked": True}
+        if command == "stop":
+            self.page_state = "idle"
+            return {"stopped": True}
         if command == "read_last_reply":
             if self.reply_unreadable:
                 raise ArenaAgentError("no_reply", "The reply could not be read.")
@@ -340,11 +343,70 @@ async def _fresh_start(env, runner, task_id, session_id, agent_id):
         await runner.run_message(db, SimpleNamespace(execution_status="running", response_payload=None), task, agent)
 
 
+async def test_cancel_that_lands_before_keep_working_blocks_the_click(env, arena_settings, monkeypatch, tmp_path, caplog):
+    caplog.set_level("INFO")
+    page, runner, _gh, (task_id, session_id, _agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page.page_state = "keep_working_visible"
+    original_refresh = runner._refresh_send_target
+
+    async def cancel_before_keep(db, session, *, task_id=None, kind="follow_up"):
+        if kind == "keep_working":
+            task = await db.get(Task, task_id or session.active_task_id)
+            task.status = "cancelled"
+            await db.commit()
+        return await original_refresh(db, session, task_id=task_id, kind=kind)
+
+    async def press_keep_working(*_args, **_kwargs):
+        return "press", {}
+
+    monkeypatch.setattr(runner, "_refresh_send_target", cancel_before_keep)
+    monkeypatch.setattr(runner, "_keep_working_decision", press_keep_working)
+    async with env() as db:
+        result = await runner._tick_session(db, await db.get(ArenaSession, session_id))
+    assert result["dropped"] is True
+    assert "keep_working" not in [command for command, _ in page.commands]
+    assert "dropped: task cancelled" in caplog.text
+
+
+async def test_cancelled_generating_task_calls_arena_stop(env, arena_settings, monkeypatch, tmp_path):
+    page, runner, _gh, (task_id, session_id, _agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    async with env() as db:
+        task = await db.get(Task, task_id)
+        task.status = "cancelled"
+        await db.commit()
+    async with env() as db:
+        result = await runner._tick_session(db, await db.get(ArenaSession, session_id))
+        session = await db.get(ArenaSession, session_id)
+    assert result == {"skipped": "cancelled"}
+    assert ("stop", None) in page.commands
+    assert any(event.get("kind") == "cancel_stop" for event in session.events)
+
+
+async def test_cancelled_task_drops_follow_up_before_sending(env, arena_settings, monkeypatch, tmp_path, caplog):
+    caplog.set_level("INFO")
+    page, runner, _gh, (task_id, session_id, _agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    async with env() as db:
+        task = await db.get(Task, task_id)
+        task.status = "cancelled"
+        await db.commit()
+    async with env() as db:
+        session = await db.get(ArenaSession, session_id)
+        sent = await runner._follow_up(db, session, "pr_nudge", "Do not send this after cancellation.")
+    assert sent is False
+    assert "submit" not in [command for command, _ in page.commands]
+    assert "dropped: task cancelled" in caplog.text
+
+
 async def test_worker_prompt_is_sent_only_after_the_task_repo_is_selected(env, arena_settings, monkeypatch, tmp_path):
-    page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    page, runner, _gh, (task_id, session_id, agent_id), origin = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
     await _fresh_start(env, runner, task_id, session_id, agent_id)
     assert [c for c, _ in page.commands] == ["new_session", "select_repo", "selector_test", "submit"]
     assert page.repos[1:] == [("select_repo", REPO_SLUG), ("selector_test", None), ("submit", REPO_SLUG)]
+    expected_head = subprocess.run(["git", "--git-dir", str(origin), "rev-parse", "refs/heads/main"],
+                                   check=True, capture_output=True, text=True).stdout.strip()
+    submitted = next(text for command, text in page.commands if command == "submit")
+    assert submitted.startswith("## Mandatory base-branch preflight")
+    assert f"Expected head SHA from AATM: {expected_head}" in submitted
 
 
 async def test_repo_picker_that_renders_late_is_retried(env, arena_settings, monkeypatch, tmp_path):
@@ -368,7 +430,7 @@ async def test_worker_prompt_is_not_sent_when_the_task_repo_cannot_be_selected(e
 
 async def test_agent_without_github_access_goes_to_a_human_at_once(env, arena_settings, monkeypatch, tmp_path):
     page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
-    prompt = build_task_prompt(Task(id="task-1", title="T", description="D"), None)
+    prompt = build_task_prompt(Task(id="task-1", title="T", description="D"), None, expected_head_sha="e" * 40)
     assert GITHUB_BLOCKED_MARKER in prompt and not reports_github_blocked(prompt)  # an echoed prompt is not a report
     page.page_state = "keep_working_visible"
     page.reply = f"I checked.\n**{GITHUB_BLOCKED_MARKER}** no connector for this account"
@@ -495,7 +557,7 @@ async def test_agent_stopped_mid_task_is_continued_up_to_the_limit(env, arena_se
 
 
 def test_an_echoed_prompt_is_not_a_final_report():
-    prompt = build_task_prompt(Task(id="task-1", title="T", description="D"), None)
+    prompt = build_task_prompt(Task(id="task-1", title="T", description="D"), None, expected_head_sha="f" * 40)
     assert "## AATM REPORT" in prompt and not reply_has_final_report(prompt)
     assert reply_has_final_report("Done.\n\n## AATM REPORT\nSummary")
 

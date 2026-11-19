@@ -9,9 +9,11 @@
 #   5. Static secret scan  (no secrets / .env / browser profiles committed)
 #   6. Frontend typecheck, unit tests and production build (fail when node_modules is absent; --install installs it)
 #
-# Usage:  scripts/ubuntu/verify.sh [--install] [--skip-frontend]
+# Usage:  scripts/ubuntu/verify.sh [--install] [--skip-frontend] [--no-parallel] [--changed]
 #   --install        install python/npm dependencies before verifying
 #   --skip-frontend  skip the frontend gates
+#   --no-parallel    run pytest serially
+#   --changed        run related backend test files first, then the full suite
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -19,11 +21,15 @@ cd "$ROOT_DIR"
 
 INSTALL=0
 SKIP_FRONTEND=0
+PARALLEL=1
+CHANGED=0
 for arg in "$@"; do
   case "$arg" in
     --install) INSTALL=1 ;;
     --skip-frontend) SKIP_FRONTEND=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --no-parallel) PARALLEL=0 ;;
+    --changed) CHANGED=1 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -59,6 +65,19 @@ if [[ ! -d .venv ]]; then
   fi
 fi
 PY="$ROOT_DIR/.venv/bin/python"
+if [[ $INSTALL -eq 1 ]]; then
+  "$PY" -m pip install -r scripts/ubuntu/requirements-verify.txt >/dev/null
+fi
+PYTEST_ARGS=()
+if [[ $PARALLEL -eq 1 ]]; then
+  if ! "$PY" -c 'import xdist' 2>/dev/null; then
+    echo "pytest-xdist missing; run verify.sh --install or use --no-parallel" >&2
+    exit 1
+  fi
+  # Avoid spawning hundreds of workers on large hosts; users can override this.
+  export PYTEST_XDIST_AUTO_NUM_WORKERS="${PYTEST_XDIST_AUTO_NUM_WORKERS:-2}"
+  PYTEST_ARGS=(-n auto --dist loadfile)
+fi
 
 step "2/6 Database migrations"
 if (cd backend && "$ROOT_DIR/.venv/bin/alembic" upgrade head && test "$("$ROOT_DIR/.venv/bin/alembic" heads | wc -l)" -eq 1); then
@@ -69,10 +88,35 @@ fi
 
 step "3/6 Backend & Bridge lint"
 run_gate "ruff check backend" "$ROOT_DIR/.venv/bin/ruff" check backend
+run_gate "ruff check scripts" "$ROOT_DIR/.venv/bin/ruff" check --config backend/pyproject.toml scripts
 run_gate "ruff check bridge" "$ROOT_DIR/.venv/bin/ruff" check --config backend/pyproject.toml bridge
 
 step "4/6 Backend & Bridge tests"
-if (cd backend && "$PY" -m pytest -q); then
+if [[ $CHANGED -eq 1 ]]; then
+  # Include committed branch changes, staged, unstaged and untracked files.
+  mapfile -t changed_paths < <( { git diff --name-only "$(git merge-base HEAD origin/main)" HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u )
+  declare -A related=()
+  for path in "${changed_paths[@]}"; do
+    if [[ $path == backend/tests/test_*.py && -f $path ]]; then
+      related["${path#backend/}"]=1
+    elif [[ $path == backend/app/*.py ]]; then
+      stem="$(basename "$path" .py)"
+      for test_file in backend/tests/test_*"$stem"*.py; do
+        [[ -f $test_file ]] && related["${test_file#backend/}"]=1
+      done
+    fi
+  done
+  if [[ ${#related[@]} -gt 0 ]]; then
+    if (cd backend && "$PY" -m pytest -q "${PYTEST_ARGS[@]}" "${!related[@]}"); then
+      ok "changed-related backend tests"
+    else
+      fail "changed-related backend tests"
+    fi
+  else
+    echo "  No related backend test files found; running the full suite."
+  fi
+fi
+if (cd backend && "$PY" -m pytest -q "${PYTEST_ARGS[@]}"); then
   ok "pytest (backend + E2E verification suite)"
 else
   fail "pytest (backend)"
@@ -82,6 +126,8 @@ if "$PY" -m pytest -v bridge/tests/test_bridge.py; then
 else
   fail "pytest (bridge suite)"
 fi
+
+run_gate "pytest (Ubuntu script regressions)" "$PY" -m pytest -q scripts/ubuntu/tests
 
 step "5/6 Static secret scan"
 if (cd backend && "$PY" -m app.qa.engine --repo-root "$ROOT_DIR"); then

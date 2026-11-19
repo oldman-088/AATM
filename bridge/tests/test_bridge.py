@@ -28,7 +28,13 @@ from app.providers.adapters import ArenaLocalBridgeAdapter  # noqa: E402
 from app.providers.base import ProviderRequest  # noqa: E402
 from app.providers.router import ProviderRouter  # noqa: E402
 
+from bridge.connector import AGENT_COMMANDS, SAFE_STOP_COMMANDS  # noqa: E402
 from bridge.server import create_app  # noqa: E402
+
+
+def test_stop_is_a_supported_emergency_command():
+    assert "stop" in AGENT_COMMANDS
+    assert "stop" in SAFE_STOP_COMMANDS
 
 
 def _free_loopback_port() -> int:

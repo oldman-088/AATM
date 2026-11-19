@@ -28,7 +28,7 @@ import httpx
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
-SCRIPT_VERSION = "2.2.0"
+SCRIPT_VERSION = "2.3.0"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
 # R7: the manager's own Arena profile (Chrome --user-data-dir=$HOME/.aatm-profiles/manager).
@@ -196,7 +196,7 @@ def build_userscript(profile: BrowserProfile, agent: Agent | None, token: str) -
 
 # The body only. Chat mode: types one prompt, waits for the complete answer and reports it.
 # Agent mode: monitors the Arena Agent page (MutationObserver + 1 s tick) and runs the bridge's
-# commands (new_session, submit, keep_working, read_last_reply, selector_test). Human-check and
+# commands (new_session, submit, keep_working, stop, read_last_reply, selector_test). Human-check and
 # offline detection rules arrive from the bridge as data. It never touches cookies, storage,
 # credentials or network APIs other than the one local WebSocket.
 USERSCRIPT_BODY = r"""(function () {
@@ -343,16 +343,19 @@ USERSCRIPT_BODY = r"""(function () {
     return null;
   }
 
-  function hasStopButton() {
-    var busySel = settings && settings.dom && settings.dom.busy;
-    if (busySel && q(busySel)) return true;
+  function findStopButton() {
     var panels = suggestionPanels();
-    var els = qa("button").filter(function (el) { return !inSuggestionPanel(el, panels); });
+    var els = qa("button, [role='button']").filter(function (el) { return !inSuggestionPanel(el, panels); });
     for (var i = 0; i < els.length; i++) {
       var text = textOf(els[i]).toLowerCase();
-      if ((isStopLabel(labelOf(els[i])) || /^stop( generating| response)?$/.test(text)) && isVisible(els[i])) return true;
+      if ((isStopLabel(labelOf(els[i])) || /^stop( generating| response)?$/.test(text)) && isVisible(els[i])) return els[i];
     }
-    return false;
+    return null;
+  }
+
+  function hasStopButton() {
+    var busySel = settings && settings.dom && settings.dom.busy;
+    return !!((busySel && q(busySel)) || findStopButton());
   }
 
   // "stop" or "abort" as a whole word of a control name. A file name such as the changed-file chip
@@ -944,6 +947,25 @@ USERSCRIPT_BODY = r"""(function () {
     return { clicked: true };
   }
 
+  async function cmdStop() {
+    var btn = findStopButton();
+    if (!btn) return { stopped: false, reason: "Stop is not visible" };
+    safeClick(btn);
+    var deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (!hasStopButton()) {
+        mon.busyVisible = false;
+        mon.lastBusyAt = 0;
+        mon.submittedAt = 0;
+        evaluate(true);
+        if (computeState().state !== "generating") return { stopped: true };
+      }
+      await sleep(100);
+    }
+    evaluate(true);
+    throw fail("stop_failed", "the Arena page is still generating after clicking Stop");
+  }
+
   function cmdReadLastReply() { return latestReply(); }
 
   async function cmdCloseFeedback() { return { closed: await closeFeedbackPanel() }; }
@@ -1005,7 +1027,7 @@ USERSCRIPT_BODY = r"""(function () {
     return report;
   }
 
-  var COMMANDS = { new_session: cmdNewSession, submit: cmdSubmit, keep_working: cmdKeepWorking,
+  var COMMANDS = { new_session: cmdNewSession, submit: cmdSubmit, keep_working: cmdKeepWorking, stop: cmdStop,
                    read_last_reply: cmdReadLastReply, selector_test: cmdSelectorTest,
                    select_repo: cmdSelectRepo, create_pr: cmdCreatePr, close_feedback: cmdCloseFeedback };
   var READ_ONLY = { read_last_reply: true, selector_test: true };
@@ -1013,7 +1035,7 @@ USERSCRIPT_BODY = r"""(function () {
   async function handleCommand(msg) {
     var fn = COMMANDS[msg.command];
     if (!fn) { send({ type: "result", request_id: msg.request_id, ok: false, code: "unknown_command", message: "unsupported command" }); return; }
-    if (stopped && !READ_ONLY[msg.command]) {
+    if (stopped && !READ_ONLY[msg.command] && msg.command !== "stop") {
       send({ type: "result", request_id: msg.request_id, ok: false, code: "needs_human", message: "stopped for a human" });
       return;
     }

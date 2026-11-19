@@ -8,7 +8,7 @@
   ``ARENA_BRIDGE_TOKEN``.
 * ``dispatch()`` is used by ``/v1/chat/completions`` when ``model == "arena_browser"`` (chat mode).
 * ``command()`` drives an Arena Agent session (agent mode): ``new_session``, ``submit``,
-  ``keep_working``, ``read_last_reply`` and ``selector_test``. The userscript streams the session
+  ``keep_working``, ``stop``, ``read_last_reply`` and ``selector_test``. The userscript streams the session
   state (``ready``, ``generating``, ``idle``, ``keep_working_visible``, ``needs_human``, ``offline``)
   which the backend reads to orchestrate the task.
 
@@ -56,11 +56,12 @@ MAX_EVENTS = 50
 AGENT_STATES = ("ready", "generating", "idle", "keep_working_visible", "tool_call_limit", "pr_ready", "needs_human", "offline")
 # Commands the bridge may send to an Arena Agent page. Anything else is refused before it
 # reaches the browser. Read-only commands still run while the profile waits for a human.
-AGENT_COMMANDS = ("new_session", "submit", "keep_working", "read_last_reply", "selector_test", "select_repo",
+AGENT_COMMANDS = ("new_session", "submit", "keep_working", "stop", "read_last_reply", "selector_test", "select_repo",
                   "create_pr", "close_feedback")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REPO_CHECK_MIN_SCRIPT = (2, 1, 0)  # older scripts ignore the repository check
 READ_ONLY_COMMANDS = ("read_last_reply", "selector_test")
+SAFE_STOP_COMMANDS = ("stop",)
 # A page may connect before its profile is known (first start, or an unreadable state file).
 # Userscripts before 2.2.0 stop retrying on 4401 and 4410, so this case must use another code.
 CLOSE_NOT_REGISTERED_YET = 4404
@@ -629,14 +630,14 @@ class ConnectorHub:
         clean = self._validate_command(state, command, dict(args or {}))
         if not _is_loopback_origin(state.origin or "http://127.0.0.1") and not (state.real_enabled and real_arena_allowed_by_bridge()):
             raise ConnectorError("not_enabled", "Real Arena use is not enabled.", 403)
-        if state.status == "needs_human" and command not in READ_ONLY_COMMANDS:
+        if state.status == "needs_human" and command not in READ_ONLY_COMMANDS + SAFE_STOP_COMMANDS:
             raise ConnectorError("needs_human", f"Profile needs a human: {state.needs_human_reason}", 409)
         if state.ws is None:
             raise ConnectorError("offline", "The browser profile's userscript is not connected.", 503)
         async with state.lock:  # one command at a time per browser tab
             if state.ws is None:
                 raise ConnectorError("offline", "The browser profile's userscript is not connected.", 503)
-            if state.status == "needs_human" and command not in READ_ONLY_COMMANDS:
+            if state.status == "needs_human" and command not in READ_ONLY_COMMANDS + SAFE_STOP_COMMANDS:
                 raise ConnectorError("needs_human", f"Profile needs a human: {state.needs_human_reason}", 409)
             request_id = uuid.uuid4().hex
             future: asyncio.Future = asyncio.get_running_loop().create_future()
