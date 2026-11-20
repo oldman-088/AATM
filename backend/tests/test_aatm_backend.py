@@ -1,11 +1,10 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
-
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
+from httpx import ASGITransport, AsyncClient
 
 
 @pytest.fixture(scope="module")
@@ -56,10 +55,10 @@ async def test_health_and_dashboard_overview(client: AsyncClient, auth_headers):
     ov = await client.get("/api/v1/dashboard/overview", headers=auth_headers)
     assert ov.status_code == 200
     data = ov.json()
-    assert data["kpis"]["total_agents"] == 5
+    assert data["kpis"]["total_agents"] == 9  # manager + 8 default workers
     assert len(data["divisions"]) == 12
     assert data["kpis"]["total_providers"] == 3
-    assert data["kpis"]["total_browsers"] == 5  # 4 worker profiles + the manager's own Arena profile (R7)
+    assert data["kpis"]["total_browsers"] == 9  # 8 worker profiles + the manager's own Arena profile (R7)
 
 
 async def test_multilingual_preferences_and_auth_guard(client: AsyncClient, auth_headers):

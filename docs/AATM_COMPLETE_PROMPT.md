@@ -21,7 +21,7 @@ Phase 1 + 1b security, Phase 2 model wizard + NO_MODEL_CONFIGURED gating, Phase 
 
 **B. "Phase 4 — Review, Merge and Completion".**
 
-**C. "Phase 5 — True Parallelism".** Default 1 manager + 4 parallel workers; on-demand extra workers with approval + scale-down; RabbitMQ (aio-pika) with Postgres LISTEN/NOTIFY fallback; Redis (optional, in-process fallback); Postgres default in compose; convert ALL subprocess.run in async paths to asyncio.create_subprocess_exec; scripts/load_test.py.
+**C. "Phase 5 — True Parallelism".** Default 1 manager + 8 parallel workers; on-demand extra workers with approval + scale-down; RabbitMQ (aio-pika) with Postgres LISTEN/NOTIFY fallback; Redis (optional, in-process fallback); Postgres default in compose; convert ALL subprocess.run in async paths to asyncio.create_subprocess_exec; scripts/load_test.py.
 
 **D. "Phase 6 — Profiles Manager + Arena Browser Connector".** Arena is connected through the Arena web page in each employee's Chrome profile via a Tampermonkey userscript and the local bridge — NOT via an API. Build it fully and test it end-to-end against a local mock Arena page (ARENA_MOCK_URL). Real-Arena use stays OFF by default (both flags false + approval reference required). Never solve/bypass CAPTCHA (stop with needs_human), never read cookies/tokens, no account rotation, one in-flight request per profile with a delay and a daily cap, run_userscript stays 501.
 

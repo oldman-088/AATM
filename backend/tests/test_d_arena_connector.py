@@ -28,13 +28,6 @@ from typing import Any
 import pytest
 import uvicorn
 import websockets
-from bridge.server import create_app as create_bridge_app
-from fastapi import HTTPException
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from test_b_review_merge_completion import REPO_SLUG, _init_repo, fake_gh  # noqa: F401 - fixture re-export
-
 from app.browser.arena_connector import arena_gate, build_userscript, match_patterns
 from app.browser.engines import validate_userscript_policy
 from app.browser.manager import browser_manager, detect_playwright_capabilities
@@ -49,6 +42,13 @@ from app.orchestration.scheduler import TaskScheduler
 from app.providers.adapters import ArenaBrowserAdapter
 from app.providers.base import ProviderRequest
 from app.runtime.agent_loop import AgentLoop
+from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from test_b_review_merge_completion import REPO_SLUG, _init_repo, fake_gh  # noqa: F401 - fixture re-export
+
+from bridge.server import create_app as create_bridge_app
 
 BRIDGE_TOKEN = "bridge-test-token-phase6-0123456789"
 PLANTED = ("MOCK-PLANTED-CSRF-9d41c2", "MOCK-PLANTED-COOKIE-5be7aa", "MOCK-PLANTED-STORAGE-1c08ef")
@@ -186,7 +186,7 @@ async def test_flags_off_every_real_arena_path_returns_not_enabled(env, arena_se
             r = await client.post(f"/api/v1/arena/profiles/profile-qa-e2e/{path}", headers=headers)
             assert r.status_code == 409 and r.json()["detail"]["code"] == "not_enabled", (path, r.text)
         wall = (await client.get("/api/v1/arena/profiles", headers=headers)).json()
-        assert len([c for c in wall["profiles"] if c["agent_role"] == "worker"]) == 4
+        assert len([c for c in wall["profiles"] if c["agent_role"] == "worker"]) == 8
         assert len({c["color"] for c in wall["profiles"]}) == len(wall["profiles"])
         assert {c["connector_status"] for c in wall["profiles"]} == {"offline"}
 
@@ -372,15 +372,21 @@ async def _setup_connector(factory, bridge, arena_settings, monkeypatch, tmp_pat
         db.add_all(tasks)
         # These are coding tasks: the admin gives every default worker file-edit permission
         # (seeded QA/provider specialists cannot edit files by design).
-        for w in (await db.execute(select(Agent).where(Agent.role == "worker"))).scalars():
+        # These connector tests cover the four default profiles; workers 5-8 stay disabled here so tasks
+        # are never routed to a profile that has no Arena session in the test.
+        for idx, w in enumerate((await db.execute(select(Agent).where(Agent.role == "worker").order_by(Agent.id))).scalars()):
             w.permissions = sorted(set(w.permissions or []) | {"edit_backend"})
+            if idx >= 4:
+                w.is_enabled = False
         await db.commit()
         task_ids = [t.id for t in tasks]
     headers = await _admin_headers(factory)
     scripts: dict[str, str] = {}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         async with factory() as db:
-            workers = list((await db.execute(select(Agent).where(Agent.role == "worker").order_by(Agent.id))).scalars())
+            workers = list((await db.execute(
+                select(Agent).where(Agent.role == "worker", Agent.is_enabled.is_(True)).order_by(Agent.id)
+            )).scalars())
         for w in workers:
             r = await client.post(f"/api/v1/arena/profiles/{w.browser_profile_id}/userscript", headers=headers)
             assert r.status_code == 200 and r.json()["bridge_registration"]["ok"], r.text

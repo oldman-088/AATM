@@ -9,9 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from app.browser.arena_connector import MANAGER_PROFILE_ID
 from app.core.config import get_settings
 from app.db.base import Base
@@ -30,8 +27,10 @@ from app.models import (
     User,
     Userscript,
 )
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-REAL_PROFILES = {MANAGER_PROFILE_ID, "profile-arena-session"}
+REAL_PROFILES = {MANAGER_PROFILE_ID, "profile-arena-session"} | {f"profile-worker-{n}" for n in range(5, 9)}
 
 
 def _set_demo(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
@@ -83,7 +82,7 @@ async def test_fresh_install_creates_only_the_essentials(factory, monkeypatch: p
         assert (await db.execute(select(User))).scalars().first() is not None
         account = (await db.execute(select(ProviderAccount))).scalars().one()
         assert account.account_identifier != "aatm-org@arena.ai"
-        assert await _count(db, Agent) == 5
+        assert await _count(db, Agent) == 9  # manager + 8 default workers
         assert await _count(db, AuditLog) >= 1
 
 
@@ -108,7 +107,7 @@ async def test_demo_data_is_written_only_when_enabled_and_can_be_removed(factory
         assert await _count(db, ProviderAccount) == 1  # functional: employees' sessions point at it
         assert after["approvals"] == 0 and after["notifications"] == 0 and after["git"] == 0
         assert await _count(db, User) == 1
-        assert await _count(db, Agent) == 5
+        assert await _count(db, Agent) == 9
         profile_ids = set((await db.execute(select(BrowserProfile.id))).scalars().all())
         assert profile_ids <= REAL_PROFILES
 

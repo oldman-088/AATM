@@ -1,6 +1,3 @@
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.browser.arena_connector import MANAGER_PROFILE_ID, MANAGER_PROFILE_NAME
 from app.core.config import KNOWN_DEFAULT_PASSWORDS, get_settings, is_placeholder_password
 from app.core.security import hash_password, verify_password
@@ -24,6 +21,8 @@ from app.models import (
     User,
     Userscript,
 )
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Demo rows: the placeholder browser profiles, the Arena account, the sample userscript, the sample
 # task plan, the greeting, the sample approval/notification/git record. Only written when
@@ -37,7 +36,7 @@ LEGACY_FAKE_ACCOUNT_IDENTIFIER = "aatm-org@arena.ai"
 DEMO_USERSCRIPT_ID = "us-aatm-telemetry"
 DEMO_GIT_BRANCH = "arena/b15bbe5c-aatm"
 DEMO_APPROVAL_TITLE = "Authorize Release Merge to Protected Branch `main`"
-DEMO_NOTIFICATION_TITLE = "AATM Four-Worker Team Ready"
+DEMO_NOTIFICATION_TITLE = "AATM Eight-Worker Team Ready"
 DEMO_TASK_SUFFIX = "core engineering deliverable for AATM."
 DEMO_GREETING_PREFIX = "Chief AI Engineering Manager online."
 
@@ -197,13 +196,27 @@ async def seed_initial_data(db: AsyncSession) -> None:
             arena_mode="agent",
         )
     )
+    # Default team of 8: workers 5-8 each get their own browser profile (created before their agents).
+    for n in range(5, 9):
+        profiles.append(
+            BrowserProfile(
+                id=f"profile-worker-{n}",
+                name=f"Worker {n} Browser Profile",
+                agent_id=f"worker-{n}",
+                profile_dir=str(settings.BROWSER_PROFILES_DIR / f"profile-worker-{n}"),
+                mode="background",
+                status="ready",
+                current_url="https://arena.ai",
+                page_title=f"Worker {n} Arena Session",
+            )
+        )
     for bp in profiles:
         if bp.id in DEMO_PROFILE_IDS and not demo:
             continue
         if not await db.get(BrowserProfile, bp.id):
             db.add(bp)
 
-    # 5. Manager + 4 Specialized Worker Agents (Division 07)
+    # 5. Manager + 8 Worker Agents: 4 specialized + 4 general (Division 07)
     agents = [
         Agent(
             id="manager-0",
@@ -281,6 +294,25 @@ async def seed_initial_data(db: AsyncSession) -> None:
             git_branch="feature/orchestration-qa",
         ),
     ]
+    # Workers 5-8 complete the default team of 8 (DEFAULT_ACTIVE_WORKERS). Each gets its own profile.
+    for n in range(5, 9):
+        agents.append(
+            Agent(
+                id=f"worker-{n}",
+                name=f"Worker {n} — General Engineer",
+                role="worker",
+                role_template="general_engineer",
+                specialty="General software engineering: implementation, tests, refactoring, documentation",
+                skills=["python", "typescript", "testing", "refactoring", "documentation"],
+                divisions=["D01", "D02", "D03", "D04"],
+                permissions=["edit_backend", "edit_frontend", "run_backend_tests", "run_frontend_tests"],
+                status="idle",
+                provider_id="anthropic-claude",
+                model_name="claude-sonnet-4-5",
+                browser_profile_id=f"profile-worker-{n}",
+                git_branch=f"feature/worker-{n}",
+            )
+        )
     for ag in agents:
         existing_agent = await db.get(Agent, ag.id)
         if existing_agent is None:
@@ -431,7 +463,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             Notification(
                 category="orchestration",
                 severity="info",
-                title="AATM Four-Worker Team Ready",
+                title="AATM Eight-Worker Team Ready",
                 message="Backend, Frontend, AI/Browser, and Orchestration/QA workers are registered and synchronized.",
                 link="/agents",
             )
