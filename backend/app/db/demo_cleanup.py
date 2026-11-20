@@ -17,7 +17,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.seed import (
-    DEMO_ACCOUNT_ID,
     DEMO_APPROVAL_TITLE,
     DEMO_GIT_BRANCH,
     DEMO_GREETING_PREFIX,
@@ -32,8 +31,6 @@ from app.models import (
     ChatMessage,
     GitWorkflowRecord,
     Notification,
-    ProviderAccount,
-    ProviderSession,
     Task,
     Userscript,
 )
@@ -65,8 +62,6 @@ async def remove_demo_data(db: AsyncSession, *, apply: bool = False) -> dict[str
             db, Notification, Notification.title == DEMO_NOTIFICATION_TITLE, apply=apply
         ),
         "git_records": await _sweep(db, GitWorkflowRecord, GitWorkflowRecord.branch_name == DEMO_GIT_BRANCH, apply=apply),
-        "provider_sessions": await _sweep(db, ProviderSession, ProviderSession.account_id == DEMO_ACCOUNT_ID, apply=apply),
-        "provider_accounts": await _sweep(db, ProviderAccount, ProviderAccount.id == DEMO_ACCOUNT_ID, apply=apply),
         "userscripts": await _sweep(db, Userscript, Userscript.id == DEMO_USERSCRIPT_ID, apply=apply),
         "browser_profiles": await _sweep(db, BrowserProfile, BrowserProfile.id.in_(sorted(DEMO_PROFILE_IDS)), apply=apply),
     }

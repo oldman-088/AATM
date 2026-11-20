@@ -88,6 +88,7 @@ async def test_all_non_public_routes_return_401_without_auth(client: AsyncClient
         ("GET", "/redoc"),
         ("POST", "/api/v1/auth/login"),
         ("POST", "/api/v1/github/webhooks"),
+        ("GET", "/api/v1/arena/install/{token}"),  # E16: the one-time link is the credential
     }
     checked: list[tuple[str, str]] = []
 

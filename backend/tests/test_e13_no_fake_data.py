@@ -66,7 +66,6 @@ async def _demo_counts(db) -> dict[str, int]:
         "approvals": await _count(db, ApprovalRequest),
         "notifications": await _count(db, Notification),
         "git": await _count(db, GitWorkflowRecord),
-        "accounts": await _count(db, ProviderAccount),
         "userscripts": await _count(db, Userscript),
     }
 
@@ -82,6 +81,8 @@ async def test_fresh_install_creates_only_the_essentials(factory, monkeypatch: p
         assert profile_ids <= REAL_PROFILES
 
         assert (await db.execute(select(User))).scalars().first() is not None
+        account = (await db.execute(select(ProviderAccount))).scalars().one()
+        assert account.account_identifier != "aatm-org@arena.ai"
         assert await _count(db, Agent) == 5
         assert await _count(db, AuditLog) >= 1
 
@@ -92,7 +93,7 @@ async def test_demo_data_is_written_only_when_enabled_and_can_be_removed(factory
     async with factory() as db:
         await seed_initial_data(db)
         before = await _demo_counts(db)
-        assert before["tasks"] == 12 and before["chat"] >= 1 and before["accounts"] == 1
+        assert before["tasks"] == 12 and before["chat"] >= 1
 
         dry = await remove_demo_data(db, apply=False)
         assert dry["tasks"] == before["tasks"]
@@ -103,7 +104,8 @@ async def test_demo_data_is_written_only_when_enabled_and_can_be_removed(factory
         assert applied["tasks"] == before["tasks"]
         assert applied["browser_profiles"] == 3
         after = await _demo_counts(db)
-        assert after["tasks"] == 0 and after["chat"] == 0 and after["accounts"] == 0
+        assert after["tasks"] == 0 and after["chat"] == 0
+        assert await _count(db, ProviderAccount) == 1  # functional: employees' sessions point at it
         assert after["approvals"] == 0 and after["notifications"] == 0 and after["git"] == 0
         assert await _count(db, User) == 1
         assert await _count(db, Agent) == 5

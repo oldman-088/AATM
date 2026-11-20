@@ -29,7 +29,11 @@ from app.models import (
 # task plan, the greeting, the sample approval/notification/git record. Only written when
 # SEED_DEMO_DATA=true. `remove_demo_data` deletes exactly these rows and nothing else.
 DEMO_PROFILE_IDS = frozenset({"profile-backend-docs", "profile-frontend-preview", "profile-qa-e2e"})
-DEMO_ACCOUNT_ID = "acct-arena-primary"
+# The Arena account row is functional (employees' provider sessions point at it); only its old
+# placeholder e-mail was fake, and it is replaced on start.
+ARENA_ACCOUNT_ID = "acct-arena-primary"
+ARENA_ACCOUNT_LABEL = "Arena (signed in inside each browser profile)"
+LEGACY_FAKE_ACCOUNT_IDENTIFIER = "aatm-org@arena.ai"
 DEMO_USERSCRIPT_ID = "us-aatm-telemetry"
 DEMO_GIT_BRANCH = "arena/b15bbe5c-aatm"
 DEMO_APPROVAL_TITLE = "Authorize Release Merge to Protected Branch `main`"
@@ -479,13 +483,13 @@ async def seed_initial_data(db: AsyncSession) -> None:
             )
         )
 
-    if demo and not await db.get(ProviderAccount, DEMO_ACCOUNT_ID):
+    if not await db.get(ProviderAccount, ARENA_ACCOUNT_ID):
         db.add(
             ProviderAccount(
-                id="acct-arena-primary",
+                id=ARENA_ACCOUNT_ID,
                 provider_id="arena-agent",
                 label="Primary Arena Organization Account",
-                account_identifier="aatm-org@arena.ai",
+                account_identifier=ARENA_ACCOUNT_LABEL,
                 allocation_mode="hybrid",
                 max_employees=20,
                 credential_ref=None,  # Arena: the human signs in inside each browser profile
@@ -493,20 +497,24 @@ async def seed_initial_data(db: AsyncSession) -> None:
             )
         )
         await db.flush()
+    else:
+        account = await db.get(ProviderAccount, ARENA_ACCOUNT_ID)
+        if account.account_identifier == LEGACY_FAKE_ACCOUNT_IDENTIFIER:
+            account.account_identifier = ARENA_ACCOUNT_LABEL
 
     for aid in ("manager-0", "worker-1", "worker-2", "worker-3", "worker-4"):
         ws = ensure_employee_workspace(aid)
         ag = await db.get(Agent, aid)
         if ag:
             ag.workspace_path = str(ws)
-            ag.provider_account_id = ag.provider_account_id or (DEMO_ACCOUNT_ID if demo else None)
-            if demo and not ag.provider_session_id:
+            ag.provider_account_id = ag.provider_account_id or ARENA_ACCOUNT_ID
+            if not ag.provider_session_id:
                 sid = f"sess-{aid}"
                 if not await db.get(ProviderSession, sid):
                     db.add(
                         ProviderSession(
                             id=sid,
-                            account_id=DEMO_ACCOUNT_ID,
+                            account_id=ARENA_ACCOUNT_ID,
                             agent_id=aid,
                             project_id=project.id,
                             browser_profile_id=ag.browser_profile_id,

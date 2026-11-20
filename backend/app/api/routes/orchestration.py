@@ -462,7 +462,9 @@ async def send_chat(
                     "message": "Choose a project first: the manager needs to know which product a goal is for.",
                 },
             )
-    elif await db.get(Project, body.project_id) is None:
+    elif await db.get(Project, body.project_id) is None and (
+        await db.execute(select(Project.id).where(Project.slug == body.project_id))
+    ).scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Project not found")
     user_msg = ChatMessage(
         project_id=body.project_id,
