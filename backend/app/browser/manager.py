@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import socket  # noqa: F401 - patched as app.browser.manager.socket in tests
 from pathlib import Path
@@ -34,6 +35,38 @@ from app.models import AuditLog, BrowserProfile, BrowserSession
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+
+def write_chrome_profile_name(pdir: Path, name: str | None) -> None:
+    """Write the employee's name into the Chrome profile files, so the profile shows it when opened.
+
+    Chrome reads the display name from ``Local State`` (profile.info_cache) and ``Default/Preferences``.
+    Failures never block a launch: the name is cosmetic.
+    """
+    if not name:
+        return
+    try:
+        pdir.mkdir(parents=True, exist_ok=True)
+        local_state_path = pdir / "Local State"
+        local_state = json.loads(local_state_path.read_text(encoding="utf-8")) if local_state_path.exists() else {}
+        info_cache = local_state.setdefault("profile", {}).setdefault("info_cache", {})
+        entry = info_cache.setdefault("Default", {})
+        entry["name"] = name
+        # Chrome keeps showing its generic "Person N" name unless this flag says the name is custom.
+        entry["is_using_default_name"] = False
+        local_state_path.write_text(json.dumps(local_state), encoding="utf-8")
+
+        prefs_dir = pdir / "Default"
+        prefs_dir.mkdir(parents=True, exist_ok=True)
+        prefs_path = prefs_dir / "Preferences"
+        prefs = json.loads(prefs_path.read_text(encoding="utf-8")) if prefs_path.exists() else {}
+        prefs.setdefault("profile", {})["name"] = name
+        prefs_path.write_text(json.dumps(prefs), encoding="utf-8")
+    except (OSError, ValueError) as exc:  # noqa: BLE001 - cosmetic; the browser still launches
+        logger.warning("Could not write the Chrome profile name for %s: %s", pdir, exc)
+
 
 SAFE_CHROMIUM_ARGS = [
     "--disable-dev-shm-usage",
@@ -269,6 +302,8 @@ class BrowserManager:
         try:
             from playwright.async_api import async_playwright
 
+            # Chrome shows the profile's name from its own files; keep it equal to the employee's name.
+            write_chrome_profile_name(pdir, profile.name)
             pw = await async_playwright().start()
             launch_kwargs: dict[str, Any] = {
                 "user_data_dir": str(pdir),
@@ -285,6 +320,12 @@ class BrowserManager:
             ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
             await ctx.route("**/*", self._guard_browser_request)
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            # The window title follows the active page, so the first page carries the employee's name.
+            if profile.name and not url:
+                try:
+                    await page.evaluate("(name) => { document.title = name }", profile.name)
+                except Exception:  # noqa: BLE001 - cosmetic; the browser still opens
+                    pass
             if url:
                 safe_url = await validate_public_navigation_url(url)
                 await page.goto(safe_url, timeout=10_000)
