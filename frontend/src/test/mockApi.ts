@@ -200,6 +200,69 @@ export const fixtures: Record<string, RouteValue> = {
     return []
   },
 
+  // Phone-number lookup (Worker 2 — E15 screen)
+  '/api/v1/lookups': (_path: string, init: RequestInit) => {
+    if ((init.method || 'GET').toUpperCase() !== 'POST') return []
+    const body = JSON.parse(String(init.body || '{}'))
+    return {
+      job_id: 'job-lookup-1',
+      status: 'queued',
+      phone_e164: body.phone,
+      phone_raw: body.phone,
+      created_at: '2026-11-20T09:00:00Z',
+    }
+  },
+  '/api/v1/lookups/job-lookup-1': {
+    job_id: 'job-lookup-1',
+    status: 'completed',
+    phone_e164: '+966501234567',
+    phone_raw: '0501234567',
+    created_at: '2026-11-20T09:00:00Z',
+    updated_at: '2026-11-20T09:00:04Z',
+    started_at: '2026-11-20T09:00:01Z',
+    completed_at: '2026-11-20T09:00:04Z',
+    error_message: null,
+    result: {
+      display_name: 'Sara Al-Qahtani',
+      country: 'SA',
+      carrier: 'STC',
+      line_type: 'mobile',
+      spam_score: 8,
+      is_spam: false,
+      summary: 'Sara Al-Qahtani · STC · SA · mobile',
+      attributes: {},
+      updated_at: '2026-11-20T09:00:04Z',
+    },
+    provider_results: [
+      {
+        provider: 'facebook',
+        status: 'success',
+        http_status: 200,
+        error_message: null,
+        latency_ms: 180,
+        payload: {
+          platform: 'facebook',
+          display_name: 'Sara Al-Qahtani',
+          avatar_url: 'https://cdn.example.test/sara.png',
+          profile_url: 'https://facebook.example.test/sara',
+          confidence: 0.86,
+        },
+        created_at: '2026-11-20T09:00:02Z',
+        updated_at: '2026-11-20T09:00:02Z',
+      },
+      {
+        provider: 'instagram',
+        status: 'success',
+        http_status: 200,
+        error_message: null,
+        latency_ms: 210,
+        payload: { platform: 'instagram', not_found: true },
+        created_at: '2026-11-20T09:00:03Z',
+        updated_at: '2026-11-20T09:00:03Z',
+      },
+    ],
+  },
+  '/api/v1/media/avatar': {},
   '/api/v1/employees/skill-gaps': { covered_skills: ['react'], missing_skills: ['python'], coverage_ratio: 0.5 },
   '/api/v1/employees/provision-specialists': { provisioned_count: 1, provisioned_employees: [{ id: 'worker-9' }], after: { covered_skills: ['react', 'python'], missing_skills: [], coverage_ratio: 1 } },
   '/api/v1/providers/sessions/recover': { recovered_count: 2, sessions: [] },

@@ -8,6 +8,7 @@ const AR_DASHBOARD_TITLE = 'مركز القيادة التنفيذي'
 const EN_NAV = [
   'Executive Dashboard',
   'Manager Chat',
+  'Phone Lookup',
   'AI Employees & Org',
   'Tasks & Messaging',
   'Workspaces & Files',
@@ -69,7 +70,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     await settle()
   })
 
-  it('renders all 12 navigation tabs and keeps labels localized in each locale', async () => {
+  it('renders all 13 navigation tabs and keeps labels localized in each locale', async () => {
     installFetchMock()
     await renderWorkspace()
     // EN: every tab label is present in the sidebar
@@ -92,7 +93,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     await settle()
   })
 
-  it('mounts every one of the 12 tabs without crashing', async () => {
+  it('mounts every one of the 13 tabs without crashing', async () => {
     const { calls } = installFetchMock()
     await renderWorkspace()
 
@@ -815,14 +816,14 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
     expect(await screen.findByText(/Connected to claude-sonnet-4-5 in 42\.5 ms/)).toBeInTheDocument()
   })
 
-  it('Phase 7: renders all 12 mobile navigation tabs, toggles light mode, and displays QA security posture', async () => {
+  it('Phase 7: renders all 13 mobile navigation tabs, toggles light mode, and displays QA security posture', async () => {
     installFetchMock()
     localStorage.setItem('aatm_jwt_token', 'test-jwt')
     await renderWorkspace()
 
-    // Mobile navigation exposes the Command Bridge plus the 12 advanced screens.
+    // Mobile navigation exposes the Command Bridge plus the 13 advanced screens.
     const mobileNav = await screen.findByLabelText('Mobile navigation')
-    expect(mobileNav.querySelectorAll('button')).toHaveLength(13)
+    expect(mobileNav.querySelectorAll('button')).toHaveLength(14)
 
     // Light/dark theme toggle updates root element class cleanly
     const themeBtn = screen.getByRole('button', { name: /Theme Mode/i })
@@ -836,4 +837,34 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
     expect(await screen.findByText('Runtime Security Posture')).toBeInTheDocument()
     expect(screen.getByText(/HTTP Headers Enforced/)).toBeInTheDocument()
   })
+  it('E15: runs a phone lookup from the sidebar and renders RTL platform cards', async () => {
+    const { calls } = installFetchMock()
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+    await renderWorkspace()
+
+    fireEvent.click(navButton('Phone Lookup'))
+    expect(await screen.findByTestId('phone-lookup-view')).toBeInTheDocument()
+
+    const phoneInput = screen.getByRole('textbox', { name: /Phone number/ })
+    fireEvent.change(phoneInput, { target: { value: '0501234567' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Search$/ }))
+
+    await waitFor(() => {
+      const post = calls.find((c) => c.path === '/api/v1/lookups' && c.method === 'POST')
+      expect(post?.body).toEqual({ phone: '+966501234567' })
+    })
+
+    // The first poll runs on the production 3s cadence, so give it room.
+    const pollWindow = { timeout: 5000 }
+    expect(await screen.findByTestId('result-card-facebook', {}, pollWindow)).toBeInTheDocument()
+    expect(await screen.findByTestId('not-found-instagram', {}, pollWindow)).toBeInTheDocument()
+
+    // Switching to Arabic keeps the same mounted screen and mirrors the layout.
+    fireEvent.click(screen.getByText('AR'))
+    expect(document.documentElement.dir).toBe('rtl')
+    expect(screen.getByTestId('phone-lookup-view')).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { level: 2, name: /البحث عن رقم الهاتف/ }).length).toBeGreaterThan(0)
+    await settle()
+  })
 })
+

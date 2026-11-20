@@ -2,6 +2,26 @@
 
 All notable changes to AATM are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Phone-number lookup screen (E15, `frontend/src/views/LookupView.tsx`)**: a new `Phone Lookup` tab with a
+  country picker and a number field that accepts Arabic-Indic (٠-٩) and Persian (۰-۹) digits, normalizes to
+  E.164 exactly like the backend, and calls `POST /api/v1/lookups`. A progress panel polls
+  `GET /api/v1/lookups/{job_id}` every 3 s until the job is `completed`/`failed`, then one card per platform
+  shows the profile picture, name, profile link, confidence and the `not_found` state. Fully translated into
+  EN / AR / FA, RTL-correct in Arabic and Persian, responsive from a single column on mobile to two columns on
+  desktop, and covered by an `axe-core` accessibility scan.
+- **Avatar proxy (E15, `GET /api/v1/media/avatar`)**: third-party profile pictures are streamed through our own
+  origin because the app enforces `img-src 'self'`. The route is authenticated, allows public http(s) hosts
+  only (loopback / private / link-local / reserved addresses and `.local`/`.internal` names are rejected), pins
+  the validated IP so DNS cannot be re-pointed, does not follow redirects, accepts image content types only and
+  caps the body at 2 MB.
+
+### Changed
+- `Card` and `Badge` (`frontend/src/components/ui.tsx`) forward the remaining HTML attributes, so screens can
+  attach `data-testid`/ARIA attributes to them; all existing call sites are unchanged.
+
 ## [3.6.0] — 2026-11-19 — stable
 
 Stabilization release from the `r8-aatm` development branch: AATM starts with one command, reconnects and

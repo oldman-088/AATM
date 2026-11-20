@@ -16,6 +16,7 @@ export interface Translations {
     qa: string
     approvals: string
     settings: string
+    phoneLookup: string
   }
   auth: {
     signIn: string
@@ -662,5 +663,65 @@ export interface Translations {
     connectorBusy: string
     connectorIdle: string
     connectorOffline: string
+  }
+  lookup: {
+    title: string
+    subtitle: string
+    country: string
+    countryHint: string
+    countryIgnored: string
+    phone: string
+    phonePlaceholder: string
+    phoneHint: string
+    normalized: string
+    invalidPhone: string
+    search: string
+    searching: string
+    newSearch: string
+    progressTitle: string
+    progressLabel: string
+    statusQueued: string
+    statusRunning: string
+    statusCompleted: string
+    statusFailed: string
+    jobId: string
+    providersAnswered: string
+    elapsed: string
+    jobError: string
+    resultsTitle: string
+    resultsCount: string
+    foundCount: string
+    notFoundCount: string
+    errorCount: string
+    coverage: string
+    confidence: string
+    confidenceValue: string
+    notFound: string
+    notFoundHint: string
+    providerUnavailable: string
+    providerUnavailableHint: string
+    openProfile: string
+    avatarAlt: string
+    avatarFallback: string
+    details: string
+    noDetails: string
+    noResults: string
+    noResultsHint: string
+    emptyTitle: string
+    emptyHint: string
+    notFoundEmptyTitle: string
+    notFoundEmptyHint: string
+    aggregateTitle: string
+    carrier: string
+    lineType: string
+    spam: string
+    spamFlagged: string
+    spamScore: string
+    noAggregate: string
+    andMore: string
+    autoRefresh: string
+    timeout: string
+    searchAgain: string
+    rateLimited: string
   }
 }

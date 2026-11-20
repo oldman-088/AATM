@@ -14,6 +14,7 @@ import {
   LogOut,
   MessageSquare,
   Monitor,
+  Phone,
   OctagonAlert,
   ShieldCheck,
   SunMoon,
@@ -40,11 +41,13 @@ import {
 } from './views/EnterpriseViews'
 import { ApprovalsAuditView, QAView, SettingsNotificationsView } from './views/GovernanceViews'
 import { BrowserWallView, GitWorkflowsView, ProjectsMemoryView, ProvidersView } from './views/InfraViews'
+import { PhoneLookupView } from './views/LookupView'
 import CommandBridge from './bridge/Bridge'
 
 type NavTab =
   | 'bridge'
   | 'dashboard'
+  | 'lookup'
   | 'chat'
   | 'agents'
   | 'tasks'
@@ -306,6 +309,7 @@ function AATMWorkspace() {
   const navItems: Array<{ id: NavTab; label: string; icon: React.ReactNode }> = [
     { id: 'dashboard', label: t.nav.dashboard, icon: <LayoutDashboard className="h-4 w-4" /> },
     { id: 'chat', label: t.nav.chat, icon: <MessageSquare className="h-4 w-4" /> },
+    { id: 'lookup', label: t.nav.phoneLookup, icon: <Phone className="h-4 w-4" /> },
     { id: 'agents', label: t.nav.agents, icon: <Bot className="h-4 w-4" /> },
     { id: 'tasks', label: t.nav.tasks, icon: <ListTodo className="h-4 w-4" /> },
     { id: 'workspaces', label: t.nav.workspaces, icon: <FolderCode className="h-4 w-4" /> },
@@ -601,6 +605,7 @@ function AATMWorkspace() {
               onOpenProvidersWizard={() => setTab('providers')}
             />
           )}
+          {tab === 'lookup' && <PhoneLookupView />}
           {tab === 'chat' && (
             <ManagerChatView messages={chatMessages} projectId={activeProjectId} projects={projects} onSelectProject={setActiveProjectId} error={errors.chat} onReload={() => loadAll()} />
           )}

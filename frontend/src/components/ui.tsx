@@ -9,12 +9,11 @@ export function cn(...inputs: Array<string | undefined | null | false>) {
 export function Card({
   className,
   children,
-}: {
-  className?: string
-  children: React.ReactNode
-}) {
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
+      {...props}
       className={cn(
         'rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 light:border-slate-200 light:bg-white',
         className
@@ -29,10 +28,9 @@ export function Badge({
   variant = 'neutral',
   className,
   children,
-}: {
+  ...props
+}: React.HTMLAttributes<HTMLSpanElement> & {
   variant?: 'success' | 'warning' | 'danger' | 'info' | 'neutral'
-  className?: string
-  children: React.ReactNode
 }) {
   const styles = {
     success: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
@@ -44,6 +42,7 @@ export function Badge({
 
   return (
     <span
+      {...props}
       className={cn(
         'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium',
         styles,

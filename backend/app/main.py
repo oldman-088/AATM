@@ -24,6 +24,7 @@ from app.api.routes import (
     governance,
     infra,
     lookups,
+    media,
     orchestration,
     platform,
     projects,
@@ -209,6 +210,7 @@ app.include_router(arena.router, prefix=API_PREFIX)
 app.include_router(arena.public_router, prefix=API_PREFIX)
 app.include_router(dashboard.router, prefix=API_PREFIX)
 app.include_router(lookups.router, prefix=API_PREFIX)
+app.include_router(media.router, prefix=API_PREFIX)
 app.include_router(code_stream.router, prefix=API_PREFIX)
 app.include_router(demo.router, prefix=API_PREFIX)
 
