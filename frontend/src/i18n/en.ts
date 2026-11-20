@@ -119,7 +119,7 @@ export const en: Translations = {
     quickProtectedMerge: 'Request Protected Merge',
   },
   agents: {
-    title: 'Four-Worker Engineering Organization',
+    title: 'Eight-Worker Engineering Organization',
     restart: 'Restart Worker',
     pause: 'Pause',
     resume: 'Resume',

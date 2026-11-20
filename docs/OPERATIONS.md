@@ -34,7 +34,7 @@ The `worker`, `backend` and `bridge` containers are non-root, `read_only`, `cap_
 | PostgreSQL | SQLite (WAL). The dashboard warns when more than 3 employees run on SQLite. |
 
 ### Parallelism & autoscaling settings
-`DEFAULT_ACTIVE_WORKERS=4`, `AGENT_MAX_PARALLEL=4`, `ARENA_BRIDGE_MAX_CONCURRENCY=1` (per profile),
+`DEFAULT_ACTIVE_WORKERS=8`, `AGENT_MAX_PARALLEL=8`, `ARENA_BRIDGE_MAX_CONCURRENCY=1` (per profile),
 `AUTO_SCALE_MODE=approval|automatic|off`, `SCALE_UP_BACKLOG_THRESHOLD=3`, `SCALE_UP_WAIT_SECONDS=120`,
 `MAX_CONCURRENT_WORKERS=25`, `SCALE_DOWN_IDLE_MINUTES=30`, `PROVIDER_CONCURRENCY_LIMITS=id=N,...`.
 Load test: `.venv/bin/python scripts/load_test.py --tasks 20` (scripted model, no provider spend).

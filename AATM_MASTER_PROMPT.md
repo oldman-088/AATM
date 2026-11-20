@@ -1,7 +1,7 @@
 # AATM — Master Development Prompt
 
 ## Vision & Objective
-Build **AATM (AI Agent Team Manager)**, an autonomous software engineering organization platform led by a **Chief AI Engineering Manager** orchestrating **four specialized Worker Agents** across **12 Development Divisions**.
+Build **AATM (AI Agent Team Manager)**, an autonomous software engineering organization platform led by a **Chief AI Engineering Manager** orchestrating **eight Worker Agents** (four specialized, four general) across **12 Development Divisions**.
 
 ## Core Architectural Pillars
 1. **System Foundation & Contracts (Division 01)**:
@@ -17,7 +17,7 @@ Build **AATM (AI Agent Team Manager)**, an autonomous software engineering organ
 6. **Browser Profile Infrastructure (Division 06)**:
    - Playwright persistent Chromium contexts with isolated profile directories, DB + file locks, visible/background modes, Browser Wall snapshots, and crash recovery.
 7. **Manager & Worker Agent System (Division 07)**:
-   - Chief Manager + 4 specialized Worker Agents with role permissions, heartbeats, pause/resume/restart controls, and Manager Chat directive orchestration.
+   - Chief Manager + 8 Worker Agents (4 specialized + 4 general) with role permissions, heartbeats, pause/resume/restart controls, and Manager Chat directive orchestration.
 8. **Task Orchestration & Scheduling (Division 08)**:
    - Dependency DAG validation, cycle detection, priority queues, idempotency keys, task locking, checkpoints, retries, and stalled-task recovery.
 9. **Project Management & 5-Tier Memory (Division 09)**:

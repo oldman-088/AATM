@@ -4,7 +4,7 @@ Repository: `oldman-088/AATM` — start from the latest `main`.
 You are the lead engineer and integration manager. Execute ALL phases below, in order, without waiting for further instructions between phases. Read the actual code (not README or old docs) before each phase.
 
 Target: make AATM work like the owner's infographic:
-Dashboard (Arabic) → Orchestrator (manager agent) → Profiles Manager → 4 parallel AI workers by default (more on demand, up to 20+), each in its own Chrome profile with its own Arena session driven by a Tampermonkey connector → results collected → Pull Request on GitHub → review → approved merge → project completed.
+Dashboard (Arabic) → Orchestrator (manager agent) → Profiles Manager → 8 parallel AI workers by default (more on demand, up to 20+), each in its own Chrome profile with its own Arena session driven by a Tampermonkey connector → results collected → Pull Request on GitHub → review → approved merge → project completed.
 
 Important: Arena agents are connected through the Arena web page in the browser (Chrome profile + Tampermonkey userscript), NOT through an API. API/local models (Claude API, Ollama, OpenAI-compatible) are only an additional provider and a test harness for the pipeline.
 
@@ -104,19 +104,19 @@ Phase 1 (PR #6) is merged; these defects remain in `main`:
    Keep the existing atomic `UPDATE ... RETURNING` claim as the source of truth; the queue only wakes workers (no double execution).
 3. **Redis** (shown in the infographic): use it for distributed locks (per-task, per-browser-profile), rate limiting, and WebSocket fan-out across multiple backend processes. Optional: if `REDIS_URL` is unset, fall back to in-process implementations.
 4. Make PostgreSQL the default in `docker-compose.yml` and install scripts; SQLite stays for single-user dev only and the UI warns when more than 3 employees are enabled on SQLite.
-5. **Default team = 1 manager + 4 workers running in parallel.** The manager runs in its own lane and does not count toward the worker limit. Set `DEFAULT_ACTIVE_WORKERS=4` and `AGENT_MAX_PARALLEL=4`; seed exactly these 5 employees (update `db/seed.py`), each with its own browser profile.
+5. **Default team = 1 manager + 8 workers running in parallel.** The manager runs in its own lane and does not count toward the worker limit. Set `DEFAULT_ACTIVE_WORKERS=8` and `AGENT_MAX_PARALLEL=8`; seed exactly these 9 employees (manager + 8 workers) (update `db/seed.py`), each with its own browser profile.
 6. **Extra workers are added only when needed (on-demand scaling), up to `MAX_CONCURRENT_WORKERS=25`:**
    - Trigger: the ready-task backlog stays above `SCALE_UP_BACKLOG_THRESHOLD` (default 3) for `SCALE_UP_WAIT_SECONDS` (default 120), or a task needs a skill no active worker has.
    - The manager proposes a new employee (role template from `employees/catalog.py`, model/provider, reason). By default this creates an `ApprovalRequest` (`action_type="spend"`) that the human approves in the Approval Center; an admin setting `AUTO_SCALE_MODE=approval|automatic|off` (default `approval`) controls it. `automatic` still respects daily/monthly budgets and the per-provider concurrency limits.
    - New employees get their own profile, workspace and session exactly like the default 4.
-   - Scale down: an extra employee idle for `SCALE_DOWN_IDLE_MINUTES` (default 30) is paused and its browser profile closed (kept on disk for reuse); the 4 default workers are never auto-removed.
-   - Dashboard: "Add employee" button for manual addition, and a visible indicator `4 default + N extra`.
+   - Scale down: an extra employee idle for `SCALE_DOWN_IDLE_MINUTES` (default 30) is paused and its browser profile closed (kept on disk for reuse); the 8 default workers are never auto-removed.
+   - Dashboard: "Add employee" button for manual addition, and a visible indicator `8 default + N extra`.
 7. Per-provider concurrency limits are configured per provider/account, not globally.
 8. Add `docker-compose` services: `rabbitmq` (management UI on localhost only), `redis`, `backend`, `bridge`, `worker` (scalable with `--scale worker=N`).
 
 **Acceptance:**
 - With the default team, 4 independent tasks run truly in parallel (overlapping execution timestamps) while the manager stays responsive.
-- Load test `scripts/load_test.py` creates 20 tasks: the backlog triggers scale-up proposals; after approval, extra employees join, all 20 tasks complete with no duplicated execution and no `database is locked`; event-loop latency (heartbeat endpoint) stays under 200 ms; after the idle period extras scale back down to the 4 defaults.
+- Load test `scripts/load_test.py` creates 20 tasks: the backlog triggers scale-up proposals; after approval, extra employees join, all 20 tasks complete with no duplicated execution and no `database is locked`; event-loop latency (heartbeat endpoint) stays under 200 ms; after the idle period extras scale back down to the 8 defaults.
 
 ---
 
@@ -169,7 +169,7 @@ This is the heart of the infographic. Build and test it completely now. Using it
 
 ## Definition of Done
 
-From a fresh Ubuntu machine: `install.sh` → `start.sh` → Dashboard in Arabic → create a project linked to a GitHub repo → write a directive in Arabic → the manager splits it into tasks → the 4 default workers execute **in parallel**, each in its own Chrome profile and worktree (via the Arena browser connector against the mock page, or a configured API/local model) → each produces a draft PR with passing tests → the reviewer comments → the owner approves in the Approval Center → PRs merge → the project shows **completed** with a summary and real cost. When the backlog grows, an extra worker is proposed, approved and joins. No mock data in the UI, no secret in logs, and real-Arena use stays off until `ARENA_AUTOMATION_APPROVED=true` with an approval reference.
+From a fresh Ubuntu machine: `install.sh` → `start.sh` → Dashboard in Arabic → create a project linked to a GitHub repo → write a directive in Arabic → the manager splits it into tasks → the 8 default workers execute **in parallel**, each in its own Chrome profile and worktree (via the Arena browser connector against the mock page, or a configured API/local model) → each produces a draft PR with passing tests → the reviewer comments → the owner approves in the Approval Center → PRs merge → the project shows **completed** with a summary and real cost. When the backlog grows, an extra worker is proposed, approved and joins. No mock data in the UI, no secret in logs, and real-Arena use stays off until `ARENA_AUTOMATION_APPROVED=true` with an approval reference.
 
 ## Final Report (after the last phase)
 1. Table of phases: PR link, merge commit, status.

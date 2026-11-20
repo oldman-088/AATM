@@ -23,10 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from app.core.config import Settings, get_settings
 from app.core.security import create_access_token
 from app.db.base import Base, utcnow
@@ -40,6 +36,9 @@ from app.providers.base import ProviderRequest, ProviderResponse
 from app.queue import reset_wake_bus
 from app.queue.base import InProcessWakeBus, task_queue_name
 from app.runtime.agent_loop import AgentLoop
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 class _SlowRouter:
@@ -66,9 +65,8 @@ class _SlowRouter:
 @pytest.fixture()
 async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'phase5.db'}", connect_args={"timeout": 30})
-    from sqlalchemy import event
-
     from app.db.session import _apply_sqlite_pragmas
+    from sqlalchemy import event
 
     event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
     async with engine.begin() as conn:
@@ -140,8 +138,8 @@ def test_default_team_is_one_manager_plus_four_parallel_workers(monkeypatch):
                 "MAX_CONCURRENT_WORKERS", "SCALE_UP_BACKLOG_THRESHOLD", "SCALE_UP_WAIT_SECONDS", "SCALE_DOWN_IDLE_MINUTES"):
         monkeypatch.delenv(key, raising=False)
     s = Settings(_env_file=None)
-    assert s.DEFAULT_ACTIVE_WORKERS == 4
-    assert s.AGENT_MAX_PARALLEL == 4
+    assert s.DEFAULT_ACTIVE_WORKERS == 8
+    assert s.AGENT_MAX_PARALLEL == 8
     assert s.ARENA_BRIDGE_MAX_CONCURRENCY == 1  # per profile, not global
     assert (s.AUTO_SCALE_MODE, s.SCALE_UP_BACKLOG_THRESHOLD, s.SCALE_UP_WAIT_SECONDS) == ("approval", 3, 120.0)
     assert (s.MAX_CONCURRENT_WORKERS, s.SCALE_DOWN_IDLE_MINUTES) == (25, 30.0)
@@ -153,13 +151,13 @@ async def test_seed_has_manager_and_four_workers_each_with_own_profile(env):
         agents = list((await db.execute(select(Agent))).scalars())
         assert [a.role for a in agents].count("manager") == 1
         workers = [a for a in agents if a.role == "worker"]
-        assert len(workers) == 4
+        assert len(workers) == 8
         profiles = {w.browser_profile_id for w in workers}
-        assert len(profiles) == 4 and None not in profiles
+        assert len(profiles) == 8 and None not in profiles
         for pid in profiles:
             assert await db.get(BrowserProfile, pid) is not None
         status = await autoscale_service.status(db)
-        assert status["label"] == "4 default + 0 extra"
+        assert status["label"] == "8 default + 0 extra"
 
 
 async def test_four_tasks_overlap_while_manager_stays_responsive(env):
@@ -173,7 +171,7 @@ async def test_four_tasks_overlap_while_manager_stays_responsive(env):
         assert len({d["worker_id"] for d in cycle["dispatched"]}) == 4
 
     loop = AgentLoop(session_factory=factory, provider_router=router, poll_seconds=0.05)
-    assert loop.max_parallel == 4
+    assert loop.max_parallel == 8
     runner = asyncio.create_task(loop.run_forever())
     headers = await _admin_headers(factory)
     latencies: list[float] = []
@@ -245,7 +243,7 @@ async def test_twenty_tasks_scale_up_with_approval_and_complete_exactly_once(env
 
     async with factory() as db:
         first = await scheduler.run_orchestration_cycle(db)
-    assert len(first["dispatched"]) == 4
+    assert len(first["dispatched"]) == 8
     assert first["scaling"]["proposed"] >= 1, first["scaling"]
     async with factory() as db:
         pending = list((await db.execute(select(ApprovalRequest).where(ApprovalRequest.action_type == "scale_up"))).scalars())
@@ -310,10 +308,10 @@ async def test_scale_up_respects_off_mode_automatic_mode_and_max_workers(env, mo
         monkeypatch.setattr(settings, "AUTO_SCALE_MODE", "off")
         assert (await autoscale_service.evaluate(db))["proposed"] == 0
         monkeypatch.setattr(settings, "AUTO_SCALE_MODE", "automatic")
-        monkeypatch.setattr(settings, "MAX_CONCURRENT_WORKERS", 5)
+        monkeypatch.setattr(settings, "MAX_CONCURRENT_WORKERS", 10)
         monkeypatch.setattr(settings, "SCALE_UP_STEP", 4)
         res = await autoscale_service.evaluate(db)
-        assert res["created"] == ["worker-x1"]  # capped at MAX_CONCURRENT_WORKERS=5
+        assert res["created"] == ["worker-x1", "worker-x2"]  # capped at MAX_CONCURRENT_WORKERS=10 (8 defaults + 2)
         await db.execute(update(Agent).where(Agent.role == "worker").values(status="working"))
         await db.commit()
         res = await autoscale_service.evaluate(db)
@@ -333,12 +331,12 @@ async def test_rejected_or_reused_scale_approval_creates_nothing(env):
         res = await client.post(f"/api/v1/approvals/{aid}/decide", headers=headers, json={"decision": "rejected"})
         assert res.status_code == 200
         status = (await client.get("/api/v1/scaling/status", headers=headers)).json()
-        assert status["extra_workers"] == 0 and status["default_workers"] == 4
+        assert status["extra_workers"] == 0 and status["default_workers"] == 8
         res = await client.post("/api/v1/scaling/workers", headers=headers, json={"count": 2})
         aid2 = res.json()["approval_id"]
         assert (await client.post(f"/api/v1/approvals/{aid2}/decide", headers=headers, json={"decision": "approved"})).status_code == 200
         status = (await client.get("/api/v1/scaling/status", headers=headers)).json()
-        assert status["extra_workers"] == 2 and status["label"] == "4 default + 2 extra"
+        assert status["extra_workers"] == 2 and status["label"] == "8 default + 2 extra"
     async with factory() as db:
         approval = await db.get(ApprovalRequest, aid2)
         again = await autoscale_service.on_approval_decided(db, approval, actor="replay")
@@ -356,7 +354,7 @@ async def test_scale_down_retires_idle_extras_never_defaults(env, monkeypatch):
         retired = await autoscale_service.scale_down(db, now=utcnow() + timedelta(minutes=60))
         assert sorted(retired) == ["worker-x1", "worker-x2"]
         defaults = list((await db.execute(select(Agent).where(Agent.role == "worker", Agent.role_template != EXTRA_TEMPLATE))).scalars())
-        assert len(defaults) == 4 and all(a.is_enabled for a in defaults)
+        assert len(defaults) == 8 and all(a.is_enabled for a in defaults)
         assert (await autoscale_service.status(db))["extra_workers"] == 0
         # Re-scaling reuses retired extras (and their profiles) instead of piling up rows.
         again = await autoscale_service.add_workers(db, 1, actor="test", reason="test")

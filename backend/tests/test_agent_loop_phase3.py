@@ -5,10 +5,6 @@ import json
 from collections import deque
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from test_provider_connection_phase2 import FastAPIBridgeServer, ScriptedReply
-
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
@@ -28,6 +24,9 @@ from app.models import (
 from app.orchestration.scheduler import task_scheduler
 from app.providers.base import ProviderResponse
 from app.runtime.agent_loop import AgentLoop, parse_action_response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from test_provider_connection_phase2 import FastAPIBridgeServer, ScriptedReply
 
 
 @pytest.fixture
@@ -189,7 +188,7 @@ def test_agent_loop_configuration_defaults_follow_bridge_concurrency(monkeypatch
     assert settings.AGENT_LOOP_ENABLED is True
     assert settings.AGENT_LOOP_POLL_SECONDS == 3.0
     assert settings.AGENT_MAX_ITERATIONS == 8
-    assert settings.AGENT_MAX_PARALLEL == 4
+    assert settings.AGENT_MAX_PARALLEL == 8
 
 
 def test_action_protocol_requires_one_valid_object_and_accepts_one_json_fence():

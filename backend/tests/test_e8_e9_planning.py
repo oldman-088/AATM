@@ -13,9 +13,6 @@ respecting the project's concurrency limit.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select, update
-from test_e12_admin_actions import _client, _headers, e12  # noqa: F401 - fixture + helpers
-
 from app.models import Agent, AuditLog, ManagerJob, Project, Task
 from app.orchestration.manager_arena import (
     MAX_TASKS_ONE_LINE,
@@ -27,6 +24,8 @@ from app.orchestration.manager_arena import (
     validate_plan_graph,
 )
 from app.orchestration.scheduler import task_scheduler
+from sqlalchemy import select, update
+from test_e12_admin_actions import _client, _headers, e12  # noqa: F401 - fixture + helpers
 
 PLANNED = "Planned task"
 
@@ -292,6 +291,9 @@ async def _queue(factory, project_id: str, n: int, *, concurrency: int | None = 
         for i in range(n):
             db.add(Task(project_id=project_id, division_code="D01", title=f"Dispatch {i}", description="d",
                         priority="high", execution_mode="auto", status="queued", dependencies=[]))
+        # The default team now has 8 workers; only worker-1 and worker-2 may take work in this test.
+        await db.execute(update(Agent).where(Agent.role == "worker", Agent.id.notin_(["worker-1", "worker-2"]))
+                         .values(is_enabled=False))
         for worker_id in ("worker-1", "worker-2"):
             worker = await db.get(Agent, worker_id)
             worker.status = "idle"

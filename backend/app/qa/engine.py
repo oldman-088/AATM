@@ -5,16 +5,15 @@ from pathlib import Path
 from typing import Any
 
 import psutil
-from fastapi import HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.browser.manager import browser_manager
 from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.models import Agent, AuditLog, BrowserProfile, Notification, Task
 from app.orchestration.scheduler import task_scheduler
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # --------------------------------------------------------------------------------------
 # Static secret scanning (Division 11 - QA / Security)
@@ -208,8 +207,28 @@ class QAAndIntelligenceEngine:
         files_scanned = 0
         scanned_paths: set[str] = set()
 
+        ignored_cache: dict[str, bool] = {}
+
+        def _is_git_ignored(rel: str) -> bool:
+            # Local-only files (for example a gitignored .env) cannot be committed by git,
+            # so their hits are reported as suppressed instead of failing the tree scan.
+            if rel not in ignored_cache:
+                try:
+                    proc = subprocess.run(
+                        ["git", "-C", str(root), "check-ignore", "-q", "--", rel],
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    ignored_cache[rel] = proc.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    ignored_cache[rel] = False
+            return ignored_cache[rel]
+
         def _record(rule: str, severity: str, rel: str, line: int, suppressed_reason: str | None) -> None:
             entry = {"severity": severity, "file": rel, "rule": rule, "line": line}
+            if suppressed_reason is None and _is_git_ignored(rel):
+                suppressed_reason = "local file excluded from git (not committed)"
             if suppressed_reason:
                 entry["status"] = "suppressed"
                 entry["suppression_reason"] = suppressed_reason

@@ -15,7 +15,13 @@ BACKEND = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = [BACKEND / "app", BACKEND.parent / "bridge"]
 BLOCKING = {("subprocess", "run"), ("subprocess", "Popen"), ("subprocess", "call"), ("subprocess", "check_output"),
             ("subprocess", "check_call"), ("time", "sleep"), ("os", "system")}
-SYNC_ALLOWLIST = {("app/qa/engine.py", "_tracked_files")}
+# run_security_scan is synchronous by design and only runs in a worker thread (run_security_scan_async uses
+# asyncio.to_thread); _is_git_ignored is its helper for the gitignore check on local files.
+SYNC_ALLOWLIST = {
+    ("app/qa/engine.py", "_tracked_files"),
+    ("app/qa/engine.py", "run_security_scan"),
+    ("app/qa/engine.py", "_is_git_ignored"),
+}
 
 
 def _py_files():
