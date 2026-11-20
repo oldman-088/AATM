@@ -6,10 +6,6 @@ import time
 from datetime import timedelta
 from typing import Any
 
-from pydantic import ValidationError
-from sqlalchemy import and_, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
@@ -30,6 +26,9 @@ from app.providers.router import ProviderRouter, get_model_configuration_status
 from app.providers.router import provider_router as shared_provider_router
 from app.runtime.temporal import to_naive_utc
 from app.schemas.manager import ManagerPlan
+from pydantic import ValidationError
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +281,9 @@ class TaskScheduler:
             )
         )
         workers = list(agents_res.scalars().all())
+        # Arena workers whose profile is disconnected from the bridge get no new tasks. Their queued tasks
+        # stay queued and are dispatched again on a later cycle, once the worker reconnects.
+        disconnected_agents = await self._arena_disconnected_agent_ids(workers)
         idle_workers = [w for w in workers if w.status == "idle"]
         working_count = sum(1 for w in workers if w.status == "working")
 
@@ -327,6 +329,7 @@ class TaskScheduler:
                 w for w in idle_workers
                 if (w.role == "reviewer") == wants_reviewer
                 and (w.id not in reserved or reserved[w.id] in {task.id, task.parent_task_id})
+                and w.id not in disconnected_agents
             ]
             if task.execution_mode == "manual":
                 if not task.assigned_agent_id:
@@ -452,6 +455,30 @@ class TaskScheduler:
             "manager": manager,
             "scaling": scaling,
         }
+
+    @staticmethod
+    async def _arena_disconnected_agent_ids(workers: list[Agent]) -> set[str]:
+        """Workers whose Arena profile is not connected to the bridge right now (status "disconnected").
+
+        Only applies while Arena is enabled; with Arena off, dispatch is unchanged. If the bridge cannot be
+        reached, every worker with an Arena profile counts as disconnected, since none of them can run.
+        """
+        from app.browser.arena_connector import arena_gate, bridge_call
+
+        if not arena_gate()["enabled"]:
+            return set()
+        profile_by_agent = {w.id: w.browser_profile_id for w in workers if w.browser_profile_id}
+        if not profile_by_agent:
+            return set()
+        listed = await bridge_call("GET", "/v1/connector/profiles")
+        if not listed.get("ok"):
+            return set(profile_by_agent)
+        connected = {
+            str(item.get("profile_id"))
+            for item in listed.get("profiles") or []
+            if item.get("connected")
+        }
+        return {agent_id for agent_id, profile_id in profile_by_agent.items() if profile_id not in connected}
 
     async def dispatch_ready_tasks(
         self,
