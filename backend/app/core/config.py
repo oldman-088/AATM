@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     WORKSPACES_DIR: Path = ROOT_DIR / "data" / "workspaces"
     BACKUPS_DIR: Path = ROOT_DIR / "backups"
     REPO_ROOT: Path = ROOT_DIR
+    # Chrome/Chromium binary the employee profiles open in (e.g. /usr/bin/google-chrome). Empty = Playwright's bundled Chromium.
+    BROWSER_EXECUTABLE_PATH: str = ""
 
     ARENA_BRIDGE_URL: str = "http://127.0.0.1:4100"
     ARENA_BRIDGE_TIMEOUT: float = 600.0

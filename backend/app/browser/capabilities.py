@@ -40,9 +40,19 @@ def detect_playwright_capabilities() -> dict[str, Any]:
 
         playwright_pkg = True
 
+        # An explicitly configured browser (for example the installed Google Chrome, which carries the
+        # employees' Tampermonkey userscript setup) wins over the bundled Chromium.
+        from app.core.config import get_settings
+
+        configured = (get_settings().BROWSER_EXECUTABLE_PATH or "").strip()
+        if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+            chromium_installed = True
+            executable_path = configured
+            browser_source = "configured_binary"
+
         # Search Playwright browser caches across Linux, Windows 11, and macOS without launching a browser
         preferred_names = ("chrome", "chrome.exe", "headless_shell", "headless_shell.exe")
-        for cdir in _candidate_playwright_cache_dirs():
+        for cdir in ([] if chromium_installed else _candidate_playwright_cache_dirs()):
             if not cdir.exists():
                 continue
             for exe_name in preferred_names:

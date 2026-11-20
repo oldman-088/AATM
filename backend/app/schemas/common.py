@@ -87,6 +87,7 @@ class EmployeeSkillGapRequest(BaseModel):
 
 
 class AgentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
     status: str | None = None
     provider_id: str | None = None
     model_name: str | None = None

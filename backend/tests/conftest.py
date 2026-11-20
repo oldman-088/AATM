@@ -25,6 +25,10 @@ else:
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB}"
     os.environ["SYNC_DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 
+# Browser profile directories are per test run too: a test must never lock or open a live employee profile
+# (a window running on the real data/browser_profiles/ left a .aatm.lock that made launches return 409).
+os.environ.setdefault("BROWSER_PROFILES_DIR", tempfile.mkdtemp(prefix="aatm-test-profiles-"))
+
 # Phase 6 tests run the real bridge (repo-root package `bridge`) next to the backend.
 import sys  # noqa: E402
 
@@ -35,10 +39,9 @@ if _REPO_ROOT not in sys.path:
 
 def _create_test_schema() -> None:
     """Tests that do not reset the database themselves still find every table."""
-    from sqlalchemy import create_engine
-
     import app.models  # noqa: F401 - registers every table on Base.metadata
     from app.db.base import Base
+    from sqlalchemy import create_engine
 
     if not os.environ.get("SYNC_DATABASE_URL"):
         return
