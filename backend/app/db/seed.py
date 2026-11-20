@@ -142,7 +142,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
     profiles = [
         BrowserProfile(
             id="profile-backend-docs",
-            name="Research & API Docs Profile",
+            name="Worker 1 — Backend Engineer",
             agent_id="worker-1",
             profile_dir=str(settings.BROWSER_PROFILES_DIR / "profile-backend-docs"),
             mode="background",
@@ -152,7 +152,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
         ),
         BrowserProfile(
             id="profile-frontend-preview",
-            name="Frontend Live Preview & RTL Inspector",
+            name="Worker 2 — Frontend Engineer",
             agent_id="worker-2",
             profile_dir=str(settings.BROWSER_PROFILES_DIR / "profile-frontend-preview"),
             mode="visible",
@@ -162,7 +162,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
         ),
         BrowserProfile(
             id="profile-arena-session",
-            name="Arena Web Session Profile",
+            name="Worker 3 — AI Provider & Browser Engineer",
             agent_id="worker-3",
             profile_dir=str(settings.BROWSER_PROFILES_DIR / "profile-arena-session"),
             mode="background",
@@ -172,7 +172,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
         ),
         BrowserProfile(
             id="profile-qa-e2e",
-            name="QA E2E & GitHub Verification Profile",
+            name="Worker 4 — Orchestration & QA Engineer",
             agent_id="worker-4",
             profile_dir=str(settings.BROWSER_PROFILES_DIR / "profile-qa-e2e"),
             mode="background",
@@ -201,7 +201,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
         profiles.append(
             BrowserProfile(
                 id=f"profile-worker-{n}",
-                name=f"Worker {n} Browser Profile",
+                name=f"Worker {n} — General Engineer",
                 agent_id=f"worker-{n}",
                 profile_dir=str(settings.BROWSER_PROFILES_DIR / f"profile-worker-{n}"),
                 mode="background",

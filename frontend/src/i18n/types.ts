@@ -279,6 +279,11 @@ export interface Translations {
     orgStructureTitle: string
     score: string
     replace: string
+    start: string
+    saveName: string
+    nameSaved: string
+    nameSaveFailed: string
+    agentName: string
     messagingTitle: string
     messagingPlaceholder: string
     deliverablePlaceholder: string

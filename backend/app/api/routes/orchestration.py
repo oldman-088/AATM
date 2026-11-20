@@ -1,18 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.api.deps import get_current_user, require_role
 from app.core.events import event_bus
 from app.db.backup import backup_before
 from app.db.base import utcnow
 from app.db.session import get_db
 from app.git_workflows.manager import git_workflow_manager
-from app.models import Agent, AuditLog, ChatMessage, GitWorkflowRecord, Project, Task, User
+from app.models import Agent, AuditLog, BrowserProfile, ChatMessage, GitWorkflowRecord, Project, Task, User
 from app.models.project import project_base_branch
 from app.orchestration.scheduler import task_scheduler
 from app.orchestration.self_heal import release_worker_for_task
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["agents-tasks-orchestration"], dependencies=[Depends(get_current_user)])
 
@@ -129,6 +128,13 @@ async def update_agent(
         agent.provider_id = provider.id
         if body.model_name is None and not agent.model_name:
             agent.model_name = provider.default_model
+    if body.name is not None:
+        # The browser profile carries the employee's name, so both change together.
+        agent.name = body.name.strip()
+        if agent.browser_profile_id:
+            profile = await db.get(BrowserProfile, agent.browser_profile_id)
+            if profile is not None:
+                profile.name = agent.name
     for field in ("status", "model_name", "is_enabled", "permissions"):
         val = getattr(body, field)
         if val is not None:

@@ -56,6 +56,7 @@ export function EmployeeCreatorAndOrgPanel({
   const [allocationMode, setAllocationMode] = useState('hybrid')
   const [autonomyMode, setAutonomyMode] = useState('semi_autonomous')
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({})
   const [traces, setTraces] = useState<any[] | null>(null)
   const [traceUnavailable, setTraceUnavailable] = useState(false)
   const [traceAgent, setTraceAgent] = useState('')
@@ -114,6 +115,23 @@ export function EmployeeCreatorAndOrgPanel({
     onReload()
   }
 
+  const startEmployee = async (ag: any) => {
+    try {
+      await apiFetch(`/agents/${ag.id}/restart`, { method: 'POST' })
+      if (ag.browser_profile_id) {
+        // Open the employee's own browser profile in a visible window, as the Browsers tab does.
+        await apiFetch(`/browsers/${ag.browser_profile_id}/launch`, {
+          method: 'POST',
+          body: JSON.stringify({ mode: 'visible', owner: 'dashboard-operator' }),
+        })
+      }
+      setFeedback(`${t.enterprise.start}: ${ag.name}`)
+      onReload()
+    } catch (err: any) {
+      setFeedback(err?.message || t.enterprise.start)
+    }
+  }
+
   const replaceEmployee = async (agentId: string) => {
     try {
       const res = await apiFetch<any>(`/employees/${agentId}/replace`, { method: 'POST' })
@@ -126,13 +144,46 @@ export function EmployeeCreatorAndOrgPanel({
     }
   }
 
+  const saveAgentName = async (ag: any) => {
+    const next = (nameDrafts[ag.id] ?? ag.name).trim()
+    if (!next || next === ag.name) return
+    try {
+      // The endpoint renames the employee and its browser profile together.
+      await apiFetch(`/agents/${ag.id}`, { method: 'PATCH', body: JSON.stringify({ name: next }) })
+      setNameDrafts((d) => {
+        const copy = { ...d }
+        delete copy[ag.id]
+        return copy
+      })
+      setFeedback(`${t.enterprise.nameSaved}: ${next}`)
+      onReload()
+    } catch (err: any) {
+      setFeedback(err?.message || t.enterprise.nameSaveFailed)
+    }
+  }
+
   const renderAgent = (ag: any): React.ReactNode => (
     <div key={ag.id} className="space-y-2">
-      <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
-        <div className="min-w-0"><div className="truncate font-semibold text-white">{ag.name}</div>
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex items-center gap-1.5">
+            <input
+              className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 font-semibold text-white"
+              value={nameDrafts[ag.id] ?? ag.name}
+              onChange={(e) => setNameDrafts((d) => ({ ...d, [ag.id]: e.target.value }))}
+              maxLength={120}
+              aria-label={t.enterprise.agentName}
+            />
+            <Button size="sm" variant="secondary" onClick={() => saveAgentName(ag)}>{t.enterprise.saveName}</Button>
+          </div>
           <div className="truncate text-slate-400">{ag.role_template || ag.role} • {ag.autonomy_mode}</div>
         </div>
-        {ag.role !== 'manager' && <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>}
+        {ag.role !== 'manager' && (
+          <div className="flex shrink-0 gap-1.5">
+            <Button size="sm" variant="primary" onClick={() => startEmployee(ag)}>{t.enterprise.start}</Button>
+            <Button size="sm" variant="secondary" onClick={() => replaceEmployee(ag.id)}>{t.enterprise.replace}</Button>
+          </div>
+        )}
       </div>
       {(children.get(ag.id) || []).length > 0 && <div className="space-y-2 border-s border-sky-800 ps-3">{children.get(ag.id)?.map(renderAgent)}</div>}
     </div>

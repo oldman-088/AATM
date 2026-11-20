@@ -8,9 +8,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import psutil
-from fastapi import HTTPException
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # Re-exported: tests and callers patch/import these through ``app.browser.manager``, and the
 # BrowserManager methods below resolve them via this module's globals.
@@ -34,6 +31,9 @@ from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.models import AuditLog, BrowserProfile, BrowserSession
+from fastapi import HTTPException
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 SAFE_CHROMIUM_ARGS = [
     "--disable-dev-shm-usage",
@@ -277,8 +277,10 @@ class BrowserManager:
                 "args": list(SAFE_CHROMIUM_ARGS),
                 "service_workers": "block",
             }
-            if caps.get("browser_source") == "system_binary" and caps.get("executable_path"):
+            if caps.get("browser_source") in {"system_binary", "configured_binary"} and caps.get("executable_path"):
                 launch_kwargs["executable_path"] = caps["executable_path"]
+            # Playwright disables extensions by default; the employees' Tampermonkey userscript must load.
+            launch_kwargs["ignore_default_args"] = ["--disable-extensions"]
 
             ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
             await ctx.route("**/*", self._guard_browser_request)

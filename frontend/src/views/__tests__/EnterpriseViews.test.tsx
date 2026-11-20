@@ -453,13 +453,15 @@ describe('Round 3 hierarchy and filtered traces', () => {
       { id: 'cycle-b', name: 'Cycle B', role: 'worker', reports_to: 'cycle-a', divisions: ['D04'] },
     ]
     const { container } = renderWithLocale(<EmployeeCreatorAndOrgPanel agents={agents} templates={TEMPLATES} onReload={noop} />)
-    const director = screen.getByText('Director', { selector: 'div' }).closest('.space-y-2')!
-    const lead = screen.getByText('Lead', { selector: 'div' }).closest('.space-y-2')!
-    expect(director).toContainElement(screen.getByText('Lead', { selector: 'div' }))
-    expect(lead).toContainElement(screen.getByText('Worker', { selector: 'div' }))
-    expect(screen.getByText('D03').parentElement).toContainElement(screen.getByText('Orphan', { selector: 'div' }))
-    expect(screen.getByText('D04').parentElement).toContainElement(screen.getByText('Cycle A', { selector: 'div' }))
-    expect(container.textContent).toContain('Cycle B')
+    // Names are editable inputs now, so they are read from their values.
+    const director = screen.getByDisplayValue('Director').closest('.space-y-2')!
+    const lead = screen.getByDisplayValue('Lead').closest('.space-y-2')!
+    expect(director).toContainElement(screen.getByDisplayValue('Lead'))
+    expect(lead).toContainElement(screen.getByDisplayValue('Worker'))
+    expect(screen.getByText('D03').parentElement).toContainElement(screen.getByDisplayValue('Orphan'))
+    expect(screen.getByText('D04').parentElement).toContainElement(screen.getByDisplayValue('Cycle A'))
+    expect(screen.getByDisplayValue('Cycle B')).toBeInTheDocument()
+    expect(container).toBeTruthy()
     expect(await screen.findByText('No traces available')).toBeInTheDocument()
   })
 
