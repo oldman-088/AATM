@@ -251,21 +251,31 @@ export function DashboardView({
 export function ManagerChatView({
   messages,
   projectId,
+  projects,
+  onSelectProject,
   error,
   onReload,
 }: {
   messages: any[]
   projectId: string | null
+  projects?: any[]
+  onSelectProject?: (id: string) => void
   error?: string | null
   onReload: () => void
 }) {
   const { t, formatDate } = useI18n()
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
 
   const sendDirective = async (msgText: string) => {
     if (!msgText.trim()) return
+    if (!projectId && (projects?.length ?? 0) > 1) {
+      setSendError(t.chat.projectRequired)
+      return
+    }
     setSending(true)
+    setSendError(null)
     try {
       await apiFetch('/chat', {
         method: 'POST',
@@ -273,6 +283,8 @@ export function ManagerChatView({
       })
       setText('')
       onReload()
+    } catch (error: any) {
+      setSendError(error?.message || t.chat.projectRequired)
     } finally {
       setSending(false)
     }
@@ -285,7 +297,24 @@ export function ManagerChatView({
           <MessageSquare className="h-5 w-5 text-sky-400" />
           {t.chat.title}
         </h2>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {projects && projects.length > 1 && onSelectProject && (
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <span>{t.chat.projectLabel}</span>
+              <select
+                aria-label={t.chat.projectLabel}
+                className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-white"
+                value={projectId ?? ''}
+                onChange={(event) => onSelectProject(event.target.value)}
+              >
+                {projects.map((project: any) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <Button size="sm" variant="secondary" onClick={() => sendDirective('orchestrate all ready tasks')}>
             {t.chat.quickOrchestrate}
           </Button>
@@ -339,6 +368,11 @@ export function ManagerChatView({
             {t.chat.send}
           </Button>
         </form>
+        {sendError && (
+          <p role="alert" className="mt-2 text-sm text-rose-300">
+            {sendError}
+          </p>
+        )}
       </Card>
     </div>
   )

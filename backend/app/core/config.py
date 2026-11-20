@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     # B3 — scripted demo feed for the Command Bridge. Off by default, refused in production, and
     # every frame it serves is flagged `demo: true`.
     DEMO_MODE: bool = False
+    # E13 — the placeholder browser profiles, Arena account, sample tasks, greeting and sample
+    # approval/notification/userscript. Off on a fresh install; `python -m app.db.demo_cleanup --apply` removes them.
+    SEED_DEMO_DATA: bool = False
 
     HOST: str = "127.0.0.1"
     PORT: int = 8000

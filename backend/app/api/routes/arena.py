@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,7 @@ from app.browser.arena_sessions import (
     set_arena_mode,
 )
 from app.browser.engines import validate_userscript_policy
+from app.browser.install_links import install_links
 from app.browser.manager import browser_manager
 from app.core.events import event_bus
 from app.db.backup import backup_before
@@ -46,6 +48,8 @@ from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfi
 from app.runtime.agent_protocol import redact_secrets
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
+# No login: a one-time install link is the credential (E16). Kept off the authenticated router.
+public_router = APIRouter(tags=["arena"])
 
 # One distinct color per employee card (infographic: 5 colored profile cards).
 EMPLOYEE_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#0ea5e9", "#a855f7", "#14b8a6", "#f97316", "#84cc16", "#ec4899"]
@@ -137,6 +141,46 @@ async def generate_userscript(profile_id: str, user: User = Depends(get_current_
     The token is returned exactly once; only its SHA-256 is stored. The stored copy in the
     ``userscripts`` table has the token redacted and is never executed by AATM.
     """
+    return await _issue_userscript(db, profile_id, user.email)
+
+
+@router.post("/arena/profiles/{profile_id}/install-link", dependencies=[Depends(require_role("admin"))])
+async def create_install_link(profile_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """E16: a one-time link that serves this profile's userscript. Valid for 10 minutes, usable once."""
+    gate = arena_gate()
+    if not gate["enabled"]:
+        raise _not_enabled()
+    await _profile_or_404(db, profile_id)
+    token, ttl = install_links.create(profile_id, user.email)
+    db.add(
+        AuditLog(
+            actor=user.email,
+            action="arena.install_link_created",
+            resource_type="browser_profile",
+            resource_id=profile_id,
+            details={"expires_in_seconds": ttl, "one_time": True},
+        )
+    )
+    await db.commit()
+    return {"profile_id": profile_id, "url": f"/api/v1/arena/install/{token}", "expires_in_seconds": ttl, "one_time": True}
+
+
+@public_router.get("/arena/install/{token}", response_class=PlainTextResponse)
+async def use_install_link(token: str, db: AsyncSession = Depends(get_db)):
+    """Serve the userscript for a one-time link. No login: the link itself is the credential."""
+    gate = arena_gate()
+    if not gate["enabled"]:
+        raise _not_enabled()
+    link = install_links.consume(token)
+    if link is None:
+        raise HTTPException(status_code=404, detail={"code": "install_link_unavailable",
+                                                     "message": "This install link was already used or has expired. Ask for a new one."})
+    result = await _issue_userscript(db, link.profile_id, link.actor)
+    return PlainTextResponse(result["script"], media_type="text/plain; charset=utf-8",
+                             headers={"Cache-Control": "no-store"})
+
+
+async def _issue_userscript(db: AsyncSession, profile_id: str, actor_email: str) -> dict:
     gate = arena_gate()
     if not gate["enabled"]:
         raise _not_enabled()
@@ -166,7 +210,7 @@ async def generate_userscript(profile_id: str, user: User = Depends(get_current_
     row.audit_status = "connector_generated"
     db.add(
         AuditLog(
-            actor=user.email,
+            actor=actor_email,
             action="arena.userscript_rotated" if rotated else "arena.userscript_generated",
             resource_type="browser_profile",
             resource_id=profile.id,
