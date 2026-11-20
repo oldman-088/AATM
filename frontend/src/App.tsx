@@ -602,7 +602,7 @@ function AATMWorkspace() {
             />
           )}
           {tab === 'chat' && (
-            <ManagerChatView messages={chatMessages} projectId={activeProjectId} error={errors.chat} onReload={() => loadAll()} />
+            <ManagerChatView messages={chatMessages} projectId={activeProjectId} projects={projects} onSelectProject={setActiveProjectId} error={errors.chat} onReload={() => loadAll()} />
           )}
           {tab === 'agents' && (
             <div className="space-y-6">

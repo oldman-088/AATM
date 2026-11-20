@@ -7,6 +7,9 @@ from pathlib import Path
 # security tests explicitly verify that `Settings().AATM_SANDBOX_MODE == "docker"`
 # and that production mode refuses un-exempted `process` execution.
 os.environ.setdefault("AATM_SANDBOX_MODE", "process")
+# Existing tests were written against the demo data set; a fresh install (SEED_DEMO_DATA=false)
+# is covered by test_e13_no_fake_data.py, which overrides this per test.
+os.environ.setdefault("SEED_DEMO_DATA", "true")
 
 # Never touch the live database. The app's default DATABASE_URL is an absolute path to the real
 # data/aatm.db, and many tests drop and recreate every table, so without this a test run wiped the

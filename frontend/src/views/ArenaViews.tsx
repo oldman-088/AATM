@@ -41,6 +41,14 @@ export function ArenaConnectorPanel() {
     try { await apiFetch<any>(`/arena/profiles/${profileId}/resume`, { method: 'POST' }); await load() }
     catch (err: any) { setError(err?.message || t.enterprise.operationFailed) } finally { setBusy('') }
   }
+  const [link, setLink] = useState<{ profile: string; url: string } | null>(null)
+  const installLink = async (profileId: string) => {
+    setBusy(profileId); setError(''); setLink(null)
+    try {
+      const data = await apiFetch<any>(`/arena/profiles/${profileId}/install-link`, { method: 'POST' })
+      setLink({ profile: profileId, url: new URL(data.url, window.location.origin).toString() })
+    } catch (err: any) { setError(err?.message || t.enterprise.operationFailed) } finally { setBusy('') }
+  }
   const copy = async () => {
     if (!script) return
     try { await navigator.clipboard.writeText(script.text); setCopied(true) } catch { setCopied(false) }
@@ -71,8 +79,15 @@ export function ArenaConnectorPanel() {
           <Button variant="secondary" disabled={!gate?.enabled || busy === p.profile_id} onClick={() => generate(p.profile_id)}>
             <KeyRound className="me-1 h-4 w-4" />{p.token_issued ? t.arena.rotate : t.arena.generate}
           </Button>
+          <Button variant="secondary" disabled={!gate?.enabled || busy === p.profile_id} onClick={() => installLink(p.profile_id)}>
+            <KeyRound className="me-1 h-4 w-4" />{t.arena.installLink}
+          </Button>
           {p.connector_status === 'needs_human' && <Button disabled={busy === p.profile_id} onClick={() => resume(p.profile_id)}><PlayCircle className="me-1 h-4 w-4" />{t.arena.resume}</Button>}
         </div>
+        {link && link.profile === p.profile_id && <div className="mt-2 space-y-1" data-testid="arena-install-link">
+          <p className="text-xs text-slate-400">{t.arena.installLinkHint}</p>
+          <input readOnly dir="ltr" aria-label={t.arena.installLink} className="w-full rounded-lg bg-slate-950 p-2 font-mono text-xs text-slate-200" value={link?.url ?? ""} onFocus={(e) => e.currentTarget.select()} />
+        </div>}
       </div>)}
     </div>
     {script && <div className="space-y-2" data-testid="arena-script">

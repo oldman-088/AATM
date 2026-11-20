@@ -450,6 +450,22 @@ async def send_chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # E14: with several projects, a message must name its project. Otherwise the manager would
+    # plan against whichever project happens to be the default (e.g. the AATM repository itself).
+    if body.project_id is None:
+        project_count = len((await db.execute(select(Project.id))).scalars().all())
+        if project_count > 1:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "project_required",
+                    "message": "Choose a project first: the manager needs to know which product a goal is for.",
+                },
+            )
+    elif await db.get(Project, body.project_id) is None and (
+        await db.execute(select(Project.id).where(Project.slug == body.project_id))
+    ).scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Project not found")
     user_msg = ChatMessage(
         project_id=body.project_id,
         sender_type="user",
