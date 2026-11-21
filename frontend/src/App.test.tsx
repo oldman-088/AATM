@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import App from './App'
-import { installFetchMock, installWebSocketMock, settle } from './test/mockApi'
+import { MockWebSocket, installFetchMock, installWebSocketMock, settle } from './test/mockApi'
 
 const AR_DASHBOARD_TITLE = 'مركز القيادة التنفيذي'
 
@@ -271,6 +271,46 @@ describe('AATM Frontend & Multilingual RTL System', () => {
       expect(container.innerHTML).not.toMatch(/localhost|127\.0\.0\.1/)
     }
     await settle()
+  })
+})
+
+describe('Manager Chat project selection', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('aatm_jwt_token', 'test-jwt')
+    installWebSocketMock()
+  })
+  afterEach(async () => {
+    await settle()
+  })
+
+  async function liveRefresh() {
+    await act(async () => {
+      MockWebSocket.instances.forEach((ws) => ws.onmessage?.({ data: 'refresh' }))
+    })
+    await settle()
+  }
+
+  it('follows the project marked active when it changes, but never overrides a hand-picked project', async () => {
+    // A page that stays open used to keep the project it chose at load, so orders went to the wrong project.
+    const oldP = { id: 'p-old', name: 'Old project', status: 'active' }
+    const newP = { id: 'p-new', name: 'New project', status: 'active' }
+    let projects = [oldP, newP] // the API lists the project marked active first
+    installFetchMock({ '/api/v1/projects': () => projects })
+    await renderWorkspace()
+    fireEvent.click(navButton('Manager Chat'))
+    const select = (await screen.findByLabelText('Project')) as HTMLSelectElement
+    await waitFor(() => expect(select.value).toBe('p-old'))
+
+    projects = [newP, oldP] // the owner activates the other project elsewhere
+    await liveRefresh()
+    await waitFor(() => expect(select.value).toBe('p-new'))
+
+    fireEvent.change(select, { target: { value: 'p-old' } }) // now the owner chooses by hand
+    expect(select.value).toBe('p-old')
+    projects = [newP, oldP]
+    await liveRefresh()
+    expect(select.value).toBe('p-old')
   })
 })
 
