@@ -82,3 +82,16 @@ async def test_session_of_an_active_task_still_reserves_its_worker(env):  # noqa
         _, task_id = await _session(db, task_status="in_progress", phase="working", age_minutes=1)
     async with env() as db:
         assert await arena_reservations(db) == {"worker-1": task_id}
+
+
+async def test_seeded_worker_profiles_start_in_arena_agent_mode(env):  # noqa: F811 - fixture
+    """Workers 5-8 were seeded with the model default ("chat"), so their pages never started monitoring and
+    stayed "offline" in the bridge. Every seeded worker profile must start in Agent mode, like the manager."""
+    from app.models import BrowserProfile
+
+    async with env() as db:
+        workers = list((await db.execute(select(Agent).where(Agent.role == "worker"))).scalars())
+        profile_ids = [w.browser_profile_id for w in workers if w.browser_profile_id]
+        assert {f"profile-worker-{n}" for n in range(5, 9)} <= set(profile_ids)
+        modes = {pid: (await db.get(BrowserProfile, pid)).arena_mode for pid in profile_ids}
+        assert set(modes.values()) == {"agent"}, modes
