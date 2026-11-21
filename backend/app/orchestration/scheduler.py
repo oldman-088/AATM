@@ -6,6 +6,10 @@ import time
 from datetime import timedelta
 from typing import Any
 
+from pydantic import ValidationError
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
@@ -26,9 +30,6 @@ from app.providers.router import ProviderRouter, get_model_configuration_status
 from app.providers.router import provider_router as shared_provider_router
 from app.runtime.temporal import to_naive_utc
 from app.schemas.manager import ManagerPlan
-from pydantic import ValidationError
-from sqlalchemy import and_, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -231,8 +232,13 @@ class TaskScheduler:
         db: AsyncSession,
         *,
         force_session_recovery: bool = False,
+        only_task_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency."""
+        """Assign ready queued tasks to idle enabled workers respecting dependencies, mode, skills & concurrency.
+
+        ``only_task_ids`` limits this cycle's new assignments to those tasks: a new plan dispatches only the
+        tasks it just created, never older queued work that happens to be waiting.
+        """
         session_recovery = await self.recover_sessions_if_needed(db, force=force_session_recovery)
         try:
             from app.orchestration.self_heal import heal_orphaned_state
@@ -289,7 +295,7 @@ class TaskScheduler:
 
         tasks_res = await db.execute(select(Task).where(Task.status.in_(["queued", "assigned", "in_progress"])))
         tasks = list(tasks_res.scalars().all())
-        queued = [t for t in tasks if t.status == "queued"]
+        queued = [t for t in tasks if t.status == "queued" and (only_task_ids is None or t.id in only_task_ids)]
         queued.sort(key=lambda t: (-PRIORITY_WEIGHT.get(t.priority, 2), to_naive_utc(t.created_at) or to_naive_utc(utcnow())))
 
         assigned: list[dict[str, str]] = []
