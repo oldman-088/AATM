@@ -309,6 +309,15 @@ def compare_report_to_changes(report: str, changed_files: list[str], *, commits:
 # an unparseable reply gets one retry, then the job is handed to a human.
 
 MANAGER_JSON_RETRY = "Reply again with only the JSON block, no other text."
+# E33: say WHY the first reply was refused. The usual cause is a raw double quote inside a text value
+# (for example a copied type like Literal['ar'] written with double quotes), which breaks the JSON.
+MANAGER_JSON_RETRY_DETAIL = (
+    MANAGER_JSON_RETRY
+    + " Your previous reply was not valid JSON. Inside every text value use single quotes instead of double quotes,"
+    " never put a raw double quote or a line break inside a string, and close every bracket."
+)
+JSON_TEXT_RULE = ("- Inside any text value write single quotes (') only, never a double quote, and never a raw line break: "
+                  "a double quote inside a string makes the JSON invalid and the whole answer is lost.")
 MAX_PLAN_TASKS = 10  # the default of ARENA_MANAGER_MAX_PLAN_TASKS (0 there = no limit)
 
 
@@ -429,6 +438,7 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         "- acceptance_criteria: a list of checkable statements.",
         "- depends_on: zero-based indexes of earlier tasks in this same list ([] when none).",
         "- summary_ar: an Arabic summary of the plan for the owner.",
+        JSON_TEXT_RULE,
     ])
 
 
@@ -477,6 +487,7 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
         "- approve only when every acceptance criterion is met by the diff. approve does NOT merge: the owner decides.",
         "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
         "- summary_ar: your verdict for the owner, in Arabic.",
+        JSON_TEXT_RULE,
     ])
 
 

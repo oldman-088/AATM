@@ -34,7 +34,7 @@ from app.models import (
     Task,
 )
 from app.orchestration.arena_prompts import (
-    MANAGER_JSON_RETRY,
+    MANAGER_JSON_RETRY_DETAIL,
     build_manager_chat_prompt,
     build_manager_context_prompt,
     build_manager_plan_prompt,
@@ -668,7 +668,7 @@ class ManagerArenaRuntime:
                 if parsed is None:
                     job.json_retries += 1
                     await db.commit()
-                    reply = await self._exchange(db, session, job, MANAGER_JSON_RETRY)
+                    reply = await self._exchange(db, session, job, MANAGER_JSON_RETRY_DETAIL)
                     parsed, error = await self._parse(db, job, reply)
                     if parsed is None and await self._answer_clarification(db, job, reply):
                         return {"job_id": job.id, "status": job.status, "clarification": True}

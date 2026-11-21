@@ -48,6 +48,7 @@ from app.models import (
 from app.orchestration import manager_arena
 from app.orchestration.arena_prompts import (
     MANAGER_JSON_RETRY,
+    MANAGER_JSON_RETRY_DETAIL,
     MAX_PLAN_TASKS,
     build_manager_plan_prompt,
     build_manager_review_prompt,
@@ -377,7 +378,7 @@ async def test_invalid_json_gets_one_retry_then_needs_human_with_the_raw_reply(e
     job = next(j for j in await _jobs(env) if j.kind == "plan")
     assert job.status == "needs_human" and job.json_retries == 1
     assert job.raw_reply == "Still prose, sorry." and "invalid JSON" in job.error
-    assert page.submitted("PLAN") and page.submitted().count(MANAGER_JSON_RETRY) == 1
+    assert page.submitted("PLAN") and page.submitted().count(MANAGER_JSON_RETRY_DETAIL) == 1
     async with env() as db:
         assert len(list((await db.execute(select(Task))).scalars())) == before, "no plan may be invented"
         message = await db.get(ChatMessage, job.reply_message_id)
@@ -858,7 +859,7 @@ async def test_a_clarifying_question_is_shown_to_the_owner_not_treated_as_invali
     job = next(j for j in await _jobs(env) if j.kind == "plan")
     assert job.status == "done" and job.error is None and job.json_retries == 0
     assert (job.result or {}).get("clarification") is True
-    assert page.submitted().count(MANAGER_JSON_RETRY) == 0, "a question must not trigger the JSON retry"
+    assert page.submitted().count(MANAGER_JSON_RETRY_DETAIL) == 0, "a question must not trigger the JSON retry"
     async with env() as db:
         assert len(list((await db.execute(select(Task))).scalars())) == before, "a question creates no tasks"
         replies = list((await db.execute(select(ChatMessage).where(ChatMessage.sender_id == "manager-0"))).scalars())
