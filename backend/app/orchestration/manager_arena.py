@@ -9,9 +9,6 @@ import time
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.browser.arena_connector import (
     MANAGER_AGENT_ID,
     MANAGER_PROFILE_ID,
@@ -48,6 +45,8 @@ from app.orchestration.arena_prompts import (
     validate_manager_review,
 )
 from app.runtime.agent_protocol import redact_secrets
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +315,7 @@ class ManagerArenaRuntime:
         # Grace period after a submit during which the old reply is not mistaken for the new one.
         self.start_grace_seconds = 20.0
         self._lock: tuple[Any, asyncio.Lock] | None = None
+        self._task_lock: tuple[Any, asyncio.Lock] | None = None
         self._drain_task: asyncio.Task | None = None
         self.profile_id = MANAGER_PROFILE_ID
 
@@ -604,6 +604,12 @@ class ManagerArenaRuntime:
             if job.kind == "context":
                 await self._finish(db, job, result={"session_id": session.id})
                 return {"job_id": job.id, "status": job.status}
+            if job.kind == "plan":
+                existing = await self.tasks_for_request(db, job)
+                if existing:
+                    await self._finish(db, job, result={**(job.result or {}), "task_ids": [t.id for t in existing],
+                                                        "idempotent_retry": True})
+                    return {"job_id": job.id, "status": job.status, "idempotent_retry": True}
             prompt = await self._prompt(db, job)
             if prompt is None:
                 await self._finish(db, job, status="failed", error="The job's task or project no longer exists.")
@@ -978,6 +984,42 @@ class ManagerArenaRuntime:
                                  warnings: list[str]) -> list[Task]:
         from app.orchestration.scheduler import task_scheduler
 
+        async with self._create_lock():
+            existing = await self.tasks_for_request(db, job)
+            if existing:
+                # Idempotent retry: this request already produced its tasks. Never create or dispatch them twice.
+                if job.status != "done":
+                    await self._finish(db, job, result={**(job.result or {}), "task_ids": [t.id for t in existing],
+                                                        "summary_ar": plan.get("summary_ar", ""), "warnings": warnings,
+                                                        "idempotent_retry": True}, raw=raw)
+                return existing
+            tasks = await self._insert_plan_tasks(db, job, plan)
+        await self._finish(db, job, result={"task_ids": [t.id for t in tasks], "summary_ar": plan["summary_ar"],
+                                            "warnings": warnings}, raw=raw)
+        lines = [plan["summary_ar"], ""] + [f"- {t.title} ← {t.assigned_agent_id}" for t in tasks]
+        lines += [f"تحذير: {w}" for w in warnings]
+        await self._reply(db, job, "\n".join(lines), task_ids=[t.id for t in tasks], plan=plan, warnings=warnings)
+        for task in tasks:
+            await event_bus.emit("task.created", {"task_id": task.id, "source": "manager_arena"})
+        # Dispatch only this request's new tasks through the existing R3 flow; older queued tasks are left alone.
+        await task_scheduler.run_orchestration_cycle(db, only_task_ids={t.id for t in tasks})
+        return tasks
+
+    def _create_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._task_lock is None or self._task_lock[0] is not loop:
+            self._task_lock = (loop, asyncio.Lock())
+        return self._task_lock[1]
+
+    async def tasks_for_request(self, db: AsyncSession, job: ManagerJob) -> list[Task]:
+        """Tasks already created by this request (the manager job id is the request id), oldest first."""
+        rows = (await db.execute(
+            select(Task).where(Task.project_id == job.project_id).order_by(Task.created_at.asc())
+        )).scalars()
+        return [t for t in rows if any(isinstance(c, dict) and (c.get("request_id") or c.get("manager_job_id")) == job.id
+                                       for c in (t.checkpoints or []))]
+
+    async def _insert_plan_tasks(self, db: AsyncSession, job: ManagerJob, plan: dict[str, Any]) -> list[Task]:
         team = {m["id"]: m for m in await self._team(db, job.project_id)}
         tasks: list[Task] = []
         for item in plan["tasks"]:
@@ -987,7 +1029,7 @@ class ManagerArenaRuntime:
                 description=item["description"], priority="high", execution_mode="manual", status="queued",
                 assigned_agent_id=item["assignee"], dependencies=[], expected_deliverables=[],
                 checkpoints=[{"ts": _now().isoformat(), "event": "manager_plan", "manager_job_id": job.id,
-                              "acceptance_criteria": item["acceptance_criteria"]}],
+                              "request_id": job.id, "acceptance_criteria": item["acceptance_criteria"]}],
             ))
         db.add_all(tasks)
         await db.flush()
@@ -995,17 +1037,8 @@ class ManagerArenaRuntime:
             task.dependencies = [tasks[i].id for i in item["depends_on"]]
             db.add(AuditLog(actor=MANAGER_AGENT_ID, action="task.create", resource_type="task", resource_id=task.id,
                             details={"title": task.title, "assignee": task.assigned_agent_id, "source": "manager_arena_plan",
-                                     "manager_job_id": job.id}))
+                                     "manager_job_id": job.id, "request_id": job.id}))
         await db.commit()
-        await self._finish(db, job, result={"task_ids": [t.id for t in tasks], "summary_ar": plan["summary_ar"],
-                                            "warnings": warnings}, raw=raw)
-        lines = [plan["summary_ar"], ""] + [f"- {t.title} ← {t.assigned_agent_id}" for t in tasks]
-        lines += [f"تحذير: {w}" for w in warnings]
-        await self._reply(db, job, "\n".join(lines), task_ids=[t.id for t in tasks], plan=plan, warnings=warnings)
-        for task in tasks:
-            await event_bus.emit("task.created", {"task_id": task.id, "source": "manager_arena"})
-        # Dispatch to the workers' Arena sessions through the existing R3 flow.
-        await task_scheduler.run_orchestration_cycle(db)
         return tasks
 
     async def approve_draft(self, db: AsyncSession, job: ManagerJob) -> list[Task]:
@@ -1017,7 +1050,23 @@ class ManagerArenaRuntime:
         missing = sorted({t["assignee"] for t in plan["tasks"]} - team_ids)
         if missing:
             raise ValueError(f"Assignees are no longer on the team: {', '.join(missing)}.")
-        return await self._create_plan_tasks(db, job, plan, raw=job.raw_reply, warnings=list((job.result or {}).get("warnings") or []))
+        # Claim the draft atomically so a double click or two tabs cannot approve the same request twice.
+        claimed = await db.execute(
+            update(ManagerJob).where(ManagerJob.id == job.id, ManagerJob.status == "draft").values(status="running")
+        )
+        await db.commit()
+        if claimed.rowcount != 1:
+            raise ValueError("Only a draft plan can be approved.")
+        await db.refresh(job)
+        try:
+            return await self._create_plan_tasks(db, job, plan, raw=job.raw_reply,
+                                                 warnings=list((job.result or {}).get("warnings") or []))
+        except Exception:
+            await db.rollback()
+            if not await self.tasks_for_request(db, job):
+                job.status = "draft"
+                await db.commit()
+            raise
 
     async def edit_draft(self, db: AsyncSession, job: ManagerJob, data: dict[str, Any]) -> ManagerJob:
         """Owner edited the draft: validate the new plan exactly like a model plan; it stays a draft."""

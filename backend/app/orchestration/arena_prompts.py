@@ -404,6 +404,7 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         "",
         "## B. EXISTING TASKS OF THIS PROJECT — READ-ONLY CONTEXT",
         "Use these only to avoid duplicates and conflicting work. Never turn them into new tasks or objectives.",
+        "Do not recreate any task listed here; plan only genuinely new work that the current request needs.",
         "\n".join(tasks) or "- none",
         "",
         "## C. PROJECT CONTEXT — REFERENCE ONLY",
