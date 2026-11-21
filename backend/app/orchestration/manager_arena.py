@@ -234,15 +234,19 @@ def plan_warnings(tasks: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
-def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool) -> list[str]:
-    """Why this plan needs the owner's approval before its tasks are created (empty: create directly)."""
+def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool, *, auto_approve: bool = False) -> list[str]:
+    """Why this plan needs the owner's approval before its tasks are created (empty: create directly).
+
+    ``auto_approve`` (the owner's ARENA_MANAGER_AUTO_APPROVE_PLANS choice) skips the size rules only; an
+    ambiguous goal still waits for confirmation."""
     reasons: list[str] = []
-    if len(tasks) > MAX_TASKS_WITHOUT_DRAFT:
-        reasons.append(f"The plan has {len(tasks)} tasks; more than {MAX_TASKS_WITHOUT_DRAFT} needs your approval.")
-    stripped = (goal or "").strip()
-    one_line = bool(stripped) and "\n" not in stripped and len(stripped) <= 160
-    if one_line and len(tasks) > MAX_TASKS_ONE_LINE:
-        reasons.append(f"A one-line request should give 1 to {MAX_TASKS_ONE_LINE} tasks; this plan has {len(tasks)}.")
+    if not auto_approve:
+        if len(tasks) > MAX_TASKS_WITHOUT_DRAFT:
+            reasons.append(f"The plan has {len(tasks)} tasks; more than {MAX_TASKS_WITHOUT_DRAFT} needs your approval.")
+        stripped = (goal or "").strip()
+        one_line = bool(stripped) and "\n" not in stripped and len(stripped) <= 160
+        if one_line and len(tasks) > MAX_TASKS_ONE_LINE:
+            reasons.append(f"A one-line request should give 1 to {MAX_TASKS_ONE_LINE} tasks; this plan has {len(tasks)}.")
     if ambiguous:
         reasons.append("The goal is ambiguous; confirm it before any task is created.")
     return reasons
@@ -944,7 +948,8 @@ class ManagerArenaRuntime:
                               failed=True, plan_errors=errors)
             return
         warnings = plan_warnings(plan["tasks"])
-        reasons = plan_draft_reasons(plan["tasks"], job.request_text or "", bool(plan.get("ambiguous")))
+        reasons = plan_draft_reasons(plan["tasks"], job.request_text or "", bool(plan.get("ambiguous")),
+                                     auto_approve=get_settings().ARENA_MANAGER_AUTO_APPROVE_PLANS)
         if reasons:
             await self._make_draft(db, job, plan, raw=raw, warnings=warnings, reasons=reasons)
             return
