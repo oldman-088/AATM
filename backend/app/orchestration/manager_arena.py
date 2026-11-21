@@ -9,9 +9,6 @@ import time
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.browser.arena_connector import (
     MANAGER_AGENT_ID,
     MANAGER_PROFILE_ID,
@@ -48,6 +45,8 @@ from app.orchestration.arena_prompts import (
     validate_manager_review,
 )
 from app.runtime.agent_protocol import redact_secrets
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +124,8 @@ TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
 # A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
 MAX_JOB_ATTEMPTS = 3
+# E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
+MAX_ATTEMPT_REFUNDS = 12
 MAX_STATUS_QUESTION_CHARS = 200  # a long brief that mentions "status" is a goal, not a question
 
 _STATUS_RE = re.compile(
@@ -604,6 +605,16 @@ class ManagerArenaRuntime:
             manager.status = status
             manager.last_heartbeat = _now()
 
+    @staticmethod
+    def _refund_attempt(job: ManagerJob) -> None:
+        """Give back the attempt a busy/disconnected window consumed (bounded by MAX_ATTEMPT_REFUNDS)."""
+        context = dict(job.context or {})
+        refunds = int(context.get("attempt_refunds", 0))
+        if refunds < MAX_ATTEMPT_REFUNDS and job.attempts > 0:
+            context["attempt_refunds"] = refunds + 1
+            job.context = context
+            job.attempts -= 1
+
     async def _run_job(self, db: AsyncSession, job: ManagerJob) -> dict[str, Any]:
         from app.providers.adapters.arena_agent import ArenaAgentError
 
@@ -675,6 +686,7 @@ class ManagerArenaRuntime:
             else:
                 job.status = "waiting_connection"
                 job.error = exc.message
+                self._refund_attempt(job)
                 await db.commit()
                 await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
             return {"job_id": job.id, "status": job.status, "error": exc.code}
@@ -684,6 +696,7 @@ class ManagerArenaRuntime:
             else:
                 job.status = "waiting_connection"
                 job.error = f"{exc.code}: {exc.message}"[:500]
+                self._refund_attempt(job)
                 await db.commit()
                 await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
             return {"job_id": job.id, "status": job.status, "error": exc.code}

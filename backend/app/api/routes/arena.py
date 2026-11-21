@@ -7,12 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.api.deps import get_current_user, require_role
 from app.browser.arena_connector import (
     MANAGER_AGENT_ID,
@@ -46,6 +40,11 @@ from app.db.base import utcnow
 from app.db.session import get_db
 from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, ManagerJob, Task, User, Userscript
 from app.runtime.agent_protocol import redact_secrets
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
 # No login: a one-time install link is the credential (E16). Kept off the authenticated router.
@@ -252,13 +251,24 @@ async def resume_after_human(profile_id: str, user: User = Depends(get_current_u
     profile.connector_status = "ready" if bridge.get("ok") and bridge.get("connected") else "offline"
     profile.needs_human_reason = None
     requeued: list[str] = []
+    skipped: list[str] = []
     agent = await db.get(Agent, profile.agent_id) if profile.agent_id else None
     if agent is not None:
         if agent.status == "needs_human":
             agent.status = "idle"
         blocked = list((await db.execute(select(Task).where(Task.status == "blocked", Task.assigned_agent_id == agent.id))).scalars())
+        # E32: Resume continues the work this window was doing, not every blocked task the worker owns
+        # (another project's task, or one whose pull request already exists, must not be re-run).
+        open_sessions = (await db.execute(select(ArenaSession).where(
+            ArenaSession.profile_id == profile.id, ArenaSession.is_open.is_(True)))).scalars()
+        current_ids = {tid for sess in open_sessions for tid in (sess.task_id, sess.active_task_id) if tid}
+        if agent.current_task_id:
+            current_ids.add(agent.current_task_id)
         for task in blocked:
             if not any(cp.get("event") == "needs_human" for cp in (task.checkpoints or []) if isinstance(cp, dict)):
+                continue
+            if current_ids and task.id not in current_ids:
+                skipped.append(task.id)
                 continue
             task.status = "queued"
             task.lock_owner = None
@@ -268,10 +278,10 @@ async def resume_after_human(profile_id: str, user: User = Depends(get_current_u
                 message.execution_status = "cancelled"
             requeued.append(task.id)
     db.add(AuditLog(actor=user.email, action="arena.human_resolved", resource_type="browser_profile", resource_id=profile.id,
-                    details={"requeued_tasks": requeued, "bridge_ok": bool(bridge.get("ok"))}))
+                    details={"requeued_tasks": requeued, "skipped_tasks": skipped, "bridge_ok": bool(bridge.get("ok"))}))
     await db.commit()
     await event_bus.emit("arena.resumed", {"profile_id": profile.id, "requeued_tasks": requeued})
-    return {"profile_id": profile.id, "connector_status": profile.connector_status, "requeued_tasks": requeued, "bridge": bridge}
+    return {"profile_id": profile.id, "connector_status": profile.connector_status, "requeued_tasks": requeued, "skipped_tasks": skipped, "bridge": bridge}
 
 
 @router.post("/arena/profiles/{profile_id}/open-for-sign-in", dependencies=[Depends(require_role("admin", "operator"))])
