@@ -236,6 +236,30 @@ def plan_warnings(tasks: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+def _context_matches_team(session: ArenaSession, team_ids: list[str]) -> bool:
+    """True when the team in the session's last context message is today's team. Sessions started before the
+    team was recorded have no ``team`` entry and are left alone."""
+    for event in reversed(session.events or []):
+        if event.get("kind") == "context_sent":
+            sent = event.get("team")
+            return not isinstance(sent, list) or sorted(map(str, sent)) == sorted(team_ids)
+    return True
+
+
+def clarification_question(data: Any) -> str | None:
+    """The manager's question when it answers a vague goal with ``{"ambiguous": true, "tasks": []}``.
+
+    That is a valid answer, not broken JSON: the owner must see the question. Anything else (no question,
+    a flag with tasks, no flag) is not a clarification and keeps the strict plan validation.
+    """
+    if not isinstance(data, dict) or data.get("ambiguous") is not True:
+        return None
+    question = data.get("summary_ar")
+    if not isinstance(question, str) or not question.strip() or data.get("tasks"):
+        return None
+    return question.strip()
+
+
 def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool) -> list[str]:
     """Why this plan needs the owner's approval before its tasks are created (empty: create directly)."""
     reasons: list[str] = []
@@ -624,11 +648,15 @@ class ManagerArenaRuntime:
             reply = await self._exchange(db, session, job, prompt, resume=resume)
             if job.kind in {"plan", "review"}:
                 parsed, error = await self._parse(db, job, reply)
+                if parsed is None and await self._answer_clarification(db, job, reply):
+                    return {"job_id": job.id, "status": job.status, "clarification": True}
                 if parsed is None:
                     job.json_retries += 1
                     await db.commit()
                     reply = await self._exchange(db, session, job, MANAGER_JSON_RETRY)
                     parsed, error = await self._parse(db, job, reply)
+                    if parsed is None and await self._answer_clarification(db, job, reply):
+                        return {"job_id": job.id, "status": job.status, "clarification": True}
                 if parsed is None:
                     await self._needs_human(db, job, f"invalid JSON after one retry: {error}", raw=reply)
                     return {"job_id": job.id, "status": job.status, "error": error}
@@ -707,6 +735,11 @@ class ManagerArenaRuntime:
             reason = f"project changed to {job.project_id}"
         elif limit and session.exchange_count >= limit:
             reason = f"{session.exchange_count} exchanges reached ARENA_MANAGER_MAX_EXCHANGES={limit}"
+        team_ids = [m["id"] for m in await self._team(db, job.project_id)]
+        if reason is None and session is not None and not _context_matches_team(session, team_ids):
+            # The manager learned its team once, when the session started. A changed team (a worker added,
+            # enabled or removed, or the project's team edited) must reach it, or it plans for the old team.
+            reason = "the team changed since the manager's context was sent"
         if session is not None and reason is None:
             if session.phase == "needs_human":  # a human resolved the page (the bridge says connected again)
                 session.phase = "manager_ready"
@@ -730,7 +763,7 @@ class ManagerArenaRuntime:
         prs = [{"number": t["pr_number"], "title": t["title"], "status": t["status"], "url": t["pr_url"]} for t in open_tasks if t["pr_url"]]
         context = build_manager_context_prompt(project, await self._team(db, job.project_id), open_tasks, prs)
         reply = await self._exchange(db, session, job, context, kind="context")
-        append_event(session, "context_sent", f"{len(context)} chars", reply_chars=len(reply))
+        append_event(session, "context_sent", f"{len(context)} chars", reply_chars=len(reply), team=team_ids)
         await db.commit()
         return session
 
@@ -894,6 +927,17 @@ class ManagerArenaRuntime:
             diff=diff, pr_url=parent.pr_url, round_number=parent.review_round, project=project, team=team,
             discrepancies=(material or {}).get("mechanical_discrepancies"),
         )
+
+    async def _answer_clarification(self, db: AsyncSession, job: ManagerJob, reply: str) -> bool:
+        """A plan job answered with a clarifying question: show it to the owner, create nothing, finish the job."""
+        if job.kind != "plan":
+            return False
+        question = clarification_question(extract_manager_json(reply))
+        if question is None:
+            return False
+        await self._finish(db, job, result={"clarification": True}, raw=reply)
+        await self._reply(db, job, question, clarification=True)
+        return True
 
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
         data = extract_manager_json(reply)
