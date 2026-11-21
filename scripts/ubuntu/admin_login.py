@@ -26,7 +26,7 @@ def request_login(url: str, email: str, password: str) -> dict:
     if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}):
         raise ValueError("Use HTTPS for non-local servers")
     req = urllib.request.Request(
-        url.rstrip("/") + "/api/auth/login",
+        url.rstrip("/") + "/api/v1/auth/login",
         data=json.dumps({"email": email, "password": password}).encode(),
         headers={"Content-Type": "application/json"},
     )

@@ -1,10 +1,11 @@
 import pytest
+from httpx import ASGITransport, AsyncClient
+
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
 from app.db.session import AsyncSessionLocal, engine
 from app.main import app
-from httpx import ASGITransport, AsyncClient
 
 
 @pytest.fixture(scope="module")
