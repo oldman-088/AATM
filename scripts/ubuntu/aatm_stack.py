@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MAX_WINDOWS = 4
+MAX_WINDOWS = 9
 ARENA_AGENT_URL = "https://arena.ai/agent"
 CHAT_PATH = re.compile(r"^/agent/[A-Za-z0-9-]+$")
 
@@ -48,7 +48,10 @@ def env_value(name: str, default: str = "") -> str:
 
 
 def profiles_home() -> Path:
-    return Path.home() / ".aatm-profiles"
+    # Profiles live with the app's data (the same folders the Arena connector uses).
+    # AATM_PROFILES_HOME lets tests point at a temporary folder so they never touch live windows.
+    override = os.environ.get("AATM_PROFILES_HOME")
+    return Path(override) if override else ROOT / "data" / "browser_profiles"
 
 
 def _names(agent_id: str) -> tuple[str, str]:
@@ -91,7 +94,9 @@ def enabled_windows() -> list[Window]:
                 "select events from arena_sessions where profile_id = ? and is_open = 1 order by created_at desc limit 1",
                 (row["profile_id"],),
             ).fetchone()
-            directory, title = _names(row["agent_id"])
+            _, title = _names(row["agent_id"])
+            # The manager's folder is "manager" on disk; every other folder is named after its profile id.
+            directory = "manager" if row["agent_id"].startswith("manager") else row["profile_id"]
             windows.append(Window(row["profile_id"], directory, title, _chat_url(session["events"] if session else None) or ARENA_AGENT_URL))
         return windows
     finally:

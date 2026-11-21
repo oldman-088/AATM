@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.core.config import Settings, get_settings
 from app.core.security import create_access_token
 from app.db.base import Base, utcnow
@@ -36,9 +40,6 @@ from app.providers.base import ProviderRequest, ProviderResponse
 from app.queue import reset_wake_bus
 from app.queue.base import InProcessWakeBus, task_queue_name
 from app.runtime.agent_loop import AgentLoop
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 class _SlowRouter:
@@ -65,8 +66,9 @@ class _SlowRouter:
 @pytest.fixture()
 async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'phase5.db'}", connect_args={"timeout": 30})
-    from app.db.session import _apply_sqlite_pragmas
     from sqlalchemy import event
+
+    from app.db.session import _apply_sqlite_pragmas
 
     event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
     async with engine.begin() as conn:

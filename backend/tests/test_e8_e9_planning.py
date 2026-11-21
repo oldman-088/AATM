@@ -13,6 +13,9 @@ respecting the project's concurrency limit.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select, update
+from test_e12_admin_actions import _client, _headers, e12  # noqa: F401 - fixture + helpers
+
 from app.models import Agent, AuditLog, ManagerJob, Project, Task
 from app.orchestration.manager_arena import (
     MAX_TASKS_ONE_LINE,
@@ -24,8 +27,6 @@ from app.orchestration.manager_arena import (
     validate_plan_graph,
 )
 from app.orchestration.scheduler import task_scheduler
-from sqlalchemy import select, update
-from test_e12_admin_actions import _client, _headers, e12  # noqa: F401 - fixture + helpers
 
 PLANNED = "Planned task"
 

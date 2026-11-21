@@ -85,7 +85,7 @@ if [[ "$1" == inspect ]]; then echo false; fi''')
         db = tmp_path / "aatm.db"
         _database(db, workers)
         env = {**os.environ, "HOME": str(tmp_path / "home"), "PATH": f"{bin_dir}:{os.environ['PATH']}",
-               "AATM_PYTHON": sys.executable, "AATM_DB_PATH": str(db), "AATM_CHROME_BIN": str(bin_dir / "chrome"),
+               "AATM_PYTHON": sys.executable, "AATM_DB_PATH": str(db), "AATM_PROFILES_HOME": str(tmp_path / "profiles"), "AATM_CHROME_BIN": str(bin_dir / "chrome"),
                "AATM_START_SCRIPT": str(bin_dir / "fake-start"), "AATM_STOP_SCRIPT": str(bin_dir / "fake-stop"),
                "AATM_ENV_FILE": str(tmp_path / "missing.env"), "AATM_READY_TIMEOUT": "0", "AATM_READY_POLL_SECONDS": "0.05",
                "AATM_WINDOW_SETTLE_SECONDS": "0", "AATM_WINDOW_RETRY_SECONDS": "0",
@@ -108,19 +108,20 @@ def test_start_all_starts_stopped_services_and_reports_ready(stack):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "docker start aatm-redis" in calls and "docker start aatm-rabbitmq" in calls and "start\n" in calls
     assert "--window-name=المدير" in calls and "--window-name=Worker 1" in calls and "https://arena.ai/agent" in calls
-    assert f"--user-data-dir={env['HOME']}/.aatm-profiles/worker-1" in calls
+    assert f"--user-data-dir={env['AATM_PROFILES_HOME']}/profile-worker-1" in calls
     assert "notify --app-name=AATM AATM جاهز ✅ (2/2 متصلين)" in calls
     # Every line start-all prints itself is Arabic, and the dashboard link comes with the result.
     assert f"[AATM] اللوحة: http://localhost:{env['FRONTEND_PORT']}" in result.stdout
     assert "[AATM] المدير: فُتحت." in result.stdout and "opened." not in result.stdout
 
 
-def test_disabled_profiles_stay_closed_and_at_most_four_windows_open(stack):
+def test_disabled_profiles_stay_closed_and_window_cap_is_nine(stack):
     workers = {"manager-0": True, **{f"worker-{n}": True for n in range(1, 6)}, "worker-6": False}
-    env, log = stack(workers, {f"profile-{a}" for a in ("manager-0", "worker-1", "worker-2", "worker-3")})
+    env, log = stack(workers, {f"profile-{a}" for a in ("manager-0", "worker-1", "worker-2", "worker-3", "worker-4", "worker-5")})
     assert _run("start-all.sh", env).returncode == 0
     opened = [line for line in log.read_text().splitlines() if line.startswith("chrome ")]
-    assert sum(line.endswith("about:blank") for line in opened) == 4 and not any("worker-4" in line or "worker-5" in line or "worker-6" in line for line in opened)
+    # manager + workers 1-5 are enabled (6 windows); the disabled worker-6 never opens.
+    assert sum(line.endswith("about:blank") for line in opened) == 6 and not any("worker-6" in line for line in opened)
 
 
 def test_missing_connection_is_named_in_terminal_and_notification(stack):
@@ -152,10 +153,10 @@ def _fake_browser(*args: str) -> subprocess.Popen:
 @pytest.mark.parametrize("flag", [False, True])
 def test_stop_all_closes_only_aatm_windows_and_containers_only_on_request(stack, flag):
     env, log = stack({"worker-1": True}, set())
-    home = env["HOME"]
-    ours = _fake_browser(f"--user-data-dir={home}/.aatm-profiles/worker-1")
+    ours_dir = f"{env['AATM_PROFILES_HOME']}/profile-worker-1"
+    ours = _fake_browser(f"--user-data-dir={ours_dir}")
     other = _fake_browser("--user-data-dir=/tmp/personal-chrome")
-    helper = _fake_browser(f"--user-data-dir={home}/.aatm-profiles/worker-1", "--type=renderer")
+    helper = _fake_browser(f"--user-data-dir={ours_dir}", "--type=renderer")
     try:
         result = _run("stop-all.sh", env, *(["--containers"] if flag else []))
         assert result.returncode == 0, result.stderr
