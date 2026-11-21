@@ -189,6 +189,10 @@ class Settings(BaseSettings):
     # R7: the manager keeps one long-lived Arena session per project; after this many exchanges it starts a
     # new session (with a short context prompt). 0 = never rotate on count.
     ARENA_MANAGER_MAX_EXCHANGES: int = Field(default=40, ge=0)
+    # Owner choice: True = a manager plan creates its tasks directly, however many there are, instead of waiting
+    # as a draft for the owner's approval. Policy refusals, plan validation and the owner's approval of every
+    # merge are unchanged, and an ambiguous goal still waits for confirmation.
+    ARENA_MANAGER_AUTO_APPROVE_PLANS: bool = False
     # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
     ARENA_DOM_SELECTORS: str = ""
     # Phase 5 - True parallelism / autoscaling
