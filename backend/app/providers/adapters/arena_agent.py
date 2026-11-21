@@ -152,12 +152,36 @@ class ArenaAgentAdapter(BaseProviderAdapter):
             await asyncio.sleep(poll)
         raise ArenaAgentError("timeout", f"Arena page did not reach {sorted(wanted)} (last: {last.get('agent_state')}).")
 
+    navigation_settle_seconds = 1.0
+    reconnect_poll_seconds = 0.25
+    reconnect_timeout_seconds = 30.0
+
     async def new_session(self, profile_id: str, *, ready_timeout: float = 90.0) -> dict[str, Any]:
+        connections_before = (await self.state(profile_id)).get("connections_total")
         result = await self.command(profile_id, "new_session")
         if result.get("navigating"):
-            await asyncio.sleep(1.0)  # let the old page unload before waiting for the new one
+            await asyncio.sleep(self.navigation_settle_seconds)  # let the old page start unloading
+            if isinstance(connections_before, int):
+                await self._wait_for_new_page(profile_id, connections_before)
         await self.wait_for_state(profile_id, {"ready"}, timeout=ready_timeout)
         return result
+
+    async def _wait_for_new_page(self, profile_id: str, connections_before: int) -> None:
+        """Wait until the page that replaced the old one has connected to the bridge.
+
+        For a moment after the click the OLD page still reports "ready". A command sent then reaches a page that is
+        about to unload and is lost, so the next step (select_repo) times out after 40 s even though the new page is
+        fine. The new page is the one whose connection raised the bridge's ``connections_total``. If it never
+        does (the window did not really navigate), stop waiting and let the caller's state check decide."""
+        deadline = time.monotonic() + self.reconnect_timeout_seconds
+        while time.monotonic() < deadline:
+            state = await self.state(profile_id)
+            total = state.get("connections_total")
+            if not isinstance(total, int) or total > connections_before:
+                return
+            if state.get("status") == "needs_human" or state.get("agent_state") == "needs_human":
+                return  # wait_for_state raises the human-check error with its reason
+            await asyncio.sleep(self.reconnect_poll_seconds)
 
     async def open_chat(self, profile_id: str, url: str) -> dict[str, Any]:
         """Load an existing chat in this window (same-origin navigation; the bridge checks the origin)."""
