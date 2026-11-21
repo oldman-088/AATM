@@ -193,6 +193,8 @@ class Settings(BaseSettings):
     # as a draft for the owner's approval. Policy refusals, plan validation and the owner's approval of every
     # merge are unchanged, and an ambiguous goal still waits for confirmation.
     ARENA_MANAGER_AUTO_APPROVE_PLANS: bool = False
+    # Most tasks one manager plan may contain. 0 = no limit (the manager is told there is none).
+    ARENA_MANAGER_MAX_PLAN_TASKS: int = Field(default=10, ge=0)
     # Optional JSON object with the real Arena chat DOM selectors sent to the userscript as data.
     ARENA_DOM_SELECTORS: str = ""
     # Phase 5 - True parallelism / autoscaling

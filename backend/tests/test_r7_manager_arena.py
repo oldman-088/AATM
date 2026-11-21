@@ -226,6 +226,28 @@ def test_plan_validation_rejects_unknown_assignees_empty_fields_too_many_tasks_a
     assert validate_manager_plan(None, TEAM)[0] is None
 
 
+def test_plan_size_cap_is_a_setting_and_zero_means_no_limit(monkeypatch):
+    from app.core.config import get_settings
+
+    big = {"summary_ar": "x", "tasks": _plan()["tasks"] * (MAX_PLAN_TASKS + 15)}
+    assert "maximum is 10" in validate_manager_plan(big, TEAM)[1], "the default cap is unchanged"
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_MAX_PLAN_TASKS", 0)
+    plan, err = validate_manager_plan(big, TEAM)
+    assert err == "" and len(plan["tasks"]) == MAX_PLAN_TASKS + 15
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_MAX_PLAN_TASKS", 20)
+    assert "maximum is 20" in validate_manager_plan({"summary_ar": "x", "tasks": _plan()["tasks"] * 21}, TEAM)[1]
+
+
+def test_plan_prompt_states_the_cap_or_that_there_is_none(monkeypatch):
+    from app.core.config import get_settings
+
+    team = [{"id": "worker-1", "name": "Backend", "specialty": "FastAPI", "skills": ["python"]}]
+    assert "At most 10 tasks" in build_manager_plan_prompt("goal", None, team, [])
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_MAX_PLAN_TASKS", 0)
+    unlimited = build_manager_plan_prompt("goal", None, team, [])
+    assert "At most" not in unlimited and "no limit on the number of tasks" in unlimited
+
+
 def test_review_validation_requires_a_known_verdict_and_comments_for_request_changes():
     ok, _ = validate_manager_review({"verdict": "approve", "summary_ar": "جيد", "comments": []})
     assert ok["verdict"] == "approve"
