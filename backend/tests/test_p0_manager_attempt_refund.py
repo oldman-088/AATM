@@ -32,3 +32,18 @@ def test_refund_never_goes_negative():
     job = _job(0)
     ManagerArenaRuntime._refund_attempt(job)
     assert job.attempts == 0
+
+
+def test_json_retry_names_the_cause_and_keeps_the_original_prefix():
+    from app.orchestration.arena_prompts import JSON_TEXT_RULE, MANAGER_JSON_RETRY, MANAGER_JSON_RETRY_DETAIL
+
+    assert MANAGER_JSON_RETRY_DETAIL.startswith(MANAGER_JSON_RETRY)
+    assert "single quotes" in MANAGER_JSON_RETRY_DETAIL
+    assert "single quotes" in JSON_TEXT_RULE
+
+
+def test_plan_prompt_carries_the_quote_rule():
+    from app.orchestration.arena_prompts import JSON_TEXT_RULE, build_manager_plan_prompt
+
+    prompt = build_manager_plan_prompt("Build a thing", None, [{"id": "worker-1", "name": "W1", "specialty": "x", "skills": []}], [])
+    assert JSON_TEXT_RULE in prompt
