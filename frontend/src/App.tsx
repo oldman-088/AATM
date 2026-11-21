@@ -80,6 +80,10 @@ function AATMWorkspace() {
   const [agentMessages, setAgentMessages] = useState<any[]>([])
   const [projects, setProjects] = useState<any[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  // Follow the project the owner marked active (the API lists it first) until the owner picks one by hand.
+  // Otherwise a page that stays open keeps the project it chose at load, and orders go to the wrong project.
+  const projectPickedByUser = useRef(false)
+  const selectProject = useCallback((id: string | null) => { projectPickedByUser.current = true; setActiveProjectId(id) }, [])
   const [memories, setMemories] = useState<any[]>([])
   const [chatMessages, setChatMessages] = useState<any[]>([])
   const [browsers, setBrowsers] = useState<any[]>([])
@@ -153,7 +157,10 @@ function AATMWorkspace() {
     setTasks(tk)
     setAgentMessages(am)
     setProjects(pr)
-    if (!activeProjectId && pr.length > 0) setActiveProjectId(pr[0].id)
+    if (pr.length > 0) {
+      const stillThere = activeProjectId ? pr.some((p: any) => p.id === activeProjectId) : false
+      if (!stillThere || !projectPickedByUser.current) setActiveProjectId(pr[0].id)
+    }
     setChatMessages(ch)
     setBrowsers(br)
     setBrowserCaps(bc)
@@ -602,7 +609,7 @@ function AATMWorkspace() {
             />
           )}
           {tab === 'chat' && (
-            <ManagerChatView messages={chatMessages} projectId={activeProjectId} projects={projects} onSelectProject={setActiveProjectId} error={errors.chat} onReload={() => loadAll()} />
+            <ManagerChatView messages={chatMessages} projectId={activeProjectId} projects={projects} onSelectProject={selectProject} error={errors.chat} onReload={() => loadAll()} />
           )}
           {tab === 'agents' && (
             <div className="space-y-6">
@@ -639,7 +646,7 @@ function AATMWorkspace() {
                 projects={projects}
                 memories={memories}
                 activeProjectId={activeProjectId}
-                onSelectProject={setActiveProjectId}
+                onSelectProject={selectProject}
                 onReload={(q) => loadAll(q)}
               />
             </div>
