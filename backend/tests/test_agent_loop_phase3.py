@@ -5,6 +5,10 @@ import json
 from collections import deque
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from test_provider_connection_phase2 import FastAPIBridgeServer, ScriptedReply
+
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.seed import seed_initial_data
@@ -24,9 +28,6 @@ from app.models import (
 from app.orchestration.scheduler import task_scheduler
 from app.providers.base import ProviderResponse
 from app.runtime.agent_loop import AgentLoop, parse_action_response
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from test_provider_connection_phase2 import FastAPIBridgeServer, ScriptedReply
 
 
 @pytest.fixture

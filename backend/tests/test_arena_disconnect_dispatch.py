@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from app.browser import arena_connector
 from app.models import Agent
 from app.orchestration.scheduler import TaskScheduler

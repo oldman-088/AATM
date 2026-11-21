@@ -122,6 +122,8 @@ BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
+# A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
+MAX_JOB_ATTEMPTS = 3
 MAX_STATUS_QUESTION_CHARS = 200  # a long brief that mentions "status" is a goal, not a question
 
 _STATUS_RE = re.compile(
@@ -585,6 +587,10 @@ class ManagerArenaRuntime:
             await self._reply(db, job, NOT_CONNECTED_AR if ready["code"] == "offline" else ready["reason_ar"], waiting=True,
                               readiness=ready["code"])
             await self._notify_waiting(db, job, ready)
+            return {"job_id": job.id, "status": job.status}
+        if job.attempts >= MAX_JOB_ATTEMPTS:
+            await self._finish(db, job, status="failed",
+                               error=f"stopped after {job.attempts} attempts to avoid an endless loop")
             return {"job_id": job.id, "status": job.status}
         job.status = "running"
         job.attempts += 1

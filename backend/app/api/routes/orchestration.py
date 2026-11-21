@@ -1,3 +1,7 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.api.deps import get_current_user, require_role
 from app.core.events import event_bus
 from app.db.backup import backup_before
@@ -9,9 +13,6 @@ from app.models.project import project_base_branch
 from app.orchestration.scheduler import task_scheduler
 from app.orchestration.self_heal import release_worker_for_task
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["agents-tasks-orchestration"], dependencies=[Depends(get_current_user)])
 

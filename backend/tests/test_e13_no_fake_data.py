@@ -9,6 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.browser.arena_connector import MANAGER_PROFILE_ID
 from app.core.config import get_settings
 from app.db.base import Base
@@ -27,8 +30,6 @@ from app.models import (
     User,
     Userscript,
 )
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 REAL_PROFILES = {MANAGER_PROFILE_ID, "profile-arena-session"} | {f"profile-worker-{n}" for n in range(5, 9)}
 

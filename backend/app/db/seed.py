@@ -1,3 +1,6 @@
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.browser.arena_connector import MANAGER_PROFILE_ID, MANAGER_PROFILE_NAME
 from app.core.config import KNOWN_DEFAULT_PASSWORDS, get_settings, is_placeholder_password
 from app.core.security import hash_password, verify_password
@@ -21,8 +24,6 @@ from app.models import (
     User,
     Userscript,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # Demo rows: the placeholder browser profiles, the Arena account, the sample userscript, the sample
 # task plan, the greeting, the sample approval/notification/git record. Only written when
