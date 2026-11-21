@@ -153,7 +153,6 @@ def _fake_browser(*args: str) -> subprocess.Popen:
 @pytest.mark.parametrize("flag", [False, True])
 def test_stop_all_closes_only_aatm_windows_and_containers_only_on_request(stack, flag):
     env, log = stack({"worker-1": True}, set())
-    home = env["HOME"]
     ours_dir = f"{env['AATM_PROFILES_HOME']}/profile-worker-1"
     ours = _fake_browser(f"--user-data-dir={ours_dir}")
     other = _fake_browser("--user-data-dir=/tmp/personal-chrome")
