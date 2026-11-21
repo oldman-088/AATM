@@ -5,10 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from test_d_arena_connector import arena_settings, env  # noqa: F401 - fixtures
+
 from app.models import Project, Task
 from app.orchestration.arena_prompts import build_manager_plan_prompt
 from app.orchestration.manager_arena import ManagerArenaRuntime as ManagerArena
-from test_d_arena_connector import arena_settings, env  # noqa: F401 - fixtures
 
 
 def _plan_prompt(goal: str, tasks: list[dict]) -> str:
@@ -71,12 +72,13 @@ async def test_open_tasks_are_limited_to_their_own_project(env):  # noqa: F811
 
 import asyncio  # noqa: E402
 
+from sqlalchemy import select, update  # noqa: E402
+from test_e12_admin_actions import e12  # noqa: E402, F401 - fixture
+
 from app.models import Agent, ManagerJob  # noqa: E402
 from app.orchestration import arena_runner as arena_runner_module  # noqa: E402
 from app.orchestration.manager_arena import manager_arena_runtime  # noqa: E402
 from app.orchestration.scheduler import task_scheduler  # noqa: E402
-from sqlalchemy import select, update  # noqa: E402
-from test_e12_admin_actions import e12  # noqa: E402, F401 - fixture
 
 
 def _plan(prefix: str, n: int = 2) -> dict:
