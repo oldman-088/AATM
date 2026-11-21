@@ -378,6 +378,12 @@ async def _setup_connector(factory, bridge, arena_settings, monkeypatch, tmp_pat
             w.permissions = sorted(set(w.permissions or []) | {"edit_backend"})
             if idx >= 4:
                 w.is_enabled = False
+            # These tests cover the Chat-mode connector. Seeded workers now start in Agent mode, so the mode
+            # is set here explicitly instead of relying on the model default.
+            if w.browser_profile_id:
+                profile = await db.get(BrowserProfile, w.browser_profile_id)
+                if profile is not None:
+                    profile.arena_mode = "chat"
         await db.commit()
         task_ids = [t.id for t in tasks]
     headers = await _admin_headers(factory)
