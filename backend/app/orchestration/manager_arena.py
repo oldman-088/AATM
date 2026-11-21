@@ -357,9 +357,11 @@ class ManagerArenaRuntime:
                  "divisions": list(w.divisions or [])} for w in workers]
 
     async def _open_tasks(self, db: AsyncSession, project_id: str | None) -> list[dict[str, Any]]:
-        query = select(Task).where(Task.status.not_in(TERMINAL_TASK_STATES), Task.task_type == "implementation")
-        if project_id:
-            query = query.where(Task.project_id == project_id)
+        # Never fall back to every project: without a project there is no historical context to show.
+        if not project_id:
+            return []
+        query = select(Task).where(Task.status.not_in(TERMINAL_TASK_STATES), Task.task_type == "implementation",
+                                   Task.project_id == project_id)
         rows = (await db.execute(query.order_by(Task.created_at.asc()).limit(50))).scalars()
         return [{"id": t.id, "title": t.title, "status": t.status, "assignee": t.assigned_agent_id,
                  "pr_url": t.pr_url, "pr_number": t.pr_number} for t in rows]
