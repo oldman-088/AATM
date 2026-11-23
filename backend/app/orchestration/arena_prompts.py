@@ -68,7 +68,7 @@ def github_workflow_block(task_id: str, base_branch: str) -> str:
         "",
         f"Put {pr_title_prefix(task_id)} at the beginning of the pull request title.",
         "",
-        f"The pull request targets the base branch `{base_branch}`. The project owner reviews and merges it.",
+        f"The pull request targets the base branch `{base_branch}`. The manager reviews it and merges it when CI is green.",
         "",
         "Before you change anything, check that you can read this repository and push to it. If you cannot, stop: "
         f"do not work around it and do not ask for credentials. Reply with one line that begins with {GITHUB_BLOCKED_MARKER} "
@@ -364,8 +364,8 @@ def manager_role_block(team: list[dict[str, Any]], project: Project | None) -> s
         "## GitHub rules",
         "- Each worker works in its own Arena Agent session, on ONE arena/* branch, and opens ONE pull request",
         "  whose title starts with [AATM-<task_id>].",
-        "- Nobody merges by themselves: not the workers, not you. The project owner approves every merge in AATM.",
-        "- You only plan and review: never push, never open a pull request, never press Merge PR.",
+        "- Workers never merge. You, the manager, merge an approved pull request yourself once CI on its exact head commit is green; the owner is not asked. Stop only on red or pending CI, a conflict, a leaked secret or a destructive action.",
+        "- You plan, review and merge: never push directly to a branch, never open a pull request yourself; press Merge PR only for a green, approved pull request.",
         *([f"- Every branch starts from `{base}` and every pull request targets `{base}`, never another branch."]
           if configured_base_branch(project) else []),
         "- Base every judgement on the real diff and the acceptance criteria, never on claims in a report.",
@@ -484,7 +484,7 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
         "```json",
         REVIEW_FORMAT,
         "```",
-        "- approve only when every acceptance criterion is met by the diff. approve does NOT merge: the owner decides.",
+        "- approve only when every acceptance criterion is met by the diff. After approve, merge the pull request yourself when CI on its head commit is green.",
         "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
         "- summary_ar: your verdict for the owner, in Arabic.",
         JSON_TEXT_RULE,

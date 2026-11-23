@@ -260,7 +260,7 @@ def test_manager_prompts_carry_role_team_github_rules_json_format_and_truncate_l
     project = Project(name="Demo", slug="demo", repo_url="https://github.com/acme/demo", default_branch="main")
     team = [{"id": "worker-1", "name": "Backend", "specialty": "FastAPI", "skills": ["python"]}]
     plan = build_manager_plan_prompt("ابنِ answer()", project, team, [])
-    for needle in ("[AATM-MANAGER:PLAN]", "manager-0", "worker-1 — Backend: FastAPI", "Nobody merges", "[AATM-<task_id>]",
+    for needle in ("[AATM-MANAGER:PLAN]", "manager-0", "worker-1 — Backend: FastAPI", "Workers never merge", "[AATM-<task_id>]",
                    '"acceptance_criteria"', "ONLY one JSON block", "acme/demo"):
         assert needle in plan, needle
     task = Task(id="t-1", title="Add answer()", description="answer() returns 42", assigned_agent_id="worker-1")
@@ -270,7 +270,7 @@ def test_manager_prompts_carry_role_team_github_rules_json_format_and_truncate_l
     review = build_manager_review_prompt(task, acceptance=["answer() returns 42"], report="## AATM REPORT", diff=big,
                                          pr_url="https://github.com/acme/demo/pull/1", round_number=1, project=project, team=team)
     for needle in ("[AATM-MANAGER:REVIEW]", "answer() returns 42", "AATM REPORT", "DIFF TRUNCATED", '"verdict"',
-                   "approve does NOT merge"):
+                   "merge the pull request yourself"):
         assert needle in review, needle
     assert MANAGER_JSON_RETRY == "Reply again with only the JSON block, no other text."
 
