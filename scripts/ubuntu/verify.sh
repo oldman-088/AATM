@@ -69,6 +69,12 @@ if [[ $INSTALL -eq 1 ]]; then
   "$PY" -m pip install -r scripts/ubuntu/requirements-verify.txt >/dev/null
 fi
 PYTEST_ARGS=()
+# A hung test must fail the gate instead of blocking it forever (pytest-timeout).
+if "$PY" -c 'import pytest_timeout' 2>/dev/null; then
+  PYTEST_ARGS+=(--timeout="${PYTEST_TEST_TIMEOUT:-180}")
+else
+  echo "pytest-timeout missing; run verify.sh --install to enable per-test timeouts" >&2
+fi
 if [[ $PARALLEL -eq 1 ]]; then
   if ! "$PY" -c 'import xdist' 2>/dev/null; then
     echo "pytest-xdist missing; run verify.sh --install or use --no-parallel" >&2
