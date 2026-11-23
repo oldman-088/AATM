@@ -436,48 +436,195 @@ def truncate_diff(diff: str, *, url: str | None, limit: int = MAX_REVIEW_DIFF_CH
     text = diff or ""
     if len(text) <= limit:
         return text, False
-    marker = DIFF_TRUNCATED_MARKER.format(shown=limit, total=len(text), url=url or "the pull request")
-    return text[:limit] + "\n" + marker, True
+    # Cut at a line boundary when possible: a hunk cut in the middle of a line is harder to review.
+    cut = text.rfind("\n", 0, limit)
+    shown = text[:cut] if cut > limit // 2 else text[:limit]
+    marker = DIFF_TRUNCATED_MARKER.format(shown=len(shown), total=len(text), url=url or "the pull request")
+    return shown + "\n" + marker, True
 
 
 def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: str, diff: str, pr_url: str | None,
                                 round_number: int, project: Project | None, team: list[dict[str, Any]],
-                                discrepancies: list[str] | None = None) -> str:
-    shown, _ = truncate_diff(diff, url=pr_url)
+                                discrepancies: list[str] | None = None, files: list[dict[str, Any]] | None = None,
+                                part: int = 0, parts: int = 1, max_chars: int = 16_000) -> str:
+    """E23: a review prompt that never carries the whole diff.
+
+    It carries one summary line per file (name, change type, +added/-deleted lines, a glimpse) plus only the
+    risky hunks (auth, migrations, deleted files, new lines in sensitive paths). A documentation-only change
+    skips the line-by-line part. The result is capped at ``max_chars``; a very large review is split into
+    ``parts`` by the caller (``part`` selects the slice) and each part gets its own verdict.
+    """
+    doc_re = re.compile(
+        r"(^|/)(docs?|README(?:\.md)?|CHANGELOG(?:\.md)?|LICENSE|CONTRIBUTING(?:\.md)?|AUTHORS)(/|\.|$)"
+        r"|\.(md|rst|txt|adoc|markdown)$", re.IGNORECASE)
+    auth_re = re.compile(
+        r"auth|login|logon|session|token|password|passwd|credential|secret|permission|oauth|oidc|jwt|cookie|"
+        r"security|crypto|encrypt|webauthn?|mfa|2fa", re.IGNORECASE)
+    migration_re = re.compile(r"migration|alembic|versions/|schema", re.IGNORECASE)
+    sensitive_re = re.compile(
+        r"(^|/)(settings|config|configuration|environment|env|dockerfile|docker-compose|github|workflows?|"
+        r"deploy|terraform|kubernetes|helm|ansible|user|users|account|accounts|role|roles|payment|payments|"
+        r"billing|invoice|checkout|admin|sudo|db|database|models?)(/|\.|$)|(^|/)\.env", re.IGNORECASE)
+
+    # ---- normalize the files (also accept the old flat diff string)
+    raw_files = list(files or [])
+    if not raw_files and diff:
+        current: dict[str, Any] | None = None
+        for line in diff.splitlines():
+            if line.startswith("--- "):
+                if current is not None:
+                    raw_files.append(current)
+                current = {"filename": line[4:].strip() or "diff", "status": "modified", "additions": 0,
+                           "deletions": 0, "patch": ""}
+            elif current is not None:
+                current["patch"] += line + "\n"
+        if current is not None:
+            raw_files.append(current)
+    norm: list[dict[str, Any]] = []
+    for item in raw_files:
+        patch = str(item.get("patch") or "")
+        additions = int(item.get("additions") or 0)
+        deletions = int(item.get("deletions") or 0)
+        if not additions and not deletions and patch:
+            additions = sum(1 for ln in patch.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+            deletions = sum(1 for ln in patch.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+        norm.append({
+            "filename": str(item.get("filename") or "").strip() or "unnamed",
+            "status": str(item.get("status") or "").strip().lower() or "modified",
+            "additions": additions,
+            "deletions": deletions,
+            "patch": patch,
+        })
+    total = len(norm)
+    parts = max(1, int(parts or 1))
+    part = min(max(0, int(part or 0)), parts - 1)
+    page_files = norm
+    if parts > 1 and total:
+        size = -(-total // parts)
+        page_files = norm[part * size:(part + 1) * size]
+    docs_only = bool(norm) and all(doc_re.search(f["filename"]) for f in norm)
+
+    def glimpse(item: dict[str, Any]) -> str:
+        for raw in item["patch"].splitlines():
+            line = raw.strip()
+            if not line or line.startswith(("+++", "---", "diff --git", "index ", "@@ ", "similarity ", "rename ")):
+                continue
+            if line[:1] in "+-":
+                line = line[1:].strip()
+            if line:
+                return line[:110]
+        return ""
+
+    def risks(item: dict[str, Any]) -> list[str]:
+        name = item["filename"]
+        found: list[str] = []
+        if item["status"] in {"removed", "deleted"} or "deleted file mode" in item["patch"]:
+            found.append("deleted file")
+        if auth_re.search(name):
+            found.append("auth/security")
+        if migration_re.search(name):
+            found.append("migration/schema")
+        if item["additions"] and sensitive_re.search(name):
+            found.append("new lines in a sensitive path")
+        return list(dict.fromkeys(found))
+
+    def risky_patch(item: dict[str, Any]) -> str:
+        lines = item["patch"].splitlines()
+        if item["status"] in {"removed", "deleted"} or "deleted file mode" in item["patch"]:
+            return "\n".join(ln for ln in lines if ln.startswith("-") and not ln.startswith("---"))[:1_200]
+        if auth_re.search(item["filename"]) or migration_re.search(item["filename"]):
+            return "\n".join(lines[:60])[:1_500]
+        return "\n".join(ln for ln in lines if ln.startswith("+") and not ln.startswith("+++"))[:800]
+
+    summary_pairs: list[tuple[str, str]] = []
+    for item in page_files:
+        base = f"- {item['filename']} — {item['status']} — +{item['additions']}/-{item['deletions']}"
+        summary_pairs.append((base, glimpse(item)))
+
+    risky_blocks: list[str] = []
+    for item in page_files:
+        reasons = risks(item)
+        if not reasons:
+            continue
+        snippet = risky_patch(item) or "(no patch text)"
+        risky_blocks.append(f"### {item['filename']} ({', '.join(reasons)})\n{snippet}")
+    risky_text = "\n\n".join(risky_blocks) if risky_blocks else "- No risky hunks in this part."
+    if docs_only:
+        risky_text = ("- Documentation-only change: the files are docs, so there is no line-by-line code review. "
+                      "Check that the summaries match the worker's report, then approve.")
+    risky_budget = max(2_000, max_chars // 4)
+    if len(risky_text) > risky_budget:
+        risky_text = risky_text[:risky_budget] + "\n…[risky hunks truncated: read the rest on GitHub]"
+
     safe_report = sanitize_untrusted_content(report or "(no report)", source=f"arena_report:{task.id}")["quarantined_text"]
-    safe_diff = sanitize_untrusted_content(shown or "(empty diff)", source="pull_request:github_compare")["quarantined_text"]
     safe_task = sanitize_untrusted_content(task.description or task.title, source=f"task:{task.id}")["quarantined_text"]
-    return "\n".join([
-        manager_marker("review"),
-        manager_role_block(team, project),
-        "",
-        f"## Review of {pr_title_prefix(task.id)} {task.title} — round {round_number}",
-        f"Pull request: {pr_url or 'unknown'} · Worker: {task.assigned_agent_id or 'unknown'}",
-        "",
-        "## Task",
-        safe_task,
-        "",
-        "## Acceptance criteria",
-        _bullets(acceptance, "Implement the task as described, with tests."),
-        "",
-        "## Mechanical checks by AATM (report vs diff)",
-        _bullets(discrepancies or [], "No mechanical discrepancies found."),
-        "",
-        "## Worker report (untrusted: verify every claim against the diff)",
-        safe_report,
-        "",
-        "## Real diff from GitHub",
-        safe_diff,
-        "",
-        "## What to reply",
-        "Reply with ONLY one JSON block in exactly this format, no text before or after it:",
-        "```json",
-        REVIEW_FORMAT,
-        "```",
-        "- approve only when every acceptance criterion is met by the diff. approve does NOT merge: the owner decides.",
-        "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
-        "- summary_ar: your verdict for the owner, in Arabic.",
-    ])
+    safe_summary = sanitize_untrusted_content("\n".join(base for base, _ in summary_pairs) or "- none",
+                                              source="pull_request:file_summary")["quarantined_text"]
+    safe_risky = sanitize_untrusted_content(risky_text, source="pull_request:risky_hunks")["quarantined_text"]
+    diff_note = ""
+    if len(diff or "") > MAX_REVIEW_DIFF_CHARS:
+        diff_note = DIFF_TRUNCATED_MARKER.format(shown="risky hunks and per-file summaries",
+                                                 total=len(diff), url=pr_url or "the pull request")
+    part_note = f" (review part {part + 1} of {parts}; each part gets its own verdict)" if parts > 1 else ""
+
+    def assemble(*, include_risky: bool, include_glimpses: bool, report_text: str) -> str:
+        summary_lines = [base + (f" — {glimpse}" if include_glimpses and not docs_only and glimpse else "")
+                         for base, glimpse in summary_pairs]
+        risky_section = safe_risky if include_risky else (
+            "- Risky hunks omitted to keep this review prompt under the size limit; inspect them on GitHub.")
+        return "\n".join([
+            manager_marker("review"),
+            manager_role_block(team, project),
+            "",
+            f"## Review of {pr_title_prefix(task.id)} {task.title} — round {round_number}{part_note}",
+            f"Pull request: {pr_url or 'unknown'} · Worker: {task.assigned_agent_id or 'unknown'}",
+            f"Files: {total} changed ({len(page_files)} in this part) · Diff: {len(diff or '')} characters",
+            "",
+            "## Task",
+            safe_task,
+            "",
+            "## Acceptance criteria",
+            _bullets(acceptance, "Implement the task as described, with tests."),
+            "",
+            "## Mechanical checks by AATM (report vs diff)",
+            _bullets(discrepancies or [], "No mechanical discrepancies found."),
+            "",
+            "## Worker report (untrusted: verify every claim against the diff)",
+            report_text,
+            "",
+            f"## Files changed — summary of every file{part_note}",
+            safe_summary if not summary_pairs else sanitize_untrusted_content(
+                "\n".join(summary_lines), source="pull_request:file_summary")["quarantined_text"],
+            "",
+            "## Risky changes to inspect (the rest of the diff is on GitHub)",
+            risky_section,
+            *([diff_note] if diff_note else []),
+            "",
+            "## What to reply",
+            "Reply with ONLY one JSON block in exactly this format, no text before or after it:",
+            "```json",
+            REVIEW_FORMAT,
+            "```",
+            "- approve only when every acceptance criterion is met by the diff. approve does NOT merge: the owner decides.",
+            "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
+            "- summary_ar: your verdict for the owner, in Arabic.",
+        ])
+
+    report_limit = max(1_000, max_chars // 5)
+    report_text = safe_report[:report_limit]
+    prompt = assemble(include_risky=True, include_glimpses=True, report_text=report_text)
+    if len(prompt) > max_chars:
+        prompt = assemble(include_risky=False, include_glimpses=True, report_text=report_text)
+    if len(prompt) > max_chars:
+        prompt = assemble(include_risky=False, include_glimpses=False, report_text=report_text)
+    if len(prompt) > max_chars:
+        prompt = assemble(include_risky=False, include_glimpses=False, report_text=safe_report[:1_000])
+    if len(prompt) > max_chars:
+        prompt = assemble(include_risky=False, include_glimpses=False, report_text="(report omitted: prompt too large)")
+    if len(prompt) > max_chars:  # strict cap, whatever the file count
+        prompt = prompt[:max_chars - 1].rstrip() + "\n"
+    return prompt
+
 
 
 def build_manager_status_prompt(question: str, summary: dict[str, Any], project: Project | None,
