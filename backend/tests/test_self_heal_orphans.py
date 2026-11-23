@@ -97,3 +97,27 @@ async def test_heal_closes_an_arena_session_of_a_finished_task(db_session):
     assert session.id in result["closed_sessions"]
     assert session.is_open is False
     assert session.phase == "closed"
+
+
+@pytest.mark.asyncio
+async def test_completing_the_running_task_frees_its_worker(db_session):
+    """E1: the completion path (complete_task) also leaves the worker idle and unbound."""
+    from app.orchestration.scheduler import task_scheduler
+
+    worker, task = await _busy_worker_with_task(db_session, "in_progress")
+    await task_scheduler.complete_task(db_session, task, "done in test")
+    await db_session.refresh(worker)
+    assert worker.status == "idle"
+    assert worker.current_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_failing_the_running_task_frees_its_worker(db_session):
+    """E1: the failure path (fail_and_retry_or_escalate) also leaves the worker idle and unbound."""
+    from app.orchestration.scheduler import task_scheduler
+
+    worker, task = await _busy_worker_with_task(db_session, "in_progress")
+    await task_scheduler.fail_and_retry_or_escalate(db_session, task, "boom")
+    await db_session.refresh(worker)
+    assert worker.status == "idle"
+    assert worker.current_task_id is None
