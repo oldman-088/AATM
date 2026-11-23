@@ -43,6 +43,7 @@ from app.orchestration.arena_prompts import (
     build_manager_plan_prompt,
     build_manager_review_prompt,
     build_manager_status_prompt,
+    chained_dependencies,
     extract_manager_json,
     validate_manager_plan,
     validate_manager_review,
@@ -147,7 +148,6 @@ class ManagerArenaError(RuntimeError):
 # ------------------------------------------------------------------ E8: plan validation and policy
 MAX_TASKS_WITHOUT_DRAFT = 5      # more tasks than this: the owner approves the plan first
 MAX_TASKS_ONE_LINE = 3           # a one-line request gets 1-3 tasks at most
-CHAIN_SHARE = 0.5                # warn when more than this share of the tasks depend on one task
 
 PLANNING_RULES = (
     "## Planning rules",
@@ -241,18 +241,50 @@ def validate_plan_graph(tasks: list[dict[str, Any]]) -> list[str]:
 def plan_warnings(tasks: list[dict[str, Any]]) -> list[str]:
     """Warn when more than half of the tasks depend on one task: the plan is a chain, not parallel work."""
     count = len(tasks)
-    dependents: dict[int, int] = {}
-    for task in tasks:
-        for dep in set(task.get("depends_on") or []):
-            dependents[dep] = dependents.get(dep, 0) + 1
-    warnings: list[str] = []
-    for dep, n in sorted(dependents.items()):
-        if n > count * CHAIN_SHARE:
-            warnings.append(
-                f"{n} of {count} tasks depend on task {dep} ({tasks[dep]['title']}). "
-                "Check that each of them really needs that output; independent tasks should run in parallel."
-            )
-    return warnings
+    return [
+        f"{n} of {count} tasks depend on task {dep} ({tasks[dep]['title']}). "
+        "Check that each of them really needs that output; independent tasks should run in parallel."
+        for dep, n in chained_dependencies(tasks)
+    ]
+
+
+# A frontend and a backend task of one plan must name the same contract file (E29). Sides are read from the
+# title first, then the description; a task that matches neither (or both) is left out of the check.
+_FRONTEND_RE = re.compile(
+    r"\b(frontend|front-end|ui|react|component|page|screen|css|dashboard|form|button)\b|واجهة|الواجهة", re.IGNORECASE
+)
+_BACKEND_RE = re.compile(
+    r"\b(backend|back-end|api|endpoints?|server|fastapi|database|migrations?|routes?|schema|service)\b|خلفية|الخلفية|خادم",
+    re.IGNORECASE,
+)
+_CONTRACT_PATH_RE = re.compile(r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.(?:md|ya?ml|json))(?![\w/-])", re.IGNORECASE)
+NO_SHARED_CONTRACT_REASON = (
+    "no shared contract: the frontend and backend tasks do not both name one contract file (for example "
+    "docs/API.md) that a single task creates and owns. Name the same file in both task descriptions, or merge the two tasks."
+)
+
+
+def _integration_side(task: dict[str, Any]) -> str | None:
+    for text in (str(task.get("title") or ""), str(task.get("description") or "")):
+        front = bool(_FRONTEND_RE.search(text))
+        back = bool(_BACKEND_RE.search(text))
+        if front != back:
+            return "frontend" if front else "backend"
+    return None
+
+
+def _named_contract_files(task: dict[str, Any]) -> set[str]:
+    text = str(task.get("description") or "")
+    return {match.group(1).lower().lstrip("./") for match in _CONTRACT_PATH_RE.finditer(text)}
+
+
+def missing_shared_contract(tasks: list[dict[str, Any]]) -> bool:
+    """True when the plan has a frontend and a backend task but no contract file that both descriptions name."""
+    frontends = [t for t in tasks if _integration_side(t) == "frontend"]
+    backends = [t for t in tasks if _integration_side(t) == "backend"]
+    if not frontends or not backends:
+        return False
+    return not any(_named_contract_files(f) & _named_contract_files(b) for f in frontends for b in backends)
 
 
 def _context_matches_team(session: ArenaSession, team_ids: list[str]) -> bool:
@@ -292,6 +324,14 @@ def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool, 
         one_line = bool(stripped) and "\n" not in stripped and len(stripped) <= 160
         if one_line and len(tasks) > MAX_TASKS_ONE_LINE:
             reasons.append(f"A one-line request should give 1 to {MAX_TASKS_ONE_LINE} tasks; this plan has {len(tasks)}.")
+    # Plan-shape reasons are not size rules: auto-approve does not hide them from the owner.
+    for dep, n in chained_dependencies(tasks):
+        reasons.append(
+            f"Dependency chain: {n} of {len(tasks)} tasks depend on task {dep} ({tasks[dep]['title']}). "
+            "Most tasks must run in parallel; the owner must confirm that each one really needs that output."
+        )
+    if missing_shared_contract(tasks):
+        reasons.append(NO_SHARED_CONTRACT_REASON)
     if ambiguous:
         reasons.append("The goal is ambiguous; confirm it before any task is created.")
     return reasons
