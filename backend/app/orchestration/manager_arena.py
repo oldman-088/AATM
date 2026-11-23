@@ -1014,7 +1014,8 @@ class ManagerArenaRuntime:
         await self._reply(db, job, text, pending=True, waiting_for_manager=True)
         await event_bus.emit("manager.activity", {**(_job_dict(job) or {}), "waiting_for_manager": True})
 
-    async def _submit_when_idle(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str) -> dict[str, Any]:
+    async def _submit_when_idle(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str,
+                                first_state: dict[str, Any] | None = None) -> dict[str, Any]:
         """E37: wait for a busy manager window to become idle, then submit once.
 
         A busy window is transient: the job waits here (up to ``busy_wait_seconds``) and no attempt is
@@ -1026,7 +1027,8 @@ class ManagerArenaRuntime:
         deadline = time.monotonic() + self.busy_wait_seconds
         waiting = False
         while True:
-            state = await self.adapter.state(session.profile_id)
+            state = first_state if first_state is not None else await self.adapter.state(session.profile_id)
+            first_state = None  # only the first attempt uses the state the caller already read
             current = str(state.get("agent_state") or ("offline" if not state.get("connected") else "")) or "offline"
             if state.get("status") == "needs_human" or current == "needs_human":
                 raise ManagerArenaError(
@@ -1060,11 +1062,12 @@ class ManagerArenaRuntime:
         expects_json = kind != "context" and job.kind in {"plan", "review"}
         pressed_on: str | None = None
         if not resume:
+            pre_state = await self.adapter.state(session.profile_id)  # one read, as on main, before the mark
             mark = (await self.adapter.transcript_mark(session.profile_id)).get("mark")
             append_event(session, "submit_started", mark, job_id=job.id, exchange=kind or job.kind)
             await db.commit()
             try:
-                before = await self._submit_when_idle(db, session, job, text)
+                before = await self._submit_when_idle(db, session, job, text, pre_state)
             except ArenaAgentError as exc:
                 append_event(session, "submit_failed", f"{exc.code}: {exc.message}", job_id=job.id)
                 await db.commit()
