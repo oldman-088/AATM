@@ -500,7 +500,7 @@ async def test_manager_stops_pressing_when_keep_working_changes_nothing(env, scr
 async def test_stalled_manager_session_is_flagged_needs_human(env, scripted):
     make, project_id = scripted
     page, runtime = make({"*": ["تم."]})
-    runtime.stall_minutes = 0.002  # ~0.1 s instead of 20 minutes
+    runtime.stall_minutes = 0.01  # ~0.6 s instead of 20 minutes (0.12 s was too tight under parallel load)
     async with env() as db:
         await runtime.handle_owner_message(db, project_id, "مرحبا؟")
         await runtime.wait_idle()
