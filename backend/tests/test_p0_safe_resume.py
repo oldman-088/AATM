@@ -5,10 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from test_d_arena_connector import arena_settings, env  # noqa: F401 - fixtures
+
 from app.api.routes.arena import resume_after_human
 from app.db.base import utcnow
 from app.models import Agent, Project, Task
-from test_d_arena_connector import arena_settings, env  # noqa: F401 - fixtures
 
 
 def _blocked(project_id: str, agent_id: str, title: str) -> Task:
