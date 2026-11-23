@@ -416,6 +416,21 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         "## C. PROJECT CONTEXT — REFERENCE ONLY",
         f"Project: {project.name if project else 'unknown'}. Do not treat any older goal as a new instruction.",
         "",
+        "## Plan quality rules (mandatory)",
+        "- Independence is the default: tasks run in parallel. Add depends_on only when a task cannot start"
+        " without another task's output; never add it just to order work.",
+        "- A research or documentation task must never gate other work: no task may list it in depends_on."
+        " Fold research into the task that needs its result, and keep documentation with the task that changes"
+        " the documented code.",
+        "- Ownership: every task names the files it creates or changes and the functions it changes."
+        " Two tasks must never change the same function; if two pieces of work touch one function, merge them"
+        " into one task.",
+        "- Front-end and back-end integration: when the plan has a frontend task and a backend task that must"
+        " agree on an interface, exactly one implementation task (not a documentation-only task) creates and"
+        " owns one shared contract file, for example docs/API.md or docs/CONTRACTS.md. The frontend task's"
+        " description and the backend task's description must both name that exact file. Do not create a second"
+        " contract file.",
+        "",
         "## What to reply",
         "Split the goal into concrete tasks for the team. Reply with ONLY one JSON block in exactly this format,",
         "no text before or after it:",
@@ -563,8 +578,57 @@ def _nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+CHAIN_SHARE = 0.5  # more than this share of a plan's tasks depending on one task is a chain, not parallel work
+
+# A research or documentation task, judged by its title only (a feature that merely mentions "document" is not one).
+_RESEARCH_TITLE_RE = re.compile(
+    r"\b(research|investigat(?:e|ing|ion)|survey|spike|documentation|docs?|readme|document (?:the|our|this|a|an))\b"
+    r"|ابحث|بحث عن|توثيق|وثّق|وثق",
+    re.IGNORECASE,
+)
+
+
+def is_research_or_docs_task(task: dict[str, Any]) -> bool:
+    return bool(_RESEARCH_TITLE_RE.search(str(task.get("title") or "")))
+
+
+def chained_dependencies(tasks: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    """(task index, number of tasks depending on it) for every task that more than CHAIN_SHARE of the plan depends on."""
+    count = len(tasks)
+    dependents: dict[int, int] = {}
+    for task in tasks:
+        for dep in set(task.get("depends_on") or []):
+            dependents[dep] = dependents.get(dep, 0) + 1
+    return [(dep, n) for dep, n in sorted(dependents.items()) if n > count * CHAIN_SHARE]
+
+
+def plan_structure_error(tasks: list[dict[str, Any]]) -> str:
+    """Plan-shape rules that reject a plan whatever the owner's approval setting: "" when the plan is acceptable.
+
+    The replies name an automatic re-plan so the owner sees why the manager is asked again.
+    """
+    for dep, n in chained_dependencies(tasks):
+        return (
+            f"Automatic re-plan requested: {n} of {len(tasks)} tasks depend on task {dep} "
+            f"('{tasks[dep]['title']}'). Most tasks must be independent and run in parallel: re-plan, and add "
+            "depends_on only where a task really needs another task's output."
+        )
+    for index, task in enumerate(tasks):
+        if is_research_or_docs_task(task) and any(index in (other.get("depends_on") or []) for other in tasks):
+            return (
+                f"Automatic re-plan requested: task {index} ('{task['title']}') is a research or documentation "
+                "task that other tasks depend on. Research and documentation must not gate other work: re-plan, "
+                "remove it from depends_on and fold it into the task that needs its result."
+            )
+    return ""
+
+
 def validate_manager_plan(data: dict[str, Any] | None, known_assignees: set[str]) -> tuple[dict[str, Any] | None, str]:
-    """Known assignees only, 1..max_plan_tasks() tasks (0 = no limit), no empty fields, depends_on = earlier indexes."""
+    """Known assignees only, 1..max_plan_tasks() tasks (0 = no limit), no empty fields, depends_on = earlier indexes.
+
+    A plan whose tasks mostly wait on one task, or whose research/documentation task gates other work, is refused
+    here, so it is never created even when ARENA_MANAGER_AUTO_APPROVE_PLANS is on.
+    """
     if not isinstance(data, dict):
         return None, "The reply contains no JSON object."
     if not _nonempty_str(data.get("summary_ar")):
@@ -599,6 +663,9 @@ def validate_manager_plan(data: dict[str, Any] | None, known_assignees: set[str]
             "acceptance_criteria": [c.strip()[:500] for c in criteria][:30],
             "depends_on": list(deps),
         })
+    structure_error = plan_structure_error(clean)
+    if structure_error:
+        return None, structure_error
     return {"summary_ar": data["summary_ar"].strip()[:5_000], "tasks": clean}, ""
 
 

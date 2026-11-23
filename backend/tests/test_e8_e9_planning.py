@@ -1,7 +1,8 @@
 """E8 + E9 — manager planning and parallel dispatch.
 
 E8: a plan is validated before any task is created. Cycles and unknown dependencies are rejected; a
-chained plan (more than half the tasks depend on one task) is warned about; more than 5 tasks, a
+chained plan (more than half the tasks depend on one task) is refused by validate_manager_plan (E20) and,
+if it gets this far, becomes a draft with the chain as a reason; more than 5 tasks, a
 one-line request with more than 3 tasks, or an ambiguous goal becomes a draft with Approve / Edit /
 Reject; goals about unauthorized scraping, surveillance or profiling of private people, or CAPTCHA /
 anti-bot bypass create NO tasks and return a reason.
@@ -167,7 +168,8 @@ async def test_ten_task_plan_becomes_a_draft_and_creates_no_tasks(e12, no_dispat
     assert no_dispatch == []
 
 
-async def test_chained_plan_is_created_with_a_warning(e12, no_dispatch):  # noqa: F811
+async def test_chained_plan_becomes_a_draft_with_a_visible_reason(e12, no_dispatch):  # noqa: F811
+    """E29: a dependency chain is a real draft reason (the owner sees it), not only a printed warning."""
     factory, _ = e12
     project_id = await _reset(factory)
     job_id = await _job(factory, "Ship the export feature.\nIt covers CSV and PDF output.", project_id)
@@ -177,9 +179,10 @@ async def test_chained_plan_is_created_with_a_warning(e12, no_dispatch):  # noqa
         await manager_arena_runtime._apply_plan(db, job, plan, raw="{}")
     async with factory() as db:
         job = await db.get(ManagerJob, job_id)
-        assert job.status == "done"
+        assert job.status == "draft"
+        assert any("3 of 4" in r and "depend on task 0" in r for r in job.result["draft_reasons"])
         assert any("3 of 4" in w for w in job.result["warnings"])
-    assert len(await _planned_tasks(factory)) == 4
+    assert await _planned_tasks(factory) == []
 
 
 async def test_small_independent_plan_is_created_without_draft(e12, no_dispatch):  # noqa: F811
