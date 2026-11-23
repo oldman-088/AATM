@@ -183,11 +183,28 @@ POLICY_TEXT_EN = {
 }
 
 
+# A negation shortly before a forbidden match means the text forbids the behaviour, not asks for it
+# (for example "do not solve CAPTCHAs"). Only the words directly before the match count, so a real
+# request that merely mentions a negation elsewhere is still refused.
+_NEGATION = re.compile(
+    r"\b(never|not|no|don'?t|do not|must not|mustn'?t|avoid|refuse|refuses|forbid|forbidden|cannot|can'?t)\b|(?:^|\s)(لا|لن|ليس|ممنوع|تجنب)(?:\s|$)",
+    re.I,
+)
+_NEGATION_WINDOW = 25
+
+
+def _negated(text: str, start: int, end: int) -> bool:
+    before = text[max(0, start - _NEGATION_WINDOW):start]
+    return bool(_NEGATION.search(before))
+
+
 def policy_violation(text: str) -> str | None:
     """The reason key when the text asks for something AATM will not plan (no tasks are created), else None."""
+    text = text or ""
     for pattern, reason in _POLICY_RULES:
-        if pattern.search(text or ""):
-            return reason
+        for match in pattern.finditer(text):
+            if not _negated(text, match.start(), match.end()):
+                return reason
     return None
 
 
