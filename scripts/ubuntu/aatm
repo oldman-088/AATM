@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # aatm — command-line entry point for AATM maintenance (Ubuntu).
 #
-#   aatm doctor [--fix] [--json] [--db PATH] [--no-bridge]
-#       Report drifted state (stuck workers, sessions, queued tasks, outdated windows). Report-only unless
-#       --fix is given, which backs up the database first and repairs only the safe cases. See doctor.py.
+#   aatm doctor [--fix] [--json] [--log] [--db PATH] [--no-bridge]
+#       The consistency check (E17): drifted workers and sessions, a task assigned to the manager,
+#       a stuck queue, an outdated window script, a window on the wrong repository (E34), and the
+#       accounts still waiting on the Terms of Service (E25). Report-only unless --fix is given,
+#       which backs the database up first and repairs only the safe cases. See aatm_doctor.py.
+#       Exit code: 0 clean, 1 findings reported, 2 the database could not be read.
+#   aatm autostart-install [--no-linger] [--desktop]
+#   aatm autostart-remove
+#       Start the stack by itself after a reboot or a power cut (E5), and take that back off.
+#       See scripts/ubuntu/AUTOSTART.md.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="$ROOT_DIR/.venv/bin/python"
@@ -12,12 +19,19 @@ PY="$ROOT_DIR/.venv/bin/python"
 cmd="${1:-}"
 [[ $# -gt 0 ]] && shift
 case "$cmd" in
-  doctor) exec "$PY" "$ROOT_DIR/scripts/ubuntu/doctor.py" "$@" ;;
-  ""|-h|--help|help)
-    echo "usage: aatm doctor [--fix] [--json] [--db PATH] [--no-bridge]"
+  doctor) exec "$PY" "$ROOT_DIR/scripts/ubuntu/aatm_doctor.py" "$@" ;;
+  doctor-state) exec "$PY" "$ROOT_DIR/scripts/ubuntu/doctor.py" "$@" ;;
+  autostart-install) exec bash "$ROOT_DIR/scripts/ubuntu/install-autostart.sh" "$@" ;;
+  autostart-remove) exec bash "$ROOT_DIR/scripts/ubuntu/uninstall-autostart.sh" "$@" ;;
+  "")
+    echo "usage: aatm doctor [--fix] [--json] [--log] [--db PATH] [--no-bridge]"
+    echo "       aatm autostart-install [--no-linger] [--desktop] | aatm autostart-remove"
+    ;;
+  -h|--help|help)
+    sed -n '2,15p' "${BASH_SOURCE[0]}"
     ;;
   *)
-    echo "aatm: unknown command '$cmd' (try: aatm doctor)" >&2
+    echo "aatm: unknown command '$cmd' (try: aatm doctor, aatm autostart-install)" >&2
     exit 2
     ;;
 esac

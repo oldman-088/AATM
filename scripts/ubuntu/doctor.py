@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """AATM doctor — find state that has drifted out of sync (E17). Report-only unless ``--fix`` is given.
 
+This module is the *library* of state checks. Run it through ``aatm_doctor.py``, which keeps this
+file free of duplicates and adds the two window-level checks that state alone cannot show:
+``window_on_wrong_repo`` (E34) and ``account_terms_not_accepted`` (E25).
+
 Checks (each finding names the row it is about):
   worker_working_without_task     a worker is "working" but no task is running for it
   window_connected_worker_offline a worker is "offline" while its Arena window is connected (bridge)
@@ -17,13 +21,16 @@ Checks (each finding names the row it is about):
 Every other finding is reported for a person to decide.
 
 The database is opened read-only for reports. Standard library only, so it runs with any Python 3.
-The watchdog runs it every 10 minutes with ``--once --json`` (it never restarts anything itself).
+``scripts/ubuntu/aatm_doctor.py`` runs this module's checks, adds the window-level ones, and is what
+the watchdog calls every 10 minutes and what ``start-all.sh`` runs once after the stack is ready.
+The doctor itself never restarts anything.
 
 Usage:
   scripts/ubuntu/doctor.py                 # report (exit 0: clean, 1: findings, 2: cannot read the database)
   scripts/ubuntu/doctor.py --fix           # back up, then repair the safe cases, then report what remains
   scripts/ubuntu/doctor.py --json          # machine-readable report
-  scripts/ubuntu/aatm doctor [--fix]       # the same, through the aatm command
+  scripts/ubuntu/aatm doctor              # aatm_doctor.py: these checks plus the window-level ones
+  scripts/ubuntu/aatm doctor-state [--fix] # this module on its own, with no window checks
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,6 +58,14 @@ DONE_TASK_STATUSES = ("completed", "done", "merged")
 FINISHED_TASK_STATUSES = ("completed", "done", "merged", "cancelled", "failed")
 TERMINAL_TASK_STATUSES = FINISHED_TASK_STATUSES
 ARENA_CONNECTOR_SOURCE = ROOT_DIR / "backend" / "app" / "browser" / "arena_connector.py"
+
+
+class BackupRefused(OSError):
+    """A safe fix was asked for but no backup could be written, so nothing was changed.
+
+    It is an ``OSError`` because that is what a failed copy already was: callers that treated a
+    missing backup as an I/O problem (and ``backend/tests/test_e17_doctor.py`` does) keep working.
+    """
 
 
 @dataclass
@@ -228,8 +244,13 @@ def check_manager_jobs_needs_human(conn, now: datetime) -> list[Finding]:
 
 
 def run_checks(conn: sqlite3.Connection, *, now: datetime, bridge: dict[str, dict[str, Any]] | None,
-               script_version: str | None) -> list[Finding]:
-    """Every check. ``bridge`` is None when the bridge is unreachable: the two window checks are then skipped."""
+               script_version: str | None,
+               extra: Callable[..., list[Finding]] | None = None) -> list[Finding]:
+    """Every check. ``bridge`` is None when the bridge is unreachable: the two window checks are then skipped.
+
+    ``extra`` lets a caller (``aatm_doctor.py``) append its own checks to the same read-only connection
+    instead of copying this list: it is called as ``extra(conn, bridge)`` and returns findings.
+    """
     findings: list[Finding] = []
     findings += check_workers_working_without_task(conn, now)
     if bridge is not None:
@@ -239,6 +260,8 @@ def run_checks(conn: sqlite3.Connection, *, now: datetime, bridge: dict[str, dic
     findings += check_tasks_assigned_to_manager(conn)
     findings += check_queued_tasks_stuck(conn, now)
     findings += check_manager_jobs_needs_human(conn, now)
+    if extra is not None:
+        findings += extra(conn, bridge)
     return findings
 
 
@@ -253,12 +276,20 @@ def backup_before_fix(db_path: Path, reason: str) -> Path:
     return backup_database(reason, source_path=db_path)
 
 
-def apply_safe_fixes(db_path: Path, findings: list[Finding], *, now: datetime) -> list[dict[str, Any]]:
-    """Repair only the fixable findings, inside one transaction, after a backup. Returns what was changed."""
+def apply_safe_fixes(db_path: Path, findings: list[Finding], *, now: datetime,
+                     backup_fn: Callable[[Path, str], Path] | None = None) -> list[dict[str, Any]]:
+    """Repair only the fixable findings, inside one transaction, after a backup. Returns what was changed.
+
+    ``backup_fn`` defaults to :func:`backup_before_fix`; a caller that must keep working without the
+    backend's venv (``aatm_doctor.py``) passes its own, but no finding is ever touched before it returns.
+    """
     fixable = [f for f in findings if f.fixable]
     if not fixable:
         return []
-    backup = backup_before_fix(db_path, "doctor fix")
+    try:
+        backup = (backup_fn or backup_before_fix)(db_path, "doctor fix")
+    except Exception as exc:  # a fix without a copy to go back to is not a safe fix
+        raise BackupRefused(f"no backup could be written ({type(exc).__name__}: {exc}); nothing was changed") from exc
     stamp = now.strftime("%Y-%m-%d %H:%M:%S")
     changed: list[dict[str, Any]] = []
     conn = sqlite3.connect(db_path, timeout=10)
@@ -327,18 +358,25 @@ def fetch_bridge_windows(env: dict[str, str], timeout: float = 4.0) -> dict[str,
 
 # --------------------------------------------------------------------------------------- main
 def diagnose(db_path: Path, *, now: datetime, bridge: dict[str, dict[str, Any]] | None,
-             script_version: str | None, fix: bool) -> dict[str, Any]:
+             script_version: str | None, fix: bool,
+             extra: Callable[..., list[Finding]] | None = None,
+             backup_fn: Callable[[Path, str], Path] | None = None) -> dict[str, Any]:
+    """Read-only report; with ``fix`` the safe findings are repaired (after a backup) and re-checked.
+
+    ``extra`` / ``backup_fn`` are how ``aatm_doctor.py`` adds its checks and its own backup strategy
+    without duplicating anything: the checks and the fix SQL stay in this module.
+    """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
     try:
-        findings = run_checks(conn, now=now, bridge=bridge, script_version=script_version)
+        findings = run_checks(conn, now=now, bridge=bridge, script_version=script_version, extra=extra)
     finally:
         conn.close()
     fixed: list[dict[str, Any]] = []
     if fix:
-        fixed = apply_safe_fixes(db_path, findings, now=now)
+        fixed = apply_safe_fixes(db_path, findings, now=now, backup_fn=backup_fn)
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
         try:
-            findings = run_checks(conn, now=now, bridge=bridge, script_version=script_version)
+            findings = run_checks(conn, now=now, bridge=bridge, script_version=script_version, extra=extra)
         finally:
             conn.close()
     return {
@@ -368,6 +406,9 @@ def main(argv: list[str] | None = None) -> int:
     bridge = None if args.no_bridge else fetch_bridge_windows(env)
     try:
         report = diagnose(db_path, now=now, bridge=bridge, script_version=current_script_version(), fix=args.fix)
+    except BackupRefused as exc:
+        print(f"doctor: refusing to fix: {exc}", file=sys.stderr)
+        return 2
     except sqlite3.Error as exc:
         print(f"doctor: cannot read the database: {exc}", file=sys.stderr)
         return 2

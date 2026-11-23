@@ -11,6 +11,13 @@ for more than 20 minutes. Each new problem becomes a desktop notification (notif
 timestamped line in logs/watchdog.log; the same alert is not repeated within 10 minutes, and a
 single "recovered" notification is sent when a problem clears.
 
+Every 10 minutes it also runs ``scripts/ubuntu/aatm_doctor.py --alerts`` (E17) and turns its
+findings into the same kind of alert — drifted workers, open sessions, a window on the wrong
+repository (E34) and accounts still waiting on the Terms of Service (E25). The watchdog asks for a
+report and nothing else: it never passes ``--fix``, so it does not write to the database or to a
+browser. The doctor runs as a subprocess for the same reason the watchdog runs without the venv —
+it must still report when the app itself is broken.
+
 Standard library only, so it also runs without the project virtualenv.
 """
 
@@ -38,6 +45,9 @@ TITLE = "AATM — تنبيه"
 RECOVERED = "عاد للعمل"
 DEDUP_SECONDS = 600
 STUCK_SECONDS = 20 * 60
+DOCTOR_SCRIPT = ROOT_DIR / "scripts" / "ubuntu" / "aatm_doctor.py"
+DOCTOR_INTERVAL_SECONDS = 600.0  # the 10-minute consistency check (E17)
+DOCTOR_TIMEOUT_SECONDS = 120.0
 ACTIVE_TASK_STATUSES = ("in_progress", "running", "working")
 CONTAINERS = ("aatm-redis", "aatm-rabbitmq")
 SERVICE_GRACE_SECONDS = 90.0   # a normal restart finishes within this time
@@ -274,6 +284,33 @@ def stuck_tasks(db_path: Path, now_utc: datetime, stuck_seconds: float = STUCK_S
     return found
 
 
+# --------------------------------------------------------------------------------------------- doctor
+def run_doctor(timeout: float = DOCTOR_TIMEOUT_SECONDS) -> tuple[int, dict[str, str]]:
+    """One read-only doctor pass: ``({key: message}, exit code)``.
+
+    Only ``--alerts`` is passed, and never ``--fix``: a monitoring loop that repaired state by itself
+    would be a different, much more dangerous program. ``(1, {})`` means the doctor could not run or
+    did not answer in a readable way; the caller turns that into an alert of its own.
+    """
+    python = os.environ.get("AATM_PYTHON") or sys.executable
+    try:
+        out = subprocess.run(
+            [python, str(DOCTOR_SCRIPT), "--alerts", "--once"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, {}
+    if not out.stdout.strip():
+        return out.returncode or 1, {}
+    try:
+        alerts = json.loads(out.stdout)
+    except ValueError:
+        return 1, {}
+    if not isinstance(alerts, dict):
+        return 1, {}
+    return out.returncode, {str(k): str(v) for k, v in alerts.items() if isinstance(v, str)}
+
+
 # --------------------------------------------------------------------------------------------- watchdog
 class Watchdog:
     def __init__(self, alerter: Alerter, env: dict[str, str]) -> None:
@@ -290,6 +327,8 @@ class Watchdog:
         self.scanners = {name: LogScanner() for name in self.logs}
         self.quiet_until: dict[str, float] = {}
         self.first_seen: dict[str, float] = {}
+        self.doctor_interval = float(os.environ.get("AATM_DOCTOR_INTERVAL", DOCTOR_INTERVAL_SECONDS))
+        self.next_doctor = 0.0  # the first cycle runs it right away: this is the after-boot pass
 
     def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
         """Only problems that outlasted a normal restart or reconnect are reported."""
@@ -366,8 +405,28 @@ class Watchdog:
     def check_tasks(self) -> None:
         self.alerter.set_problems("task", stuck_tasks(self.db_path, datetime.now(UTC)))
 
+    def check_doctor(self) -> None:
+        """Every 10 minutes: the drifted-state report (E17), as alerts. Read-only by construction."""
+        now = self.alerter.clock()
+        if now < self.next_doctor:
+            return
+        self.next_doctor = now + self.doctor_interval
+        code, alerts = run_doctor()
+        if code == 0:
+            self.alerter.set_problems("doctor", {})  # clean: clears any finding that has gone away
+            return
+        if code == 2:
+            self.alerter.set_problems("doctor", {"database": "فحص aatm doctor لم يستطع قراءة قاعدة البيانات"})
+            return
+        if code == 1 and alerts:
+            self.alerter.set_problems("doctor", alerts)
+            return
+        # it did not run at all (no python, no script, a crash, a timeout): say so instead of going quiet
+        self.alerter.set_problems("doctor", {"unavailable": "فحص aatm doctor لم يعمل؛ راجع scripts/ubuntu/aatm_doctor.py"})
+
     def cycle(self) -> None:
-        for check in (self.check_services, self.check_profiles, self.check_logs, self.check_tasks):
+        for check in (self.check_services, self.check_profiles, self.check_logs, self.check_tasks,
+                      self.check_doctor):
             try:
                 check()
             except Exception as exc:  # a broken probe must never stop the watchdog
@@ -375,7 +434,7 @@ class Watchdog:
 
 
 # --------------------------------------------------------------------------------------------- output
-LOG_FILE = ROOT_DIR / "logs" / "watchdog.log"
+LOG_FILE = Path(os.environ.get("AATM_WATCHDOG_LOG") or ROOT_DIR / "logs" / "watchdog.log")
 
 
 def write_log(line: str) -> None:
@@ -400,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=float(os.environ.get("WATCHDOG_INTERVAL", "60")))
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
     parser.add_argument("--test-notify", action="store_true", help="send one test notification and exit")
+    parser.add_argument("--no-doctor", action="store_true", help="skip the 10-minute aatm doctor pass")
     args = parser.parse_args(argv)
 
     if args.test_notify:
@@ -412,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _on_sigterm)
     env = read_env(ROOT_DIR / ".env")
     dog = Watchdog(Alerter(send=notify), env)
+    if args.no_doctor:
+        dog.check_doctor = lambda: None  # the read-only monitoring stays, the doctor pass does not
     write_log(f"[watchdog] started (pid {os.getpid()}, interval {args.interval:.0f}s)")
     try:
         while True:
