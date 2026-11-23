@@ -5,15 +5,16 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.browser.manager import browser_manager
 from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.models import Agent, AuditLog, BrowserProfile, Notification, Task
 from app.orchestration.scheduler import task_scheduler
-from fastapi import HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # --------------------------------------------------------------------------------------
 # Static secret scanning (Division 11 - QA / Security)

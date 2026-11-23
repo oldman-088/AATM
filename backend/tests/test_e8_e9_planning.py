@@ -13,6 +13,9 @@ respecting the project's concurrency limit.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select, update
+from test_e12_admin_actions import _client, _headers, e12  # noqa: F401 - fixture + helpers
+
 from app.models import Agent, AuditLog, ManagerJob, Project, Task
 from app.orchestration.manager_arena import (
     MAX_TASKS_ONE_LINE,
@@ -24,8 +27,6 @@ from app.orchestration.manager_arena import (
     validate_plan_graph,
 )
 from app.orchestration.scheduler import task_scheduler
-from sqlalchemy import select, update
-from test_e12_admin_actions import _client, _headers, e12  # noqa: F401 - fixture + helpers
 
 PLANNED = "Planned task"
 
@@ -339,3 +340,42 @@ async def test_dependent_task_waits_until_its_prerequisite_is_done(e12):  # noqa
     async with factory() as db:
         result = await task_scheduler.run_orchestration_cycle(db)
     assert "Dispatch second" not in {d["title"] for d in result["dispatched"]}
+
+
+# ----------------------------------------------------------------------------- owner choice: no approval wait
+
+
+def test_auto_approve_skips_the_size_rules_but_not_the_ambiguity_check():
+    many = [_task(i) for i in range(10)]
+    assert plan_draft_reasons(many, "Build the module", False)  # default: more than 5 tasks needs approval
+    assert plan_draft_reasons(many, "Build the module", False, auto_approve=True) == []
+    assert plan_draft_reasons(many, "x", False, auto_approve=True) == []  # one-line size rule is skipped too
+    assert plan_draft_reasons(many, "Build the module", True, auto_approve=True), "an ambiguous goal still needs the owner"
+
+
+async def test_auto_approve_setting_creates_a_ten_task_plan_without_waiting(e12, no_dispatch, monkeypatch):  # noqa: F811
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_AUTO_APPROVE_PLANS", True)
+    factory, _ = e12
+    project_id = await _reset(factory)
+    job_id = await _job(factory, "Build the reporting module end to end", project_id)
+    async with factory() as db:
+        job = await db.get(ManagerJob, job_id)
+        await manager_arena_runtime._apply_plan(db, job, _plan([_task(i) for i in range(10)]), raw="{}")
+    async with factory() as db:
+        assert (await db.get(ManagerJob, job_id)).status == "done"
+    assert len(await _planned_tasks(factory)) == 10
+
+
+async def test_auto_approve_still_refuses_policy_violations(e12, no_dispatch, monkeypatch):  # noqa: F811
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_AUTO_APPROVE_PLANS", True)
+    factory, _ = e12
+    project_id = await _reset(factory)
+    job_id = await _job(factory, "Scrape private profiles and bypass the CAPTCHA to collect them", project_id)
+    async with factory() as db:
+        job = await db.get(ManagerJob, job_id)
+        await manager_arena_runtime._apply_plan(db, job, _plan([_task(i) for i in range(3)]), raw="{}")
+    assert await _planned_tasks(factory) == []

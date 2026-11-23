@@ -48,6 +48,7 @@ from app.models import (
 from app.orchestration import manager_arena
 from app.orchestration.arena_prompts import (
     MANAGER_JSON_RETRY,
+    MANAGER_JSON_RETRY_DETAIL,
     MAX_PLAN_TASKS,
     build_manager_plan_prompt,
     build_manager_review_prompt,
@@ -226,6 +227,28 @@ def test_plan_validation_rejects_unknown_assignees_empty_fields_too_many_tasks_a
     assert validate_manager_plan(None, TEAM)[0] is None
 
 
+def test_plan_size_cap_is_a_setting_and_zero_means_no_limit(monkeypatch):
+    from app.core.config import get_settings
+
+    big = {"summary_ar": "x", "tasks": _plan()["tasks"] * (MAX_PLAN_TASKS + 15)}
+    assert "maximum is 10" in validate_manager_plan(big, TEAM)[1], "the default cap is unchanged"
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_MAX_PLAN_TASKS", 0)
+    plan, err = validate_manager_plan(big, TEAM)
+    assert err == "" and len(plan["tasks"]) == MAX_PLAN_TASKS + 15
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_MAX_PLAN_TASKS", 20)
+    assert "maximum is 20" in validate_manager_plan({"summary_ar": "x", "tasks": _plan()["tasks"] * 21}, TEAM)[1]
+
+
+def test_plan_prompt_states_the_cap_or_that_there_is_none(monkeypatch):
+    from app.core.config import get_settings
+
+    team = [{"id": "worker-1", "name": "Backend", "specialty": "FastAPI", "skills": ["python"]}]
+    assert "At most 10 tasks" in build_manager_plan_prompt("goal", None, team, [])
+    monkeypatch.setattr(get_settings(), "ARENA_MANAGER_MAX_PLAN_TASKS", 0)
+    unlimited = build_manager_plan_prompt("goal", None, team, [])
+    assert "At most" not in unlimited and "no limit on the number of tasks" in unlimited
+
+
 def test_review_validation_requires_a_known_verdict_and_comments_for_request_changes():
     ok, _ = validate_manager_review({"verdict": "approve", "summary_ar": "جيد", "comments": []})
     assert ok["verdict"] == "approve"
@@ -355,7 +378,7 @@ async def test_invalid_json_gets_one_retry_then_needs_human_with_the_raw_reply(e
     job = next(j for j in await _jobs(env) if j.kind == "plan")
     assert job.status == "needs_human" and job.json_retries == 1
     assert job.raw_reply == "Still prose, sorry." and "invalid JSON" in job.error
-    assert page.submitted("PLAN") and page.submitted().count(MANAGER_JSON_RETRY) == 1
+    assert page.submitted("PLAN") and page.submitted().count(MANAGER_JSON_RETRY_DETAIL) == 1
     async with env() as db:
         assert len(list((await db.execute(select(Task))).scalars())) == before, "no plan may be invented"
         message = await db.get(ChatMessage, job.reply_message_id)
@@ -820,3 +843,69 @@ async def test_project_team_limits_who_the_manager_may_plan_for(env, scripted):
         # Without a team the manager still sees every enabled worker.
         everyone = await runtime._team(db, None)
     assert {"worker-1", "worker-2"} <= {m["id"] for m in everyone}
+
+
+async def test_a_clarifying_question_is_shown_to_the_owner_not_treated_as_invalid_json(env, scripted):
+    """The manager answers a vague goal with {"ambiguous": true, "tasks": []} and a question in summary_ar.
+    That is a valid answer: show the question, create no tasks and do not send the JSON retry."""
+    make, project_id = scripted
+    question = "ما نوع البرنامج المطلوب: ويب أم سطح مكتب؟ وكم لعبة؟"
+    reply_json = '```json\n{"ambiguous": true, "summary_ar": "%s", "tasks": []}\n```' % question
+    page, runtime = make({"PLAN": [reply_json], "RETRY": ["must never be asked"]})
+    async with env() as db:
+        before = len(list((await db.execute(select(Task))).scalars()))
+        await runtime.handle_owner_message(db, project_id, "اكتب لي برنامج العاب تجربة")
+    await runtime.wait_idle()
+    job = next(j for j in await _jobs(env) if j.kind == "plan")
+    assert job.status == "done" and job.error is None and job.json_retries == 0
+    assert (job.result or {}).get("clarification") is True
+    assert page.submitted().count(MANAGER_JSON_RETRY_DETAIL) == 0, "a question must not trigger the JSON retry"
+    async with env() as db:
+        assert len(list((await db.execute(select(Task))).scalars())) == before, "a question creates no tasks"
+        replies = list((await db.execute(select(ChatMessage).where(ChatMessage.sender_id == "manager-0"))).scalars())
+    assert any(question in m.content for m in replies), "the owner must see the manager's question"
+    assert not any("تعذّر على المدير" in m.content for m in replies)
+
+
+async def test_ambiguous_flag_without_a_question_or_with_tasks_is_not_a_clarification(env, scripted):
+    """Only an ambiguous reply with a question and no tasks counts; anything else keeps the old strict rules."""
+    from app.orchestration.manager_arena import clarification_question
+
+    assert clarification_question({"ambiguous": True, "summary_ar": "سؤال؟", "tasks": []}) == "سؤال؟"
+    assert clarification_question({"ambiguous": True, "summary_ar": "  ", "tasks": []}) is None
+    assert clarification_question({"ambiguous": True, "summary_ar": "سؤال؟", "tasks": [{"title": "x"}]}) is None
+    assert clarification_question({"ambiguous": False, "summary_ar": "سؤال؟", "tasks": []}) is None
+    assert clarification_question({"summary_ar": "سؤال؟", "tasks": []}) is None
+    assert clarification_question(None) is None
+
+
+async def test_manager_gets_a_new_session_and_context_when_the_team_changes(env, scripted):
+    """The context (project + team) is sent once per session. Adding a worker to the project's team mid-session
+    must start a new session so the manager plans for the team the owner actually has."""
+    from app.models import Agent
+
+    make, project_id = scripted
+    page, runtime = make({"*": ["تم."]})
+    async with env() as db:
+        project = await db.get(Project, project_id)
+        project.config = {"team": ["worker-1"]}
+        await db.commit()
+        await runtime.handle_owner_message(db, project_id, "ما حالة الفريق؟")
+    await runtime.wait_idle()
+    contexts = [t for t in page.submitted() if "[AATM-MANAGER:CONTEXT]" in t]
+    assert len(contexts) == 1 and "worker-2" not in contexts[0]
+
+    async with env() as db:  # same session, same team: no new context
+        await runtime.handle_owner_message(db, project_id, "ما حالة الفريق الآن؟")
+    await runtime.wait_idle()
+    assert len([t for t in page.submitted() if "[AATM-MANAGER:CONTEXT]" in t]) == 1
+
+    async with env() as db:  # the owner adds workers 2 and 3
+        project = await db.get(Project, project_id)
+        project.config = {"team": ["worker-1", "worker-2", "worker-3"]}
+        assert await db.get(Agent, "worker-2") is not None
+        await db.commit()
+        await runtime.handle_owner_message(db, project_id, "وزع العمل على الفريق")
+    await runtime.wait_idle()
+    contexts = [t for t in page.submitted() if "[AATM-MANAGER:CONTEXT]" in t]
+    assert len(contexts) == 2 and "worker-2" in contexts[1] and "worker-3" in contexts[1]

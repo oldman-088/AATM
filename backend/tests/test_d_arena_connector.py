@@ -28,6 +28,13 @@ from typing import Any
 import pytest
 import uvicorn
 import websockets
+from bridge.server import create_app as create_bridge_app
+from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from test_b_review_merge_completion import REPO_SLUG, _init_repo, fake_gh  # noqa: F401 - fixture re-export
+
 from app.browser.arena_connector import arena_gate, build_userscript, match_patterns
 from app.browser.engines import validate_userscript_policy
 from app.browser.manager import browser_manager, detect_playwright_capabilities
@@ -42,13 +49,6 @@ from app.orchestration.scheduler import TaskScheduler
 from app.providers.adapters import ArenaBrowserAdapter
 from app.providers.base import ProviderRequest
 from app.runtime.agent_loop import AgentLoop
-from fastapi import HTTPException
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from test_b_review_merge_completion import REPO_SLUG, _init_repo, fake_gh  # noqa: F401 - fixture re-export
-
-from bridge.server import create_app as create_bridge_app
 
 BRIDGE_TOKEN = "bridge-test-token-phase6-0123456789"
 PLANTED = ("MOCK-PLANTED-CSRF-9d41c2", "MOCK-PLANTED-COOKIE-5be7aa", "MOCK-PLANTED-STORAGE-1c08ef")
@@ -378,6 +378,12 @@ async def _setup_connector(factory, bridge, arena_settings, monkeypatch, tmp_pat
             w.permissions = sorted(set(w.permissions or []) | {"edit_backend"})
             if idx >= 4:
                 w.is_enabled = False
+            # These tests cover the Chat-mode connector. Seeded workers now start in Agent mode, so the mode
+            # is set here explicitly instead of relying on the model default.
+            if w.browser_profile_id:
+                profile = await db.get(BrowserProfile, w.browser_profile_id)
+                if profile is not None:
+                    profile.arena_mode = "chat"
         await db.commit()
         task_ids = [t.id for t in tasks]
     headers = await _admin_headers(factory)

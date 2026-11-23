@@ -109,16 +109,31 @@ class ArenaRunnerError(RuntimeError):
     pass
 
 
+# How long a session may wait for a person before its worker is released (see expire_stale_human_sessions).
+HUMAN_WAIT_LIMIT = timedelta(minutes=30)
+
+# A session whose task is in one of these states no longer holds its employee: the work is over
+# or stopped, so the session must not keep the worker from taking new queued tasks.
+RELEASING_TASK_STATES = {"done", "completed", "cancelled", "merged", "failed"}
+
+
 async def arena_reservations(db: AsyncSession) -> dict[str, str]:
     """agent_id -> implementation task id for employees whose Arena session is still in use.
 
     The employee stays bound to that session (so corrections reach the same Arena session) until
     the PR is merged or the task is closed; only that task's follow-ups are dispatched to them.
+    Sessions whose task is finished or blocked are ignored, so they cannot hold the worker forever.
     """
     rows = (await db.execute(
-        select(ArenaSession).where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(RESERVING_PHASES))
-    )).scalars()
-    return {s.agent_id: s.task_id for s in rows if s.task_id}
+        select(ArenaSession, Task.status)
+        .outerjoin(Task, Task.id == ArenaSession.task_id)
+        .where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(RESERVING_PHASES))
+    )).all()
+    return {
+        s.agent_id: s.task_id
+        for s, task_status in rows
+        if s.task_id and task_status not in RELEASING_TASK_STATES
+    }
 
 
 def task_chat_path(session: ArenaSession) -> str | None:
@@ -801,9 +816,40 @@ class ArenaAgentRunner:
         await db.commit()
 
     # ------------------------------------------------------------------ monitoring
+    async def expire_stale_human_sessions(self, db: AsyncSession, now: datetime | None = None) -> list[str]:
+        """Release workers whose session has waited for a human longer than HUMAN_WAIT_LIMIT.
+
+        The task stays blocked (a person still has to look at it); only the worker is freed, so a
+        forgotten check can no longer stop the whole team. Each release is written to the audit log.
+        """
+        now = to_naive_utc(now or _now())
+        rows = list((await db.execute(
+            select(ArenaSession).where(ArenaSession.is_open.is_(True), ArenaSession.phase == "needs_human")
+        )).scalars())
+        released: list[str] = []
+        for session in rows:
+            since = session.last_state_change_at or session.submitted_at
+            if since is None or now - to_naive_utc(since) < HUMAN_WAIT_LIMIT:
+                continue
+            minutes = int(HUMAN_WAIT_LIMIT.total_seconds() // 60)
+            reason = f"needs_human waited over {minutes} min; worker released, task stays blocked"
+            await close_session(db, session, phase="closed", reason=reason)
+            agent = await db.get(Agent, session.agent_id)
+            if agent is not None and agent.status == "needs_human":
+                agent.status = "idle"
+            db.add(AuditLog(actor="system:arena-runner", action="arena.needs_human_expired", resource_type="arena_session",
+                            resource_id=session.id, details={"agent_id": session.agent_id, "task_id": session.task_id,
+                                                             "limit_minutes": minutes},
+                            severity="warning"))
+            released.append(session.agent_id)
+        if released:
+            await db.commit()
+        return released
+
     async def tick(self, db: AsyncSession) -> dict[str, Any]:
         """Advance every open Arena session one step (called each orchestration cycle)."""
         results: dict[str, Any] = {}
+        results["expired_human_waits"] = await self.expire_stale_human_sessions(db)
         # Sessions that wait for a human decision are not monitored any more, but their pull request
         # can still be merged or closed outside AATM: poll its state (throttled to every 5 minutes).
         results["pr_states"] = await self.poll_pr_states(db)

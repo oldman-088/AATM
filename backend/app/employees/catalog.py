@@ -143,6 +143,7 @@ async def create_dynamic_employee(
                 profile_dir=str(settings.BROWSER_PROFILES_DIR / emp_id),
                 mode="visible",
                 status="ready",
+                arena_mode="agent",  # every Arena employee runs in Agent mode (the model default is "chat")
             )
         )
 

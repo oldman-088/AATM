@@ -39,9 +39,10 @@ if _REPO_ROOT not in sys.path:
 
 def _create_test_schema() -> None:
     """Tests that do not reset the database themselves still find every table."""
+    from sqlalchemy import create_engine
+
     import app.models  # noqa: F401 - registers every table on Base.metadata
     from app.db.base import Base
-    from sqlalchemy import create_engine
 
     if not os.environ.get("SYNC_DATABASE_URL"):
         return

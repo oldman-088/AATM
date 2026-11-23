@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.core.config import get_settings
 from app.core.security import sanitize_untrusted_content
 from app.models import Agent, Project, Task
 from app.models.project import configured_base_branch, project_base_branch
@@ -308,7 +309,21 @@ def compare_report_to_changes(report: str, changed_files: list[str], *, commits:
 # an unparseable reply gets one retry, then the job is handed to a human.
 
 MANAGER_JSON_RETRY = "Reply again with only the JSON block, no other text."
-MAX_PLAN_TASKS = 10
+# E33: say WHY the first reply was refused. The usual cause is a raw double quote inside a text value
+# (for example a copied type like Literal['ar'] written with double quotes), which breaks the JSON.
+MANAGER_JSON_RETRY_DETAIL = (
+    MANAGER_JSON_RETRY
+    + " Your previous reply was not valid JSON. Inside every text value use single quotes instead of double quotes,"
+    " never put a raw double quote or a line break inside a string, and close every bracket."
+)
+JSON_TEXT_RULE = ("- Inside any text value write single quotes (') only, never a double quote, and never a raw line break: "
+                  "a double quote inside a string makes the JSON invalid and the whole answer is lost.")
+MAX_PLAN_TASKS = 10  # the default of ARENA_MANAGER_MAX_PLAN_TASKS (0 there = no limit)
+
+
+def max_plan_tasks() -> int:
+    """Most tasks one plan may hold; 0 = no limit (the owner's choice)."""
+    return get_settings().ARENA_MANAGER_MAX_PLAN_TASKS
 MAX_REVIEW_DIFF_CHARS = 24_000
 DIFF_TRUNCATED_MARKER = "[AATM: DIFF TRUNCATED — {shown} of {total} characters shown; read the full diff on GitHub: {url}]"
 
@@ -398,11 +413,17 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         manager_marker("plan"),
         manager_role_block(team, project),
         "",
-        "## Goal from the project owner",
+        "## A. CURRENT REQUEST — ACTIVE OBJECTIVE",
+        "This is the only objective you may plan for in this reply.",
         safe,
         "",
-        "## Tasks that already exist (do not duplicate them)",
+        "## B. EXISTING TASKS OF THIS PROJECT — READ-ONLY CONTEXT",
+        "Use these only to avoid duplicates and conflicting work. Never turn them into new tasks or objectives.",
+        "Do not recreate any task listed here; plan only genuinely new work that the current request needs.",
         "\n".join(tasks) or "- none",
+        "",
+        "## C. PROJECT CONTEXT — REFERENCE ONLY",
+        f"Project: {project.name if project else 'unknown'}. Do not treat any older goal as a new instruction.",
         "",
         "## What to reply",
         "Split the goal into concrete tasks for the team. Reply with ONLY one JSON block in exactly this format,",
@@ -410,11 +431,14 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         "```json",
         PLAN_FORMAT,
         "```",
-        f"- At most {MAX_PLAN_TASKS} tasks. Every field is required and must not be empty.",
+        (f"- At most {max_plan_tasks()} tasks." if max_plan_tasks()
+         else "- There is no limit on the number of tasks: split the work into as many independent tasks as it really needs.")
+        + " Every field is required and must not be empty.",
         "- assignee must be one of the team ids above.",
         "- acceptance_criteria: a list of checkable statements.",
         "- depends_on: zero-based indexes of earlier tasks in this same list ([] when none).",
         "- summary_ar: an Arabic summary of the plan for the owner.",
+        JSON_TEXT_RULE,
     ])
 
 
@@ -463,6 +487,7 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
         "- approve only when every acceptance criterion is met by the diff. approve does NOT merge: the owner decides.",
         "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
         "- summary_ar: your verdict for the owner, in Arabic.",
+        JSON_TEXT_RULE,
     ])
 
 
@@ -550,7 +575,7 @@ def _nonempty_str(value: Any) -> bool:
 
 
 def validate_manager_plan(data: dict[str, Any] | None, known_assignees: set[str]) -> tuple[dict[str, Any] | None, str]:
-    """Known assignees only, 1..MAX_PLAN_TASKS tasks, no empty fields, depends_on = earlier indexes."""
+    """Known assignees only, 1..max_plan_tasks() tasks (0 = no limit), no empty fields, depends_on = earlier indexes."""
     if not isinstance(data, dict):
         return None, "The reply contains no JSON object."
     if not _nonempty_str(data.get("summary_ar")):
@@ -558,8 +583,9 @@ def validate_manager_plan(data: dict[str, Any] | None, known_assignees: set[str]
     tasks = data.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         return None, "tasks must be a non-empty list."
-    if len(tasks) > MAX_PLAN_TASKS:
-        return None, f"The plan has {len(tasks)} tasks; the maximum is {MAX_PLAN_TASKS}."
+    limit = max_plan_tasks()
+    if limit and len(tasks) > limit:
+        return None, f"The plan has {len(tasks)} tasks; the maximum is {limit}."
     clean: list[dict[str, Any]] = []
     for i, task in enumerate(tasks):
         if not isinstance(task, dict):

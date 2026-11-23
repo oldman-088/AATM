@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.arena_connector import (
@@ -37,7 +37,7 @@ from app.models import (
     Task,
 )
 from app.orchestration.arena_prompts import (
-    MANAGER_JSON_RETRY,
+    MANAGER_JSON_RETRY_DETAIL,
     build_manager_chat_prompt,
     build_manager_context_prompt,
     build_manager_plan_prompt,
@@ -123,6 +123,10 @@ BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
+# A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
+MAX_JOB_ATTEMPTS = 3
+# E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
+MAX_ATTEMPT_REFUNDS = 12
 MAX_STATUS_QUESTION_CHARS = 200  # a long brief that mentions "status" is a goal, not a question
 
 _STATUS_RE = re.compile(
@@ -234,15 +238,43 @@ def plan_warnings(tasks: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
-def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool) -> list[str]:
-    """Why this plan needs the owner's approval before its tasks are created (empty: create directly)."""
+def _context_matches_team(session: ArenaSession, team_ids: list[str]) -> bool:
+    """True when the team in the session's last context message is today's team. Sessions started before the
+    team was recorded have no ``team`` entry and are left alone."""
+    for event in reversed(session.events or []):
+        if event.get("kind") == "context_sent":
+            sent = event.get("team")
+            return not isinstance(sent, list) or sorted(map(str, sent)) == sorted(team_ids)
+    return True
+
+
+def clarification_question(data: Any) -> str | None:
+    """The manager's question when it answers a vague goal with ``{"ambiguous": true, "tasks": []}``.
+
+    That is a valid answer, not broken JSON: the owner must see the question. Anything else (no question,
+    a flag with tasks, no flag) is not a clarification and keeps the strict plan validation.
+    """
+    if not isinstance(data, dict) or data.get("ambiguous") is not True:
+        return None
+    question = data.get("summary_ar")
+    if not isinstance(question, str) or not question.strip() or data.get("tasks"):
+        return None
+    return question.strip()
+
+
+def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool, *, auto_approve: bool = False) -> list[str]:
+    """Why this plan needs the owner's approval before its tasks are created (empty: create directly).
+
+    ``auto_approve`` (the owner's ARENA_MANAGER_AUTO_APPROVE_PLANS choice) skips the size rules only; an
+    ambiguous goal still waits for confirmation."""
     reasons: list[str] = []
-    if len(tasks) > MAX_TASKS_WITHOUT_DRAFT:
-        reasons.append(f"The plan has {len(tasks)} tasks; more than {MAX_TASKS_WITHOUT_DRAFT} needs your approval.")
-    stripped = (goal or "").strip()
-    one_line = bool(stripped) and "\n" not in stripped and len(stripped) <= 160
-    if one_line and len(tasks) > MAX_TASKS_ONE_LINE:
-        reasons.append(f"A one-line request should give 1 to {MAX_TASKS_ONE_LINE} tasks; this plan has {len(tasks)}.")
+    if not auto_approve:
+        if len(tasks) > MAX_TASKS_WITHOUT_DRAFT:
+            reasons.append(f"The plan has {len(tasks)} tasks; more than {MAX_TASKS_WITHOUT_DRAFT} needs your approval.")
+        stripped = (goal or "").strip()
+        one_line = bool(stripped) and "\n" not in stripped and len(stripped) <= 160
+        if one_line and len(tasks) > MAX_TASKS_ONE_LINE:
+            reasons.append(f"A one-line request should give 1 to {MAX_TASKS_ONE_LINE} tasks; this plan has {len(tasks)}.")
     if ambiguous:
         reasons.append("The goal is ambiguous; confirm it before any task is created.")
     return reasons
@@ -316,6 +348,7 @@ class ManagerArenaRuntime:
         # Grace period after a submit during which the old reply is not mistaken for the new one.
         self.start_grace_seconds = 20.0
         self._lock: tuple[Any, asyncio.Lock] | None = None
+        self._task_lock: tuple[Any, asyncio.Lock] | None = None
         self._drain_task: asyncio.Task | None = None
         self.profile_id = MANAGER_PROFILE_ID
 
@@ -357,9 +390,11 @@ class ManagerArenaRuntime:
                  "divisions": list(w.divisions or [])} for w in workers]
 
     async def _open_tasks(self, db: AsyncSession, project_id: str | None) -> list[dict[str, Any]]:
-        query = select(Task).where(Task.status.not_in(TERMINAL_TASK_STATES), Task.task_type == "implementation")
-        if project_id:
-            query = query.where(Task.project_id == project_id)
+        # Never fall back to every project: without a project there is no historical context to show.
+        if not project_id:
+            return []
+        query = select(Task).where(Task.status.not_in(TERMINAL_TASK_STATES), Task.task_type == "implementation",
+                                   Task.project_id == project_id)
         rows = (await db.execute(query.order_by(Task.created_at.asc()).limit(50))).scalars()
         return [{"id": t.id, "title": t.title, "status": t.status, "assignee": t.assigned_agent_id,
                  "pr_url": t.pr_url, "pr_number": t.pr_number} for t in rows]
@@ -571,6 +606,16 @@ class ManagerArenaRuntime:
             manager.status = status
             manager.last_heartbeat = _now()
 
+    @staticmethod
+    def _refund_attempt(job: ManagerJob) -> None:
+        """Give back the attempt a busy/disconnected window consumed (bounded by MAX_ATTEMPT_REFUNDS)."""
+        context = dict(job.context or {})
+        refunds = int(context.get("attempt_refunds", 0))
+        if refunds < MAX_ATTEMPT_REFUNDS and job.attempts > 0:
+            context["attempt_refunds"] = refunds + 1
+            job.context = context
+            job.attempts -= 1
+
     async def _run_job(self, db: AsyncSession, job: ManagerJob) -> dict[str, Any]:
         from app.providers.adapters.arena_agent import ArenaAgentError
 
@@ -583,6 +628,10 @@ class ManagerArenaRuntime:
             await self._reply(db, job, NOT_CONNECTED_AR if ready["code"] == "offline" else ready["reason_ar"], waiting=True,
                               readiness=ready["code"])
             await self._notify_waiting(db, job, ready)
+            return {"job_id": job.id, "status": job.status}
+        if job.attempts >= MAX_JOB_ATTEMPTS:
+            await self._finish(db, job, status="failed",
+                               error=f"stopped after {job.attempts} attempts to avoid an endless loop")
             return {"job_id": job.id, "status": job.status}
         job.status = "running"
         job.attempts += 1
@@ -602,6 +651,12 @@ class ManagerArenaRuntime:
             if job.kind == "context":
                 await self._finish(db, job, result={"session_id": session.id})
                 return {"job_id": job.id, "status": job.status}
+            if job.kind == "plan":
+                existing = await self.tasks_for_request(db, job)
+                if existing:
+                    await self._finish(db, job, result={**(job.result or {}), "task_ids": [t.id for t in existing],
+                                                        "idempotent_retry": True})
+                    return {"job_id": job.id, "status": job.status, "idempotent_retry": True}
             prompt = await self._prompt(db, job)
             if prompt is None:
                 await self._finish(db, job, status="failed", error="The job's task or project no longer exists.")
@@ -609,11 +664,15 @@ class ManagerArenaRuntime:
             reply = await self._exchange(db, session, job, prompt, resume=resume)
             if job.kind in {"plan", "review"}:
                 parsed, error = await self._parse(db, job, reply)
+                if parsed is None and await self._answer_clarification(db, job, reply):
+                    return {"job_id": job.id, "status": job.status, "clarification": True}
                 if parsed is None:
                     job.json_retries += 1
                     await db.commit()
-                    reply = await self._exchange(db, session, job, MANAGER_JSON_RETRY)
+                    reply = await self._exchange(db, session, job, MANAGER_JSON_RETRY_DETAIL)
                     parsed, error = await self._parse(db, job, reply)
+                    if parsed is None and await self._answer_clarification(db, job, reply):
+                        return {"job_id": job.id, "status": job.status, "clarification": True}
                 if parsed is None:
                     await self._needs_human(db, job, f"invalid JSON after one retry: {error}", raw=reply)
                     return {"job_id": job.id, "status": job.status, "error": error}
@@ -628,6 +687,7 @@ class ManagerArenaRuntime:
             else:
                 job.status = "waiting_connection"
                 job.error = exc.message
+                self._refund_attempt(job)
                 await db.commit()
                 await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
             return {"job_id": job.id, "status": job.status, "error": exc.code}
@@ -637,6 +697,7 @@ class ManagerArenaRuntime:
             else:
                 job.status = "waiting_connection"
                 job.error = f"{exc.code}: {exc.message}"[:500]
+                self._refund_attempt(job)
                 await db.commit()
                 await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
             return {"job_id": job.id, "status": job.status, "error": exc.code}
@@ -692,6 +753,11 @@ class ManagerArenaRuntime:
             reason = f"project changed to {job.project_id}"
         elif limit and session.exchange_count >= limit:
             reason = f"{session.exchange_count} exchanges reached ARENA_MANAGER_MAX_EXCHANGES={limit}"
+        team_ids = [m["id"] for m in await self._team(db, job.project_id)]
+        if reason is None and session is not None and not _context_matches_team(session, team_ids):
+            # The manager learned its team once, when the session started. A changed team (a worker added,
+            # enabled or removed, or the project's team edited) must reach it, or it plans for the old team.
+            reason = "the team changed since the manager's context was sent"
         if session is not None and reason is None:
             if session.phase == "needs_human":  # a human resolved the page (the bridge says connected again)
                 session.phase = "manager_ready"
@@ -715,7 +781,7 @@ class ManagerArenaRuntime:
         prs = [{"number": t["pr_number"], "title": t["title"], "status": t["status"], "url": t["pr_url"]} for t in open_tasks if t["pr_url"]]
         context = build_manager_context_prompt(project, await self._team(db, job.project_id), open_tasks, prs)
         reply = await self._exchange(db, session, job, context, kind="context")
-        append_event(session, "context_sent", f"{len(context)} chars", reply_chars=len(reply))
+        append_event(session, "context_sent", f"{len(context)} chars", reply_chars=len(reply), team=team_ids)
         await db.commit()
         return session
 
@@ -880,6 +946,17 @@ class ManagerArenaRuntime:
             discrepancies=(material or {}).get("mechanical_discrepancies"),
         )
 
+    async def _answer_clarification(self, db: AsyncSession, job: ManagerJob, reply: str) -> bool:
+        """A plan job answered with a clarifying question: show it to the owner, create nothing, finish the job."""
+        if job.kind != "plan":
+            return False
+        question = clarification_question(extract_manager_json(reply))
+        if question is None:
+            return False
+        await self._finish(db, job, result={"clarification": True}, raw=reply)
+        await self._reply(db, job, question, clarification=True)
+        return True
+
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
         data = extract_manager_json(reply)
         if job.kind == "plan":
@@ -944,7 +1021,8 @@ class ManagerArenaRuntime:
                               failed=True, plan_errors=errors)
             return
         warnings = plan_warnings(plan["tasks"])
-        reasons = plan_draft_reasons(plan["tasks"], job.request_text or "", bool(plan.get("ambiguous")))
+        reasons = plan_draft_reasons(plan["tasks"], job.request_text or "", bool(plan.get("ambiguous")),
+                                     auto_approve=get_settings().ARENA_MANAGER_AUTO_APPROVE_PLANS)
         if reasons:
             await self._make_draft(db, job, plan, raw=raw, warnings=warnings, reasons=reasons)
             return
@@ -976,6 +1054,42 @@ class ManagerArenaRuntime:
                                  warnings: list[str]) -> list[Task]:
         from app.orchestration.scheduler import task_scheduler
 
+        async with self._create_lock():
+            existing = await self.tasks_for_request(db, job)
+            if existing:
+                # Idempotent retry: this request already produced its tasks. Never create or dispatch them twice.
+                if job.status != "done":
+                    await self._finish(db, job, result={**(job.result or {}), "task_ids": [t.id for t in existing],
+                                                        "summary_ar": plan.get("summary_ar", ""), "warnings": warnings,
+                                                        "idempotent_retry": True}, raw=raw)
+                return existing
+            tasks = await self._insert_plan_tasks(db, job, plan)
+        await self._finish(db, job, result={"task_ids": [t.id for t in tasks], "summary_ar": plan["summary_ar"],
+                                            "warnings": warnings}, raw=raw)
+        lines = [plan["summary_ar"], ""] + [f"- {t.title} ← {t.assigned_agent_id}" for t in tasks]
+        lines += [f"تحذير: {w}" for w in warnings]
+        await self._reply(db, job, "\n".join(lines), task_ids=[t.id for t in tasks], plan=plan, warnings=warnings)
+        for task in tasks:
+            await event_bus.emit("task.created", {"task_id": task.id, "source": "manager_arena"})
+        # Dispatch only this request's new tasks through the existing R3 flow; older queued tasks are left alone.
+        await task_scheduler.run_orchestration_cycle(db, only_task_ids={t.id for t in tasks})
+        return tasks
+
+    def _create_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._task_lock is None or self._task_lock[0] is not loop:
+            self._task_lock = (loop, asyncio.Lock())
+        return self._task_lock[1]
+
+    async def tasks_for_request(self, db: AsyncSession, job: ManagerJob) -> list[Task]:
+        """Tasks already created by this request (the manager job id is the request id), oldest first."""
+        rows = (await db.execute(
+            select(Task).where(Task.project_id == job.project_id).order_by(Task.created_at.asc())
+        )).scalars()
+        return [t for t in rows if any(isinstance(c, dict) and (c.get("request_id") or c.get("manager_job_id")) == job.id
+                                       for c in (t.checkpoints or []))]
+
+    async def _insert_plan_tasks(self, db: AsyncSession, job: ManagerJob, plan: dict[str, Any]) -> list[Task]:
         team = {m["id"]: m for m in await self._team(db, job.project_id)}
         tasks: list[Task] = []
         for item in plan["tasks"]:
@@ -985,7 +1099,7 @@ class ManagerArenaRuntime:
                 description=item["description"], priority="high", execution_mode="manual", status="queued",
                 assigned_agent_id=item["assignee"], dependencies=[], expected_deliverables=[],
                 checkpoints=[{"ts": _now().isoformat(), "event": "manager_plan", "manager_job_id": job.id,
-                              "acceptance_criteria": item["acceptance_criteria"]}],
+                              "request_id": job.id, "acceptance_criteria": item["acceptance_criteria"]}],
             ))
         db.add_all(tasks)
         await db.flush()
@@ -993,17 +1107,8 @@ class ManagerArenaRuntime:
             task.dependencies = [tasks[i].id for i in item["depends_on"]]
             db.add(AuditLog(actor=MANAGER_AGENT_ID, action="task.create", resource_type="task", resource_id=task.id,
                             details={"title": task.title, "assignee": task.assigned_agent_id, "source": "manager_arena_plan",
-                                     "manager_job_id": job.id}))
+                                     "manager_job_id": job.id, "request_id": job.id}))
         await db.commit()
-        await self._finish(db, job, result={"task_ids": [t.id for t in tasks], "summary_ar": plan["summary_ar"],
-                                            "warnings": warnings}, raw=raw)
-        lines = [plan["summary_ar"], ""] + [f"- {t.title} ← {t.assigned_agent_id}" for t in tasks]
-        lines += [f"تحذير: {w}" for w in warnings]
-        await self._reply(db, job, "\n".join(lines), task_ids=[t.id for t in tasks], plan=plan, warnings=warnings)
-        for task in tasks:
-            await event_bus.emit("task.created", {"task_id": task.id, "source": "manager_arena"})
-        # Dispatch to the workers' Arena sessions through the existing R3 flow.
-        await task_scheduler.run_orchestration_cycle(db)
         return tasks
 
     async def approve_draft(self, db: AsyncSession, job: ManagerJob) -> list[Task]:
@@ -1015,7 +1120,23 @@ class ManagerArenaRuntime:
         missing = sorted({t["assignee"] for t in plan["tasks"]} - team_ids)
         if missing:
             raise ValueError(f"Assignees are no longer on the team: {', '.join(missing)}.")
-        return await self._create_plan_tasks(db, job, plan, raw=job.raw_reply, warnings=list((job.result or {}).get("warnings") or []))
+        # Claim the draft atomically so a double click or two tabs cannot approve the same request twice.
+        claimed = await db.execute(
+            update(ManagerJob).where(ManagerJob.id == job.id, ManagerJob.status == "draft").values(status="running")
+        )
+        await db.commit()
+        if claimed.rowcount != 1:
+            raise ValueError("Only a draft plan can be approved.")
+        await db.refresh(job)
+        try:
+            return await self._create_plan_tasks(db, job, plan, raw=job.raw_reply,
+                                                 warnings=list((job.result or {}).get("warnings") or []))
+        except Exception:
+            await db.rollback()
+            if not await self.tasks_for_request(db, job):
+                job.status = "draft"
+                await db.commit()
+            raise
 
     async def edit_draft(self, db: AsyncSession, job: ManagerJob, data: dict[str, Any]) -> ManagerJob:
         """Owner edited the draft: validate the new plan exactly like a model plan; it stays a draft."""

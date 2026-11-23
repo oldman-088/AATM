@@ -1,3 +1,6 @@
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.browser.arena_connector import MANAGER_PROFILE_ID, MANAGER_PROFILE_NAME
 from app.core.config import KNOWN_DEFAULT_PASSWORDS, get_settings, is_placeholder_password
 from app.core.security import hash_password, verify_password
@@ -21,8 +24,6 @@ from app.models import (
     User,
     Userscript,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # Demo rows: the placeholder browser profiles, the Arena account, the sample userscript, the sample
 # task plan, the greeting, the sample approval/notification/git record. Only written when
@@ -149,6 +150,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             status="ready",
             current_url="https://fastapi.tiangolo.com",
             page_title="FastAPI Documentation",
+            arena_mode="agent",
         ),
         BrowserProfile(
             id="profile-frontend-preview",
@@ -159,6 +161,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             status="ready",
             current_url="http://localhost:5173",
             page_title="AATM Dashboard Preview",
+            arena_mode="agent",
         ),
         BrowserProfile(
             id="profile-arena-session",
@@ -169,6 +172,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             status="ready",
             current_url="https://arena.ai",
             page_title="Arena AI Workspace",
+            arena_mode="agent",
         ),
         BrowserProfile(
             id="profile-qa-e2e",
@@ -179,6 +183,7 @@ async def seed_initial_data(db: AsyncSession) -> None:
             status="ready",
             current_url="https://github.com",
             page_title="GitHub PR Verification",
+            arena_mode="agent",
         ),
     ]
     # R7: manager-0 drives its own Arena Agent session through its own Chrome profile ("manager"),
@@ -208,6 +213,9 @@ async def seed_initial_data(db: AsyncSession) -> None:
                 status="ready",
                 current_url="https://arena.ai",
                 page_title=f"Worker {n} Arena Session",
+                # Workers run in Arena Agent mode like the manager; the model default ("chat") left
+                # workers 5-8 reporting "offline" forever because the page never started monitoring.
+                arena_mode="agent",
             )
         )
     for bp in profiles:

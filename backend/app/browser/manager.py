@@ -9,6 +9,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import psutil
+from fastapi import HTTPException
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Re-exported: tests and callers patch/import these through ``app.browser.manager``, and the
 # BrowserManager methods below resolve them via this module's globals.
@@ -32,9 +35,6 @@ from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.models import AuditLog, BrowserProfile, BrowserSession
-from fastapi import HTTPException
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
