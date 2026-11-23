@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { AlertTriangle, BookOpen, ExternalLink, FileDiff, GitBranch, KeyRound, ListChecks, Play, PlayCircle, Plus, RefreshCw, Send, Workflow } from 'lucide-react'
+import { AlertTriangle, BookOpen, Check, ExternalLink, FileDiff, GitBranch, KeyRound, ListChecks, PencilLine, Play, PlayCircle, Plus, RefreshCw, Send, Workflow, X } from 'lucide-react'
 import { Badge, Button, Card } from '../components/ui'
 import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
@@ -168,6 +168,172 @@ export function ArenaLiveDiff({ sessionId, branch, frames }: { sessionId: string
   </div>
 }
 
+// ----------------------------------------------------------------------------- E28 plan draft decision
+
+/** The plan draft a manager message carries (written by ManagerArenaRuntime._make_draft), if any. */
+function draftFromMessage(message: any): { jobId: string; plan: any } | null {
+  const meta = message?.metadata || message?.metadata_json || {}
+  const jobId = meta.manager_job_id
+  const plan = meta.plan || (meta.draft && meta.draft.tasks ? meta.draft : null)
+  if (!jobId || !plan || !Array.isArray(plan.tasks)) return null
+  return { jobId, plan }
+}
+
+type DecisionReason = 'forbidden' | 'conflict' | 'validation' | 'failed'
+
+/**
+ * E28: the owner's decision on a manager plan draft — Approve / Edit / Reject.
+ *
+ * The buttons are shown only while the job is still a draft (`job_status: 'draft'`), because
+ * `POST /arena/manager/jobs/{id}/draft/approve` and `../draft/reject` answer 409 for anything
+ * else. A 403 (the three endpoints require the admin role) and a 409 are explained in words
+ * instead of a bare HTTP code, and `onUpdated` lets the caller refresh its list without a
+ * full page reload. Layout uses logical properties so AR/FA (RTL) mirror correctly.
+ */
+export function ManagerDraftPanel({ message, onUpdated }: { message: any; onUpdated: () => void }) {
+  const { t } = useI18n()
+  const d = t.arenaAgent.draft
+  const draft = draftFromMessage(message)
+  const meta = message?.metadata || message?.metadata_json || {}
+  const [plan, setPlan] = useState<any>(draft?.plan ?? null)
+  const [editing, setEditing] = useState(false)
+  const [json, setJson] = useState('')
+  const [busy, setBusy] = useState<'' | 'approve' | 'save' | 'reject'>('')
+  const [error, setError] = useState<{ reason: DecisionReason; text: string } | null>(null)
+  const [done, setDone] = useState<'' | 'approve' | 'save' | 'reject'>('')
+  const [decision, setDecision] = useState<{ text: string } | null>(null)
+
+  useEffect(() => {
+    setPlan(draft?.plan ?? null)
+    setEditing(false)
+    setBusy('')
+    setError(null)
+    setDone('')
+    setDecision(null)
+  }, [message?.id])
+
+  if (!draft) return null
+
+  const jobId = draft.jobId
+  // Approve/Reject end the decision; a successful edit keeps the draft so it can still be approved.
+  const decidable = done !== 'approve' && done !== 'reject' && meta.job_status === 'draft'
+  const reasons: string[] = Array.isArray(meta.draft_reasons) ? meta.draft_reasons : []
+  const warnings: string[] = Array.isArray(meta.warnings) ? meta.warnings : []
+  const base = `/arena/manager/jobs/${encodeURIComponent(jobId)}/draft`
+
+  const reasonFor = (err: any): DecisionReason => {
+    if (err?.status === 403) return 'forbidden'
+    if (err?.status === 409) return 'conflict'
+    if (err?.status === 422) return 'validation'
+    return 'failed'
+  }
+
+  const decide = async (kind: 'approve' | 'reject' | 'save', run: () => Promise<any>) => {
+    setBusy(kind); setError(null); setDone('')
+    try {
+      await run()
+      setDone(kind)
+      setEditing(false)
+      onUpdated()
+    } catch (err: any) {
+      const reason = reasonFor(err)
+      const text = reason === 'forbidden' ? t.common.adminRequired
+        : reason === 'conflict' ? (err?.message ? `${t.common.draftConflict} (${err.message})` : t.common.draftConflict)
+        : reason === 'validation' ? (err?.message || d.invalidJson)
+        : (err?.message || t.enterprise.operationFailed)
+      setError({ reason, text })
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const approve = () => decide('approve', async () => {
+    const res = await apiFetch<any>(`${base}/approve`, { method: 'POST' })
+    setDecision({ text: `${d.approved} ${(res?.task_ids || []).join(', ')}`.trim() })
+    return res
+  })
+  const reject = () => decide('reject', async () => {
+    const res = await apiFetch<any>(`${base}/reject`, { method: 'POST' })
+    setDecision({ text: d.rejected })
+    return res
+  })
+  const save = () => decide('save', async () => {
+    let parsed: any
+    try {
+      parsed = JSON.parse(json)
+    } catch {
+      throw Object.assign(new Error(d.invalidJson), { status: 0 })
+    }
+    const res = await apiFetch<any>(base, { method: 'PUT', body: JSON.stringify(parsed) })
+    if (res?.draft) setPlan(res.draft)
+    setDecision({ text: d.saved })
+    return res
+  })
+
+  const startEdit = () => {
+    setJson(JSON.stringify({ summary_ar: plan?.summary_ar ?? '', tasks: plan?.tasks ?? [] }, null, 2))
+    setEditing(true); setError(null); setDone('')
+  }
+
+  return <div data-testid="manager-draft-panel" className="mt-2 space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-start"
+    role="group" aria-label={d.title}>
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <span className="text-sm font-semibold text-amber-200">{d.title}</span>
+      <Badge variant="warning">{d.taskCount}: {plan?.tasks?.length ?? 0}</Badge>
+    </div>
+    <p className="text-xs text-slate-300">{d.hint}</p>
+    {plan?.summary_ar && <p dir="auto" className="text-xs text-slate-200">{plan.summary_ar}</p>}
+    <ul data-testid="manager-draft-tasks" className="space-y-1">
+      {(plan?.tasks || []).map((task: any, index: number) => <li key={`${index}-${task?.title}`} className="rounded border border-slate-700 bg-slate-950/50 p-2 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="font-semibold text-white" dir="auto">{task?.title}</span>
+          <span className="text-slate-400" dir="ltr">{d.assignee}: {task?.assignee}</span>
+        </div>
+        {task?.description && <p className="mt-0.5 text-slate-400" dir="auto">{task.description}</p>}
+        {Array.isArray(task?.acceptance_criteria) && task.acceptance_criteria.length > 0 && <ul className="mt-1 list-inside list-disc text-slate-400">
+          {task.acceptance_criteria.map((item: string, i: number) => <li key={i} dir="auto">{item}</li>)}
+        </ul>}
+      </li>)}
+    </ul>
+    {reasons.length > 0 && <div data-testid="manager-draft-reasons" className="text-xs text-slate-400">
+      <div className="font-semibold text-slate-300">{d.reasons}</div>
+      <ul className="list-inside list-disc">{reasons.map((reason, i) => <li key={i} dir="auto">{reason}</li>)}</ul>
+    </div>}
+    {warnings.length > 0 && <div className="text-xs text-amber-200">
+      <div className="font-semibold">{d.warnings}</div>
+      <ul className="list-inside list-disc">{warnings.map((warning, i) => <li key={i} dir="auto">{warning}</li>)}</ul>
+    </div>}
+
+    {editing && <div className="space-y-2">
+      <textarea data-testid="manager-draft-editor" dir="ltr" aria-label={d.editorLabel} value={json}
+        onChange={(e) => setJson(e.target.value)}
+        className="h-56 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 font-mono text-xs text-slate-200" />
+      <div className="flex flex-wrap gap-1.5">
+        <Button size="sm" data-testid="manager-draft-save" aria-label={d.save} aria-busy={busy === 'save'} disabled={!!busy} onClick={save}>
+          <Check className="me-1 h-4 w-4" />{busy === 'save' ? d.working : d.save}
+        </Button>
+        <Button size="sm" variant="secondary" aria-label={d.cancelEdit} disabled={!!busy} onClick={() => setEditing(false)}>{d.cancelEdit}</Button>
+      </div>
+    </div>}
+
+    {decidable ? <div className="flex flex-wrap gap-1.5">
+      <Button size="sm" data-testid="manager-draft-approve" aria-label={d.approve} aria-busy={busy === 'approve'} disabled={!!busy || editing} onClick={approve}>
+        <Check className="me-1 h-4 w-4" />{d.approve}
+      </Button>
+      <Button size="sm" variant="secondary" data-testid="manager-draft-edit" aria-label={d.edit} aria-expanded={editing} disabled={!!busy} onClick={startEdit}>
+        <PencilLine className="me-1 h-4 w-4" />{d.edit}
+      </Button>
+      <Button size="sm" variant="danger" data-testid="manager-draft-reject" aria-label={d.reject} aria-busy={busy === 'reject'} disabled={!!busy} onClick={reject}>
+        <X className="me-1 h-4 w-4" />{d.reject}
+      </Button>
+    </div> : done !== 'approve' && done !== 'reject' && <p data-testid="manager-draft-decided" className="text-xs text-slate-400">{d.decided}</p>}
+
+    {busy && <p data-testid="manager-draft-busy" role="status" aria-live="polite" className="text-xs text-sky-200">{d.working}</p>}
+    {error && <p data-testid="manager-draft-error" data-reason={error.reason} role="alert" aria-live="assertive" className="text-xs text-rose-300">{error.text}</p>}
+    {decision && <p data-testid="manager-draft-status" role="status" aria-live="polite" className="text-xs text-emerald-300">{decision.text}</p>}
+  </div>
+}
+
 export function ArenaAgentDashboard() {
   const { t } = useI18n()
   const a = t.arenaAgent
@@ -179,12 +345,21 @@ export function ArenaAgentDashboard() {
   const [diffFor, setDiffFor] = useState<string | null>(null)
   const [choice, setChoice] = useState<Record<string, string>>({})
   const [frames, setFrames] = useState<any[]>([])
+  // E28: the newest manager message that carries a plan draft, so the owner can decide it here.
+  const [draftMessage, setDraftMessage] = useState<any>(null)
 
   const load = async () => {
     try {
       setData(await apiFetch<any>('/arena/agent/overview'))
       const tasks = await apiFetch<any>('/tasks?status=queued')
       setQueued(Array.isArray(tasks) ? tasks.filter((task: any) => (task.task_type || 'implementation') === 'implementation') : [])
+      // Fail open: the draft panel is one more panel, it must never blank the employee board.
+      const messages = await apiFetch<any[]>('/chat').catch(() => [])
+      const drafts = (Array.isArray(messages) ? messages : []).filter((m: any) => {
+        const meta = m?.metadata || m?.metadata_json || {}
+        return meta.manager_job_id && m?.sender_type !== 'user'
+      })
+      setDraftMessage(drafts.length ? drafts[drafts.length - 1] : null)
     } catch (err: any) { setError(err?.message || t.enterprise.operationFailed) }
   }
   useEffect(() => {
@@ -328,6 +503,7 @@ export function ArenaAgentDashboard() {
           {output.kind === 'script' && <><p className="text-xs text-amber-200">{t.arena.review} {t.arena.tokenOnce}</p>
             <textarea readOnly dir="ltr" aria-label={t.arena.review} className="h-40 w-full rounded-lg bg-slate-950 p-2 font-mono text-xs text-slate-200" value={output.value} /></>}
         </div>}
+        {draftMessage && <ManagerDraftPanel message={draftMessage} onUpdated={() => { void load() }} />}
       </div>
     })()}
 

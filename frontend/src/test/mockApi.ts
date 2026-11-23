@@ -10,6 +10,9 @@ export interface RecordedCall {
 
 export type RouteValue = any | ((path: string, init: RequestInit) => any)
 
+/** A fixture that must fail like FastAPI: `{ __error: { status: 403, detail: ... } }` → a non-ok response. */
+export type ErrorRouteValue = { __error: { status: number; detail?: any } }
+
 /**
  * Minimal API-ish fixtures that mirror the FastAPI payload shapes consumed by App.tsx / views.
  * Any endpoint not listed still resolves to `{}` so the shell never crashes on unmounted panels.
@@ -339,6 +342,10 @@ function jsonResponse(data: any, ok = true, status = 200) {
   return { ok, status, json: async () => data }
 }
 
+function isErrorReply(value: any): value is { __error: { status: number; detail?: any } } {
+  return !!value && typeof value === 'object' && value.__error && typeof value.__error.status === 'number'
+}
+
 /**
  * Installs a URL-routing fetch mock. Returns every call recorded so tests can assert on
  * endpoint + method + JWT header (used to prove mutations go through `apiFetch`).
@@ -364,6 +371,10 @@ export function installFetchMock(overrides: Record<string, RouteValue> = {}) {
     if (!key) return jsonResponse({})
     const value = routes[key]
     const data = typeof value === 'function' ? value(path, init) : value
+    if (isErrorReply(data)) {
+      const detail = data.__error.detail
+      return jsonResponse(typeof detail === 'string' ? { detail } : detail ?? {}, false, data.__error.status)
+    }
     return jsonResponse(data)
   })
 

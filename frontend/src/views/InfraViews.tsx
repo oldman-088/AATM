@@ -7,6 +7,20 @@ import { apiFetch } from '../lib/api'
 
 type WorkflowStep = { type: string; url?: string; selector?: string; value?: string; ms?: number }
 
+/**
+ * E28: a project must name the GitHub repository the team works in.
+ * Accepts `https://github.com/owner/name(.git)` and `git@github.com:owner/name(.git)`; anything
+ * else (a bare path, another host, a single segment) is rejected before the request is sent.
+ */
+export function isGitHubRepoUrl(value: string): boolean {
+  const raw = String(value || '').trim()
+  if (!raw || /\s/.test(raw)) return false
+  const match = raw.match(/^(?:https?:\/\/)?(?:www\.)?github\.com[/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/)
+    || raw.match(/^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/)
+  if (!match) return false
+  return !match[1].includes('..') && !match[2].includes('..')
+}
+
 export function VisualWorkflowBuilder({ browsers }: { browsers: any[] }) {
   const { t } = useI18n()
   const [profile, setProfile] = useState('')
@@ -790,6 +804,12 @@ export function ProjectsMemoryView({
 }) {
   const { t } = useI18n()
   const [projName, setProjName] = useState('')
+  const [projRepoUrl, setProjRepoUrl] = useState('')
+  const [formError, setFormError] = useState<{ reason: 'required' | 'invalid' | 'conflict' | 'failed'; text: string } | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [confirmDisable, setConfirmDisable] = useState<string | null>(null)
+  const [statusBusy, setStatusBusy] = useState('')
+  const [actionError, setActionError] = useState<{ projectId: string; reason: 'conflict' | 'failed'; text: string } | null>(null)
   const [memQuery, setMemQuery] = useState('')
   const [memTitle, setMemTitle] = useState('')
   const [memContent, setMemContent] = useState('')
@@ -797,13 +817,45 @@ export function ProjectsMemoryView({
 
   const createProject = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!projName.trim()) return
-    await apiFetch('/projects', {
-      method: 'POST',
-      body: JSON.stringify({ name: projName, description: 'Managed AATM project' }),
-    })
-    setProjName('')
-    onReload(memQuery)
+    // E28/E14: a project created without `repo_url` makes every task run in AATM's own repository,
+    // so the URL is required here and validated before anything is sent.
+    const name = projName.trim()
+    const repoUrl = projRepoUrl.trim()
+    if (!name || !repoUrl) {
+      setFormError({ reason: 'required', text: t.projects.repoUrlRequired })
+      return
+    }
+    if (!isGitHubRepoUrl(repoUrl)) {
+      setFormError({ reason: 'invalid', text: t.projects.repoUrlInvalid })
+      return
+    }
+    setCreating(true); setFormError(null)
+    try {
+      await apiFetch('/projects', {
+        method: 'POST',
+        body: JSON.stringify({ name, description: 'Managed AATM project', repo_url: repoUrl }),
+      })
+      setProjName(''); setProjRepoUrl('')
+      onReload(memQuery)
+    } catch (err: any) {
+      const conflict = err?.status === 409
+      setFormError({ reason: conflict ? 'conflict' : 'failed', text: err?.message || t.projects.createFailed })
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  /** PATCH the project status; the server refuses some changes with 409 and that is shown, not hidden. */
+  const setProjectStatus = async (project: any, status: 'active' | 'disabled') => {
+    setStatusBusy(project.id); setActionError(null); setConfirmDisable(null)
+    try {
+      await apiFetch(`/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify({ status }) })
+      onReload(memQuery)
+    } catch (err: any) {
+      setActionError({ projectId: project.id, reason: err?.status === 409 ? 'conflict' : 'failed', text: err?.message || t.projects.disableFailed })
+    } finally {
+      setStatusBusy('')
+    }
   }
 
   const addMemory = async (e: React.FormEvent) => {
@@ -832,24 +884,84 @@ export function ProjectsMemoryView({
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            {projects.length === 0 ? (
-              <EmptyState variant="empty" testId="projects-empty" />
-            ) : projects.map((p) => (
-              <Button
-                key={p.id}
-                size="sm"
-                variant={p.id === activeProjectId ? 'primary' : 'secondary'}
-                onClick={() => onSelectProject(p.id)}
-              >
-                {p.name}
-              </Button>
-            ))}
-          </div>
-          <form onSubmit={createProject} className="flex gap-2">
-            <Input value={projName} onChange={(e) => setProjName(e.target.value)} placeholder={t.projects.newProject} />
-            <Button type="submit">{t.common.create}</Button>
+          {projects.length === 0 ? (
+            <EmptyState variant="empty" testId="projects-empty" />
+          ) : <ul className="space-y-2">
+            {projects.map((p) => {
+              const isDefault = !!(p.config || {}).active
+              const disabled = p.status === 'disabled'
+              const rowError = actionError?.projectId === p.id ? actionError : null
+              return <li key={p.id} data-testid={`project-row-${p.id}`} className={`rounded-lg border p-2 ${disabled ? 'border-slate-800 bg-slate-950/40 opacity-80' : 'border-slate-700'}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Button
+                    size="sm"
+                    variant={p.id === activeProjectId ? 'primary' : 'secondary'}
+                    aria-pressed={p.id === activeProjectId}
+                    onClick={() => onSelectProject(p.id)}
+                  >
+                    {p.name}
+                  </Button>
+                  <span className="flex flex-wrap items-center gap-1">
+                    <span data-testid={`project-status-${p.id}`}>
+                      <Badge variant={disabled ? 'warning' : 'success'}>{disabled ? t.projects.disabledBadge : t.projects.activeBadge}</Badge>
+                    </span>
+                    {isDefault && <span data-testid={`project-default-${p.id}`}><Badge variant="info">{t.projects.defaultBadge}</Badge></span>}
+                  </span>
+                </div>
+                <div className="mt-1 truncate font-mono text-xs text-slate-400" dir="ltr">{p.repo_url || t.projects.repoUrlRequired}</div>
+                {disabled && <p className="mt-1 text-xs text-amber-200">{t.projects.disabledNotice}</p>}
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {disabled ? (
+                    <Button size="sm" variant="secondary" disabled={statusBusy === p.id}
+                      aria-label={`${t.projects.enable} ${p.name}`} onClick={() => setProjectStatus(p, 'active')}>
+                      <Play className="me-1 h-4 w-4" />{t.projects.enable}
+                    </Button>
+                  ) : isDefault ? (
+                    <span className="text-xs text-slate-500">{t.projects.defaultCannotDisable}</span>
+                  ) : (
+                    <Button size="sm" variant="danger" disabled={statusBusy === p.id}
+                      aria-label={`${t.projects.disable} ${p.name}`} onClick={() => setConfirmDisable(p.id)}>
+                      <Square className="me-1 h-4 w-4" />{t.projects.disable}
+                    </Button>
+                  )}
+                </div>
+                {confirmDisable === p.id && <div data-testid="project-disable-confirm" role="alertdialog" aria-label={t.projects.disableConfirmTitle}
+                  className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-2 text-start text-xs text-rose-100">
+                  <p className="font-semibold">{t.projects.disableConfirmTitle}</p>
+                  <p className="mt-1 text-slate-300">{t.projects.disableConfirmBody}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Button size="sm" variant="danger" data-testid="project-disable-confirm-yes" disabled={statusBusy === p.id}
+                      aria-label={`${t.projects.disableConfirmYes} ${p.name}`} onClick={() => setProjectStatus(p, 'disabled')}>
+                      {t.projects.disableConfirmYes}
+                    </Button>
+                    <Button size="sm" variant="secondary" data-testid="project-disable-confirm-cancel"
+                      aria-label={t.projects.disableConfirmCancel} onClick={() => setConfirmDisable(null)}>
+                      {t.projects.disableConfirmCancel}
+                    </Button>
+                  </div>
+                </div>}
+                {rowError && <p data-testid="project-action-error" data-reason={rowError.reason} role="alert"
+                  aria-live="assertive" className="mt-1 text-xs text-rose-300">{rowError.text}</p>}
+              </li>
+            })}
+          </ul>}
+          <form onSubmit={createProject} className="space-y-2">
+            <div className="space-y-1">
+              <label htmlFor="project-name" className="text-xs text-slate-400">{t.projects.nameLabel}</label>
+              <Input id="project-name" aria-label={t.projects.nameLabel} value={projName}
+                onChange={(e) => setProjName(e.target.value)} placeholder={t.projects.namePlaceholder} />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="project-repo-url" className="text-xs text-slate-400">{t.projects.repoUrlLabel}</label>
+              <Input id="project-repo-url" aria-label={t.projects.repoUrlLabel} value={projRepoUrl} dir="ltr" aria-required="true"
+                onChange={(e) => { setProjRepoUrl(e.target.value); setFormError(null) }}
+                placeholder={t.projects.repoUrlPlaceholder} />
+              <p className="text-xs text-slate-500">{t.projects.repoUrlHint}</p>
+            </div>
+            <Button type="submit" disabled={creating}>{t.common.create}</Button>
           </form>
+          {formError && <p data-testid="project-form-error" data-reason={formError.reason} role="alert" aria-live="assertive"
+            className="text-xs text-rose-300">{formError.text}</p>}
         </Card>
 
         <Card>

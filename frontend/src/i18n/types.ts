@@ -84,6 +84,11 @@ export interface Translations {
     errorTitle: string
     errorHint: string
     retry: string
+    close: string
+    /** Shown when the API answers 403: the action needs the admin role. */
+    adminRequired: string
+    /** Shown when the API answers 409: the record changed or is gone; reload before retrying. */
+    draftConflict: string
   }
   dashboard: {
     title: string
@@ -204,6 +209,27 @@ export interface Translations {
     scopeOrganization: string
     scopeDecision: string
     scopeGlobal: string
+    /** E28: the create-project form must send a GitHub repository URL, not just a name. */
+    nameLabel: string
+    namePlaceholder: string
+    repoUrlLabel: string
+    repoUrlPlaceholder: string
+    repoUrlHint: string
+    repoUrlRequired: string
+    repoUrlInvalid: string
+    createFailed: string
+    disable: string
+    enable: string
+    disabledBadge: string
+    activeBadge: string
+    defaultBadge: string
+    defaultCannotDisable: string
+    disableConfirmTitle: string
+    disableConfirmBody: string
+    disableConfirmYes: string
+    disableConfirmCancel: string
+    disableFailed: string
+    disabledNotice: string
   }
   git: {
     title: string
@@ -519,6 +545,27 @@ export interface Translations {
       selectorPassed: string
       selectorNotRun: string
       activities: Record<string, string>
+    }
+    /** E28: the plan draft the manager writes when it needs the owner's decision. */
+    draft: {
+      title: string
+      hint: string
+      approve: string
+      edit: string
+      reject: string
+      save: string
+      cancelEdit: string
+      editorLabel: string
+      taskCount: string
+      reasons: string
+      warnings: string
+      invalidJson: string
+      approved: string
+      saved: string
+      rejected: string
+      working: string
+      decided: string
+      assignee: string
     }
     states: Record<string, string>
     phases: Record<string, string>
