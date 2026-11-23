@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -37,7 +38,7 @@ from app.models import (
     Task,
 )
 from app.orchestration.arena_prompts import (
-    MANAGER_JSON_RETRY_DETAIL,
+    MANAGER_JSON_RETRY,
     build_manager_chat_prompt,
     build_manager_context_prompt,
     build_manager_plan_prompt,
@@ -129,6 +130,30 @@ MAX_JOB_ATTEMPTS = 3
 # E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
 MAX_ATTEMPT_REFUNDS = 12
 MAX_STATUS_QUESTION_CHARS = 200  # a long brief that mentions "status" is a goal, not a question
+# E37: a busy manager window is a transient state, not a failed attempt. Wait for it to become idle
+# (configurable timeout) before submitting; only real attempts count and get a backoff.
+BUSY_WAIT_TIMEOUT_SECONDS = 300.0
+BUSY_POLL_SECONDS = 2.0
+REAL_RETRY_BACKOFF_SECONDS = 2.0
+# E23: a review prompt never carries the whole diff; it carries a per-file summary plus risky hunks only.
+REVIEW_FILES_PER_PART = 40
+REVIEW_PROMPT_MAX_CHARS = 16_000
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """A positive float from the environment (AATM_MANAGER_BUSY_WAIT_SECONDS, ...), else ``default``."""
+    try:
+        value = float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _waiting_for_manager_text(kind: str) -> str:
+    """What the owner sees while the manager's Arena window is busy (E37)."""
+    if kind == "review":
+        return "المراجعة تنتظر المدير — نافذة Arena مشغولة الآن، وستُرسل تلقائيًا عند خلوّها."
+    return "بانتظار المدير — نافذة Arena مشغولة الآن، وسيُرسل الطلب تلقائيًا عند خلوّها."
 
 _STATUS_RE = re.compile(
     r"(وين\s*وصلت|وين\s*صرتو|شو\s*صار|إلى\s*أين\s*وصل|الى\s*اين\s*وصل|ما\s*(?:هو\s*)?(?:الوضع|وضع)|حالة\s*المشروع|آخر\s*المستجدات|"
@@ -311,6 +336,77 @@ def clarification_question(data: Any) -> str | None:
     return question.strip()
 
 
+def _json_retry_prompt(kind: str) -> str:
+    """The second chance for a reply without JSON: the retry carries an empty JSON template to fill (E33)."""
+    template = ('{"verdict": "", "summary_ar": "", "comments": []}' if kind == "review"
+                else '{"summary_ar": "", "tasks": []}')
+    return (MANAGER_JSON_RETRY + "\n\nFill in this exact template (replace the empty values) and reply with only "
+            "the JSON block:\n```json\n" + template + "\n```")
+
+
+_VERDICT_FIELD_RE = re.compile(
+    r"""["']?verdict["']?\s*[:=]\s*["']?(approve|approved|request_changes|request changes|changes_requested)["']?""",
+    re.IGNORECASE,
+)
+_SUMMARY_FIELD_RE = re.compile(r"""["']?summary_ar["']?\s*[:=]\s*["'](.+?)["']\s*$""", re.MULTILINE)
+_REQUEST_MARKERS = (
+    "request_changes", "request changes", "changes_requested", "changes requested", "disapprove",
+    "cannot approve", "can't approve", "not approved", "do not approve",
+    "تعديلات مطلوبة", "أطلب تعديلات", "اطلب تعديلات", "أرجو تعديل", "يحتاج تعديل", "لا أوافق", "غير موافق",
+    "مرفوض", "أرفض", "لا أنصح بالدمج",
+)
+_APPROVE_MARKERS = ("approve", "approved", "approval", "lgtm", "موافق", "أوافق", "معتمد", "اعتماد", "أنصح بالدمج")
+
+
+def review_verdict_from_text(text: str) -> dict[str, Any] | None:
+    """E33: the manager answered a review in prose. Extract its verdict and reasons from the text.
+
+    Called only after ``extract_manager_json`` found nothing (and after the JSON-template retry). This never
+    invents a verdict: when the text names neither approval nor requested changes, it returns ``None`` and
+    the job still goes to a human.
+    """
+    body = (text or "").strip()
+    if not body:
+        return None
+    lowered = body.lower()
+    verdict: str | None = None
+    match = _VERDICT_FIELD_RE.search(body)
+    if match:
+        verdict = "approve" if match.group(1).lower().startswith("approve") else "request_changes"
+    elif any(marker in lowered for marker in _REQUEST_MARKERS):
+        verdict = "request_changes"
+    elif any(marker in lowered for marker in _APPROVE_MARKERS):
+        verdict = "approve"
+    if verdict is None:
+        return None
+    summary_match = _SUMMARY_FIELD_RE.search(body)
+    summary = summary_match.group(1).strip() if summary_match else body
+    comments: list[str] = []
+    if verdict == "request_changes":
+        for raw in body.splitlines():
+            line = raw.strip().lstrip("*-•").strip()
+            if line and not line.startswith(("```", "{", "}")) and (len(line) > 20 or line[:1].isdigit()):
+                comments.append(line[:2_000])
+        comments = comments[:30] or [body[:2_000]]
+    return {"verdict": verdict, "summary_ar": summary[:5_000], "comments": comments}
+
+
+def _combine_review_verdicts(verdicts: list[dict[str, Any]]) -> dict[str, Any]:
+    """One verdict from the manager's verdicts on the parts of a large review (no verdict is invented)."""
+    comments: list[str] = []
+    summaries: list[str] = []
+    for verdict in verdicts:
+        comments += list(verdict.get("comments") or [])
+        summary = str(verdict.get("summary_ar") or "").strip()
+        if summary and summary not in summaries:
+            summaries.append(summary)
+    return {
+        "verdict": "request_changes" if any(v.get("verdict") == "request_changes" for v in verdicts) else "approve",
+        "summary_ar": "\n".join(summaries)[:5_000],
+        "comments": comments[:30],
+    }
+
+
 def plan_draft_reasons(tasks: list[dict[str, Any]], goal: str, ambiguous: bool, *, auto_approve: bool = False) -> list[str]:
     """Why this plan needs the owner's approval before its tasks are created (empty: create directly).
 
@@ -404,6 +500,12 @@ class ManagerArenaRuntime:
         self.stall_minutes = float(STALL_MINUTES)
         # Grace period after a submit during which the old reply is not mistaken for the new one.
         self.start_grace_seconds = 20.0
+        # E37: how long a busy manager window may keep a job waiting, and the pause between real attempts.
+        self.busy_wait_seconds = _env_seconds("AATM_MANAGER_BUSY_WAIT_SECONDS", BUSY_WAIT_TIMEOUT_SECONDS)
+        self.busy_poll_seconds = BUSY_POLL_SECONDS
+        self.retry_backoff_seconds = _env_seconds("AATM_MANAGER_RETRY_BACKOFF_SECONDS", REAL_RETRY_BACKOFF_SECONDS)
+        self._backoff_until: dict[str, float] = {}
+        self._review_prompt_parts: dict[str, list[str]] = {}
         self._lock: tuple[Any, asyncio.Lock] | None = None
         self._task_lock: tuple[Any, asyncio.Lock] | None = None
         self._drain_task: asyncio.Task | None = None
@@ -690,6 +792,10 @@ class ManagerArenaRuntime:
             await self._finish(db, job, status="failed",
                                error=f"stopped after {job.attempts} attempts to avoid an endless loop")
             return {"job_id": job.id, "status": job.status}
+        # E37: back off between real attempts only. A busy window never reaches this counter.
+        delay = self._backoff_until.pop(job.id, 0.0) - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
         job.status = "running"
         job.attempts += 1
         job.started_at = _now()
@@ -721,18 +827,32 @@ class ManagerArenaRuntime:
             reply = await self._exchange(db, session, job, prompt, resume=resume)
             if job.kind in {"plan", "review"}:
                 parsed, error = await self._parse(db, job, reply)
-                if parsed is None and await self._answer_clarification(db, job, reply):
-                    return {"job_id": job.id, "status": job.status, "clarification": True}
+                if parsed is None and await self._answer_empty_tasks(db, job, reply):
+                    return {"job_id": job.id, "status": job.status, "empty_tasks": True}
                 if parsed is None:
                     job.json_retries += 1
                     await db.commit()
-                    reply = await self._exchange(db, session, job, MANAGER_JSON_RETRY_DETAIL)
+                    # E33: the retry carries an empty JSON template, so the manager sees the exact shape.
+                    reply = await self._exchange(db, session, job, _json_retry_prompt(job.kind))
                     parsed, error = await self._parse(db, job, reply)
-                    if parsed is None and await self._answer_clarification(db, job, reply):
-                        return {"job_id": job.id, "status": job.status, "clarification": True}
+                    if parsed is None and await self._answer_empty_tasks(db, job, reply):
+                        return {"job_id": job.id, "status": job.status, "empty_tasks": True}
+                    if parsed is None and job.kind == "review":
+                        # E33: still no JSON: read the verdict and the reasons from the manager's prose.
+                        prose = review_verdict_from_text(reply)
+                        if prose is not None:
+                            parsed, error = validate_manager_review(prose)
                 if parsed is None:
                     await self._needs_human(db, job, f"invalid JSON after one retry: {error}", raw=reply)
                     return {"job_id": job.id, "status": job.status, "error": error}
+                if job.kind == "review":
+                    # E23: a large review is split into parts; combine the manager's own verdicts.
+                    parts = self._review_prompt_parts.get(job.id) or []
+                    if len(parts) > 1:
+                        combined = await self._review_remaining_parts(db, session, job, parsed, parts[1:])
+                        if combined is None:
+                            return {"job_id": job.id, "status": job.status}
+                        parsed = combined
                 await self._apply(db, job, parsed, raw=reply)
             else:
                 await self._finish(db, job, result={"chars": len(reply)}, raw=reply)
@@ -741,26 +861,59 @@ class ManagerArenaRuntime:
         except ManagerArenaError as exc:
             if exc.code in {"stalled", "needs_human"}:
                 await self._needs_human(db, job, exc.message, raw=None)
+            elif exc.code == "busy_timeout":
+                await self._requeue_waiting_for_manager(db, job)
             else:
+                self._backoff_until[job.id] = time.monotonic() + self._backoff_seconds(job)
                 job.status = "waiting_connection"
                 job.error = exc.message
-                self._refund_attempt(job)
                 await db.commit()
                 await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
             return {"job_id": job.id, "status": job.status, "error": exc.code}
         except ArenaAgentError as exc:
-            if exc.code == "needs_human":
+            if exc.code == "busy":
+                await self._requeue_waiting_for_manager(db, job)
+            elif exc.code == "needs_human":
                 await self._needs_human(db, job, f"Arena page needs a human: {exc.message}", raw=None)
             else:
+                self._backoff_until[job.id] = time.monotonic() + self._backoff_seconds(job)
                 job.status = "waiting_connection"
                 job.error = f"{exc.code}: {exc.message}"[:500]
-                self._refund_attempt(job)
                 await db.commit()
                 await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
             return {"job_id": job.id, "status": job.status, "error": exc.code}
         finally:
             await self._set_manager_status(db, "idle")
             await db.commit()
+
+    def _backoff_seconds(self, job: ManagerJob) -> float:
+        """Pause before the next real attempt (E37); busy waits are free and never reach this."""
+        return min(60.0, self.retry_backoff_seconds * max(1, job.attempts))
+
+    async def _requeue_waiting_for_manager(self, db: AsyncSession, job: ManagerJob) -> None:
+        """E37: the window is still busy. Put the job back in the queue without spending an attempt."""
+        job.attempts = max(0, job.attempts - 1)  # a busy window is not an attempt
+        job.status = "queued"
+        self._backoff_until[job.id] = time.monotonic() + self.busy_poll_seconds  # no hot loop on a long busy wait
+        await db.commit()
+        await self._show_waiting_for_manager(db, job)
+
+    async def _review_remaining_parts(self, db: AsyncSession, session: ArenaSession, job: ManagerJob,
+                                      first: dict[str, Any], prompts: list[str]) -> dict[str, Any] | None:
+        """E23: review the other parts of a large diff and combine the manager's verdicts on all of them."""
+        verdicts = [first]
+        for offset, prompt in enumerate(prompts, start=2):
+            reply = await self._exchange(db, session, job, prompt, kind="review")
+            parsed, error = validate_manager_review(extract_manager_json(reply))
+            if parsed is None:
+                prose = review_verdict_from_text(reply)
+                if prose is not None:
+                    parsed, error = validate_manager_review(prose)
+            if parsed is None:
+                await self._needs_human(db, job, f"review part {offset} had no verdict: {error}", raw=reply)
+                return None
+            verdicts.append(parsed)
+        return _combine_review_verdicts(verdicts)
 
     # ------------------------------------------------------------------ restart
     async def recover_after_restart(self, db: AsyncSession) -> int:
@@ -837,31 +990,87 @@ class ManagerArenaRuntime:
         open_tasks = await self._open_tasks(db, job.project_id)
         prs = [{"number": t["pr_number"], "title": t["title"], "status": t["status"], "url": t["pr_url"]} for t in open_tasks if t["pr_url"]]
         context = build_manager_context_prompt(project, await self._team(db, job.project_id), open_tasks, prs)
-        reply = await self._exchange(db, session, job, context, kind="context")
+        try:
+            reply = await self._exchange(db, session, job, context, kind="context")
+        except ManagerArenaError:
+            # The context never reached the page (for example a busy timeout): do not keep a session that
+            # believes it has a context it never saw; the next attempt starts a fresh one.
+            await close_session(db, session, phase="closed", reason="context was not sent")
+            raise
         append_event(session, "context_sent", f"{len(context)} chars", reply_chars=len(reply), team=team_ids)
         await db.commit()
         return session
+
+    async def _show_waiting_for_manager(self, db: AsyncSession, job: ManagerJob) -> None:
+        """E37: replace the failure look with «the review is waiting for the manager»."""
+        text = _waiting_for_manager_text(job.kind)
+        first_time = (job.error or "") != text
+        job.error = text
+        await db.commit()
+        if first_time and job.kind == "review":  # a review has no chat reply: tell the owner explicitly
+            db.add(Notification(category="manager", severity="info", title="المراجعة تنتظر المدير",
+                                message=text, link="/approvals"))
+            await db.commit()
+        await self._reply(db, job, text, pending=True, waiting_for_manager=True)
+        await event_bus.emit("manager.activity", {**(_job_dict(job) or {}), "waiting_for_manager": True})
+
+    async def _submit_when_idle(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str) -> dict[str, Any]:
+        """E37: wait for a busy manager window to become idle, then submit once.
+
+        A busy window is transient: the job waits here (up to ``busy_wait_seconds``) and no attempt is
+        spent. A submit that still answers ``busy`` is retried inside the same wait. Returns the page state
+        right before the successful submit.
+        """
+        from app.providers.adapters.arena_agent import ArenaAgentError
+
+        deadline = time.monotonic() + self.busy_wait_seconds
+        waiting = False
+        while True:
+            state = await self.adapter.state(session.profile_id)
+            current = str(state.get("agent_state") or ("offline" if not state.get("connected") else "")) or "offline"
+            if state.get("status") == "needs_human" or current == "needs_human":
+                raise ManagerArenaError(
+                    "needs_human", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
+            if current != "generating":  # only a generating page refuses a submit with "busy"
+                try:
+                    await self.adapter.submit(session.profile_id, text, source="manager")
+                    return state
+                except ArenaAgentError as exc:
+                    if exc.code != "busy":
+                        raise
+            if not waiting:
+                waiting = True
+                await self._show_waiting_for_manager(db, job)
+            if time.monotonic() >= deadline:
+                raise ManagerArenaError("busy_timeout", "the manager's Arena window is still busy")
+            await asyncio.sleep(self.busy_poll_seconds)
 
     async def _exchange(self, db: AsyncSession, session: ArenaSession, job: ManagerJob, text: str, *, kind: str | None = None,
                         resume: bool = False) -> str:
         """Submit one prompt (shared submit path), follow the page until it is quiet, read the reply."""
         from app.providers.adapters.arena_agent import TOOL_LIMIT_CONTINUE, ArenaAgentError, keep_working_allowed
 
-        before = await self.adapter.state(session.profile_id)
-        before_since = str(before.get("agent_state_since") or "")
-        before_state = str(before.get("agent_state") or "")
+        before: dict[str, Any] = {}
+        before_since = ""
+        before_state = ""
+        if resume:  # after a restart the prompt may already be on the page: then only the reply is awaited
+            before = await self.adapter.state(session.profile_id)
+            before_since = str(before.get("agent_state_since") or "")
+            before_state = str(before.get("agent_state") or "")
         expects_json = kind != "context" and job.kind in {"plan", "review"}
         pressed_on: str | None = None
-        if not resume:  # after a restart the prompt may already be on the page: then only the reply is awaited
+        if not resume:
             mark = (await self.adapter.transcript_mark(session.profile_id)).get("mark")
             append_event(session, "submit_started", mark, job_id=job.id, exchange=kind or job.kind)
             await db.commit()
             try:
-                await self.adapter.submit(session.profile_id, text, source="manager")
+                before = await self._submit_when_idle(db, session, job, text)
             except ArenaAgentError as exc:
                 append_event(session, "submit_failed", f"{exc.code}: {exc.message}", job_id=job.id)
                 await db.commit()
                 raise
+            before_since = str(before.get("agent_state_since") or "")
+            before_state = str(before.get("agent_state") or "")
             session.exchange_count += 1
             session.submitted_at = _now()
             session.last_state_change_at = session.submitted_at
@@ -980,38 +1189,58 @@ class ManagerArenaRuntime:
             prompt = build_manager_plan_prompt(job.request_text, project, team, await self._open_tasks(db, job.project_id))
             return prompt + "\n" + "\n".join(PLANNING_RULES)
         if job.kind == "review":
-            return await self._review_prompt(db, job, project, team)
+            prompts = await self._review_prompts(db, job, project, team)
+            return prompts[0] if prompts else None
         return None
 
-    async def _review_prompt(self, db: AsyncSession, job: ManagerJob, project: Project | None, team: list[dict[str, Any]]) -> str | None:
+    async def _review_prompts(self, db: AsyncSession, job: ManagerJob, project: Project | None,
+                              team: list[dict[str, Any]]) -> list[str]:
+        """E23: the review prompt as one or more parts; each part stays under the strict size cap."""
         from app.orchestration.arena_runner import arena_runner
 
         review = await db.get(Task, job.review_task_id) if job.review_task_id else None
         parent = await db.get(Task, review.parent_task_id) if review and review.parent_task_id else None
         if review is None or parent is None:
-            return None
+            return []
         material = await arena_runner.review_material(db, parent)
-        files = material.get("changed_files", []) if material else []
         session = await session_for_task(db, parent.id)
         changes = await arena_runner._compare(project, session) if session is not None else {"ok": False}
-        diff = "\n".join(f"--- {f['filename']}\n{f.get('patch', '')}" for f in changes.get("files", [])) if changes.get("ok") else ""
+        files = list(changes.get("files", [])) if changes.get("ok") else []
+        diff = "\n".join(f"--- {f['filename']}\n{f.get('patch', '')}" for f in files)
+        parts = max(1, -(-len(files) // REVIEW_FILES_PER_PART)) if files else 1
+        prompts = [
+            build_manager_review_prompt(
+                parent, acceptance=task_acceptance_criteria(parent, project),
+                report=(session.report if session else "") or "", diff=diff, pr_url=parent.pr_url,
+                round_number=parent.review_round, project=project, team=team,
+                discrepancies=(material or {}).get("mechanical_discrepancies"),
+                files=files, part=index, parts=parts, max_chars=REVIEW_PROMPT_MAX_CHARS,
+            )
+            for index in range(parts)
+        ]
+        self._review_prompt_parts[job.id] = prompts
         job.context = {**(job.context or {}), "parent_task_id": parent.id, "pr_url": parent.pr_url,
-                       "changed_files": [f["filename"] for f in files][:100], "diff_chars": len(diff)}
-        return build_manager_review_prompt(
-            parent, acceptance=task_acceptance_criteria(parent, project), report=(session.report if session else "") or "",
-            diff=diff, pr_url=parent.pr_url, round_number=parent.review_round, project=project, team=team,
-            discrepancies=(material or {}).get("mechanical_discrepancies"),
-        )
+                       "changed_files": [f["filename"] for f in files][:100], "diff_chars": len(diff),
+                       "review_parts": len(prompts), "prompt_chars": sum(len(p) for p in prompts)}
+        return prompts
 
-    async def _answer_clarification(self, db: AsyncSession, job: ManagerJob, reply: str) -> bool:
-        """A plan job answered with a clarifying question: show it to the owner, create nothing, finish the job."""
+    async def _answer_empty_tasks(self, db: AsyncSession, job: ManagerJob, reply: str) -> bool:
+        """E26: ``tasks: []`` is the manager's own answer (a refusal or a clarifying question), not broken JSON.
+
+        Show ``summary_ar`` to the owner exactly as written, create nothing and finish the job. A human is
+        asked only when the reply has neither tasks nor a summary.
+        """
         if job.kind != "plan":
             return False
-        question = clarification_question(extract_manager_json(reply))
-        if question is None:
+        data = extract_manager_json(reply)
+        if not isinstance(data, dict) or data.get("tasks") != []:
             return False
-        await self._finish(db, job, result={"clarification": True}, raw=reply)
-        await self._reply(db, job, question, clarification=True)
+        summary = data.get("summary_ar")
+        if not isinstance(summary, str) or not summary.strip():
+            return False
+        ambiguous = data.get("ambiguous") is True
+        await self._finish(db, job, result={"empty_tasks": True, "clarification": ambiguous}, raw=reply)
+        await self._reply(db, job, summary.strip(), clarification=ambiguous, empty_tasks=True)
         return True
 
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
@@ -1027,6 +1256,8 @@ class ManagerArenaRuntime:
     # ------------------------------------------------------------------ outcomes
     async def _finish(self, db: AsyncSession, job: ManagerJob, *, status: str = "done", result: dict[str, Any] | None = None,
                       raw: str | None = None, error: str | None = None) -> None:
+        self._backoff_until.pop(job.id, None)
+        self._review_prompt_parts.pop(job.id, None)
         job.status = status
         job.result = {**(job.result or {}), **(result or {})}
         if raw is not None:

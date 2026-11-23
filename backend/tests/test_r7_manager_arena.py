@@ -60,13 +60,14 @@ from app.orchestration.arena_prompts import (
 from app.orchestration.manager_arena import (
     MANAGER_PROVIDER_SETTING,
     NOT_CONNECTED_AR,
+    REVIEW_PROMPT_MAX_CHARS,
     ManagerArenaRuntime,
     classify_owner_message,
     manager_arena_runtime,
     manager_provider_mode,
     manager_readiness,
 )
-from app.providers.adapters.arena_agent import ArenaAgentAdapter
+from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError
 
 
 def _mock_mode(arena_settings, monkeypatch, bridge) -> None:
@@ -290,6 +291,9 @@ class ScriptedManagerPage(ArenaAgentAdapter):
         self.page = "ready"
         self.since = 0
         self.busy_ticks = 0
+        self.pre_busy_ticks = 0
+        self.busy_submits = 0
+        self.submit_error: Exception | None = None
         self.kw_rounds = 0
         self.stuck = False
         self.commands: list[tuple[str, str | None]] = []
@@ -301,6 +305,10 @@ class ScriptedManagerPage(ArenaAgentAdapter):
         self.page, self.since = page, self.since + 1
 
     async def state(self, profile_id: str) -> dict[str, Any]:
+        if self.pre_busy_ticks > 0:
+            self.pre_busy_ticks -= 1
+            return {"ok": True, "connected": True, "mode": "agent", "status": "ready", "agent_state": "generating",
+                    "agent_state_since": str(self.since)}
         if self.page == "generating" and not self.stuck:
             if self.busy_ticks > 0:
                 self.busy_ticks -= 1
@@ -315,6 +323,11 @@ class ScriptedManagerPage(ArenaAgentAdapter):
             self._move("ready")
             return {"ok": True}
         if command == "submit":
+            if self.submit_error is not None:
+                raise self.submit_error
+            if self.busy_submits > 0:
+                self.busy_submits -= 1
+                raise ArenaAgentError("busy", "the agent is still generating")
             marker = re.search(r"\[AATM-MANAGER:([A-Z]+)\]", text or "")
             kind = marker.group(1) if marker else ("RETRY" if (text or "").startswith(MANAGER_JSON_RETRY) else "CHAT")
             self.last_kind = kind
@@ -352,6 +365,8 @@ async def scripted(env, arena_settings, monkeypatch):
         runtime = ManagerArenaRuntime(page, session_factory=env)
         runtime.poll_seconds = 0
         runtime.start_grace_seconds = 0
+        runtime.busy_poll_seconds = 0.01
+        runtime.retry_backoff_seconds = 0
         return page, runtime
 
     async with env() as db:
@@ -378,7 +393,9 @@ async def test_invalid_json_gets_one_retry_then_needs_human_with_the_raw_reply(e
     job = next(j for j in await _jobs(env) if j.kind == "plan")
     assert job.status == "needs_human" and job.json_retries == 1
     assert job.raw_reply == "Still prose, sorry." and "invalid JSON" in job.error
-    assert page.submitted("PLAN") and page.submitted().count(MANAGER_JSON_RETRY_DETAIL) == 1
+    assert page.submitted("PLAN") and sum(1 for t in page.submitted() if t.startswith(MANAGER_JSON_RETRY)) == 1
+    retry = next(t for t in page.submitted() if t.startswith(MANAGER_JSON_RETRY))
+    assert '"summary_ar": ""' in retry and '"tasks": []' in retry, "the retry carries an empty JSON template (E33)"
     async with env() as db:
         assert len(list((await db.execute(select(Task))).scalars())) == before, "no plan may be invented"
         message = await db.get(ChatMessage, job.reply_message_id)
@@ -909,3 +926,261 @@ async def test_manager_gets_a_new_session_and_context_when_the_team_changes(env,
     await runtime.wait_idle()
     contexts = [t for t in page.submitted() if "[AATM-MANAGER:CONTEXT]" in t]
     assert len(contexts) == 2 and "worker-2" in contexts[1] and "worker-3" in contexts[1]
+
+
+# =========================================================================== E37 / E33 / E23 / E26
+async def test_busy_manager_waits_for_idle_without_spending_an_attempt(env, scripted):
+    """E37: two jobs meet a busy window, it becomes idle, both finish with one attempt each and no needs_human."""
+    make, project_id = scripted
+    page, runtime = make({"*": ["تم."]})
+    page.busy_submits = 2  # the context submit and the first prompt both meet a busy window
+    runtime.busy_wait_seconds = 1.0
+    async with env() as db:
+        await runtime.handle_owner_message(db, project_id, "سؤال أول؟")
+        await runtime.handle_owner_message(db, project_id, "سؤال ثانٍ؟")
+    await runtime.wait_idle()
+    jobs = await _jobs(env)
+    assert [j.status for j in jobs] == ["done", "done"], [(j.status, j.error) for j in jobs]
+    assert [j.attempts for j in jobs] == [1, 1], "a busy window must not spend an attempt"
+    assert not any(j.status == "needs_human" for j in jobs)
+    async with env() as db:
+        messages = list((await db.execute(select(ChatMessage).where(ChatMessage.sender_id == "manager-0"))).scalars())
+    assert any((m.metadata_json or {}).get("waiting_for_manager") is True for m in messages), \
+        "the owner is told that the manager is busy instead of seeing a failure"
+
+
+async def test_real_failure_still_stops_after_three_attempts(env, scripted):
+    """E37: MAX_JOB_ATTEMPTS stays 3 for a real (non-busy) failure."""
+    make, project_id = scripted
+    page, runtime = make({"*": ["تم."]})
+    page.submit_error = ArenaAgentError("offline", "the page went away")
+    runtime.retry_backoff_seconds = 0
+    async with env() as db:
+        job = await runtime.enqueue(db, "chat", project_id=project_id, text="مرحبا")
+        job_id = job.id
+        for _ in range(3):
+            await runtime._run_job(db, job)
+        job = await db.get(ManagerJob, job_id)
+        assert job.attempts == 3 and job.status == "waiting_connection"
+        result = await runtime._run_job(db, job)
+    assert result["status"] == "failed" and "stopped after 3 attempts" in job.error
+
+
+def test_waiting_for_manager_text_names_the_review():
+    from app.orchestration.manager_arena import _waiting_for_manager_text
+
+    assert "المراجعة تنتظر المدير" in _waiting_for_manager_text("review")
+    assert "بانتظار" in _waiting_for_manager_text("chat")
+
+
+def test_review_prose_verdict_is_extracted_without_inventing_one():
+    from app.orchestration.manager_arena import review_verdict_from_text
+
+    approve = review_verdict_from_text("The change looks correct. I approve it; the tests cover the new path.")
+    assert approve and approve["verdict"] == "approve"
+    changes = review_verdict_from_text("Verdict: request_changes\n- The auth check is missing on /login.")
+    assert changes and changes["verdict"] == "request_changes"
+    assert any("auth" in c for c in changes["comments"])
+    assert review_verdict_from_text("Here is a summary of the files.") is None
+    assert review_verdict_from_text("") is None
+
+
+async def test_review_without_json_retries_with_a_template_then_reads_the_prose_verdict(env, scripted, monkeypatch):
+    """E33: no JSON -> retry with an empty JSON template -> still no JSON -> verdict from the prose."""
+    from app.orchestration import arena_runner as arena_runner_module
+    from app.orchestration import review as review_module
+    from app.orchestration import scheduler as scheduler_module
+    from app.runtime import code_stream as code_stream_module
+
+    make, project_id = scripted
+    page, runtime = make({
+        "REVIEW": ["I cannot approve this PR: the login check is missing."],
+        "RETRY": ["Verdict: request_changes. Add the missing auth token check before approving."],
+    })
+
+    async def material(db, parent):
+        return {"changed_files": [{"filename": "app/auth.py", "status": "modified", "additions": 10, "deletions": 2}],
+                "mechanical_discrepancies": []}
+
+    async def compare(project, session):
+        return {"ok": True, "files": [{"filename": "app/auth.py", "status": "modified", "additions": 10, "deletions": 2,
+                                       "patch": "+def login():\n+    check_token(token)\n"}]}
+
+    submitted: list[dict[str, Any]] = []
+
+    async def submit_review(db, review, manager, *, event, body):
+        submitted.append({"event": event, "body": body})
+        return {"follow_up_task_id": None, "merge_approval_id": None, "event": event}
+
+    async def complete_task(db, task, *, summary, target_status):
+        task.status = target_status
+
+    async def publish(frame):
+        return None
+
+    monkeypatch.setattr(arena_runner_module.arena_runner, "review_material", material)
+    monkeypatch.setattr(arena_runner_module.arena_runner, "_compare", compare)
+    monkeypatch.setattr(review_module.review_service, "submit_review", submit_review)
+    monkeypatch.setattr(scheduler_module.task_scheduler, "complete_task", complete_task)
+    monkeypatch.setattr(code_stream_module.code_stream, "publish", publish)
+
+    async with env() as db:
+        parent = Task(project_id=project_id, title="Add login", status="pr_open", task_type="implementation",
+                      assigned_agent_id="worker-1", pr_url="https://github.com/acme/demo/pull/7", pr_number=7)
+        db.add(parent)
+        await db.flush()
+        review = Task(project_id=project_id, title="Review login", status="in_progress", task_type="review",
+                      assigned_agent_id="manager-0", parent_task_id=parent.id)
+        db.add(review)
+        db.add(ArenaSession(kind="worker", agent_id="worker-1", profile_id="worker-1", task_id=parent.id,
+                            project_id=project_id, phase="awaiting_approval", page_state="idle",
+                            report="## AATM REPORT\nImplementation summary: done.", is_open=True))
+        await db.commit()
+        job = await runtime.enqueue(db, "review", project_id=project_id, review_task_id=review.id)
+        job_id = job.id
+    async with env() as db:
+        job = await db.get(ManagerJob, job_id)
+        result = await runtime._run_job(db, job)
+        job = await db.get(ManagerJob, job_id)
+        review = await db.get(Task, review.id)
+    assert result["status"] == "done" and job.status == "done", (job.status, job.error)
+    assert job.json_retries == 1
+    assert job.result["verdict"]["verdict"] == "request_changes"
+    assert review.status == "completed"
+    assert submitted and submitted[0]["event"] == "REQUEST_CHANGES"
+    retry = next(t for t in page.submitted() if t.startswith(MANAGER_JSON_RETRY))
+    assert '"verdict": ""' in retry and '"comments": []' in retry, "the retry carries an empty JSON template"
+    async with env() as db:
+        assert not list((await db.execute(select(ChatMessage).where(
+            ChatMessage.content.contains("تعذّر على المدير")))).scalars())
+
+
+async def test_empty_tasks_reply_shows_summary_ar_to_the_owner(env, scripted):
+    """E26: tasks=[] (a refusal, with or without ambiguous) is the manager's answer, not an error."""
+    make, project_id = scripted
+    summary = "أعتذر، هذا الطلب خارج نطاق العمل الحالي ولن أنشئ له أي مهام."
+    reply_json = '```json\n{"summary_ar": "%s", "tasks": []}\n```' % summary
+    page, runtime = make({"PLAN": [reply_json], "RETRY": ["must never be asked"]})
+    async with env() as db:
+        before = len(list((await db.execute(select(Task))).scalars()))
+        await runtime.handle_owner_message(db, project_id, "اكتب لي تقريرًا عن الطقس غدًا")
+    await runtime.wait_idle()
+    job = next(j for j in await _jobs(env) if j.kind == "plan")
+    assert job.status == "done" and job.error is None and job.json_retries == 0
+    assert (job.result or {}).get("empty_tasks") is True
+    assert sum(1 for t in page.submitted() if t.startswith(MANAGER_JSON_RETRY)) == 0, "no retry for an empty-tasks reply"
+    async with env() as db:
+        message = await db.get(ChatMessage, job.reply_message_id)
+        assert len(list((await db.execute(select(Task))).scalars())) == before, "no task is created"
+        assert not list((await db.execute(select(ChatMessage).where(
+            ChatMessage.content.contains("تعذّر على المدير")))).scalars())
+    assert message.content == summary, "the owner sees summary_ar exactly as the manager wrote it"
+
+
+def _large_pr_files() -> list[dict[str, Any]]:
+    files = [{"filename": f"src/module_{i}.py", "status": "modified", "additions": 250, "deletions": 10,
+              "patch": "\n".join(f"+value_{j} = compute({j})" for j in range(250))} for i in range(17)]
+    files += [
+        {"filename": "backend/app/api/auth.py", "status": "modified", "additions": 40, "deletions": 2,
+         "patch": "+def login(user):\n+    check_token(TOKEN)\n+    return session(user)\n" + "+pass\n" * 37},
+        {"filename": "backend/alembic/versions/0001_init.py", "status": "added", "additions": 30, "deletions": 0,
+         "patch": "+def upgrade():\n+    op.create_table('users')\n" + "+pass\n" * 28},
+        {"filename": "backend/app/old_module.py", "status": "removed", "additions": 0, "deletions": 20,
+         "patch": "-def old():\n-    pass\n" + "-pass\n" * 18},
+    ]
+    return files
+
+
+def test_large_pr_review_prompt_is_summarized_capped_and_includes_risky_parts():
+    """E23: 20 files and +4000 lines -> under the cap, every file in the summary, risky hunks included."""
+    project = Project(name="Demo", slug="demo", repo_url="https://github.com/acme/demo", default_branch="main")
+    team = [{"id": "worker-1", "name": "Backend", "specialty": "FastAPI", "skills": ["python"]}]
+    task = Task(id="t-big", title="Add login", description="login + migration", assigned_agent_id="worker-1")
+    files = _large_pr_files()
+    assert len(files) == 20 and sum(f["additions"] for f in files) > 4000
+    diff = "\n".join(f"--- {f['filename']}\n{f['patch']}" for f in files)
+    prompt = build_manager_review_prompt(task, acceptance=["login works"], report="## AATM REPORT", diff=diff,
+                                         pr_url="https://github.com/acme/demo/pull/7", round_number=1,
+                                         project=project, team=team, files=files)
+    assert len(prompt) <= REVIEW_PROMPT_MAX_CHARS, len(prompt)
+    for item in files:
+        assert item["filename"] in prompt, item["filename"]
+    assert "check_token(TOKEN)" in prompt, "the auth hunk is included"
+    assert "create_table('users')" in prompt, "the migration hunk is included"
+    assert "def old():" in prompt, "the deleted file is included"
+    assert "DIFF TRUNCATED" in prompt, "the full diff is not sent"
+
+
+def test_docs_only_pr_skips_the_line_by_line_review():
+    project = Project(name="Demo", slug="demo", repo_url="https://github.com/acme/demo", default_branch="main")
+    team = [{"id": "worker-1", "name": "Backend", "specialty": "FastAPI", "skills": []}]
+    task = Task(id="t-docs", title="Update docs", description="docs", assigned_agent_id="worker-1")
+    files = [
+        {"filename": "docs/guide.md", "status": "modified", "additions": 40, "deletions": 2,
+         "patch": "+# Guide\n+Use the new endpoint.\n" + "+line\n" * 38},
+        {"filename": "README.md", "status": "modified", "additions": 10, "deletions": 0,
+         "patch": "+# Readme\n+line\n" * 5},
+    ]
+    diff = "\n".join(f"--- {f['filename']}\n{f['patch']}" for f in files)
+    prompt = build_manager_review_prompt(task, acceptance=["docs updated"], report="## AATM REPORT", diff=diff,
+                                         pr_url="https://github.com/acme/demo/pull/8", round_number=1,
+                                         project=project, team=team, files=files)
+    assert "Documentation-only change" in prompt
+    assert "Use the new endpoint" not in prompt, "a docs-only change is not reviewed line by line"
+    for item in files:
+        assert item["filename"] in prompt
+
+
+async def test_busy_timeout_never_counts_as_an_attempt(env, scripted):
+    """E37: when the window stays busy past the timeout the job goes back to the queue with attempts intact."""
+    make, project_id = scripted
+    page, runtime = make({"*": ["تم."]})
+    page.busy_submits = 10_000
+    runtime.busy_wait_seconds = 0.05
+    runtime.busy_poll_seconds = 0.01
+    async with env() as db:
+        job = await runtime.enqueue(db, "chat", project_id=project_id, text="مرحبا")
+        job_id = job.id
+        result = await runtime._run_job(db, job)
+        job = await db.get(ManagerJob, job_id)
+    assert result["status"] == "queued" and job.status == "queued"
+    assert job.attempts == 0, "a busy window must not spend an attempt"
+    assert "بانتظار المدير" in (job.error or "")
+    assert all(j.status != "needs_human" for j in await _jobs(env))
+
+
+def test_a_review_over_the_part_limit_is_split_and_every_file_is_still_covered():
+    project = Project(name="Demo", slug="demo", repo_url="https://github.com/acme/demo", default_branch="main")
+    team = [{"id": "worker-1", "name": "Backend", "specialty": "FastAPI", "skills": []}]
+    task = Task(id="t-parts", title="Many files", description="many", assigned_agent_id="worker-1")
+    files = [{"filename": f"src/part_file_{i}.py", "status": "modified", "additions": 5, "deletions": 1,
+              "patch": f"+value_{i} = {i}\n"} for i in range(45)]
+    diff = "\n".join(f"--- {f['filename']}\n{f['patch']}" for f in files)
+    prompts = [build_manager_review_prompt(task, acceptance=["all files"], report="## AATM REPORT", diff=diff,
+                                           pr_url="https://github.com/acme/demo/pull/9", round_number=1,
+                                           project=project, team=team, files=files, part=index, parts=2)
+               for index in range(2)]
+    assert len(prompts) == 2 and all(len(p) <= REVIEW_PROMPT_MAX_CHARS for p in prompts)
+    assert "review part 1 of 2" in prompts[0] and "review part 2 of 2" in prompts[1]
+    combined = "\n".join(prompts)
+    for item in files:
+        assert item["filename"] in combined, item["filename"]
+
+
+async def test_a_generating_window_is_awaited_before_the_prompt_is_sent(env, scripted):
+    """E37: the page is still generating when the job starts; the prompt waits for idle instead of failing."""
+    make, project_id = scripted
+    page, runtime = make({"*": ["تم."]})
+    async with env() as db:  # create the manager session first, so no new_session consumes the busy ticks
+        await runtime.handle_owner_message(db, project_id, "مرحبا؟")
+    await runtime.wait_idle()
+    page.pre_busy_ticks = 2
+    runtime.busy_wait_seconds = 1.0
+    async with env() as db:
+        await runtime.handle_owner_message(db, project_id, "سؤال؟")
+    await runtime.wait_idle()
+    job = (await _jobs(env))[-1]
+    assert job.status == "done" and job.attempts == 1 and job.error is None
+    async with env() as db:
+        messages = list((await db.execute(select(ChatMessage).where(ChatMessage.sender_id == "manager-0"))).scalars())
+    assert any((m.metadata_json or {}).get("waiting_for_manager") is True for m in messages)
