@@ -10,7 +10,7 @@
  * Only the client lives here — screen implementations belong to their
  * own pages/components in later waves.
  */
-import { apiFetch } from '../lib/api'
+import { ApiError, apiFetch } from '../lib/api'
 import type {
   AgentRecord,
   ApprovalRequest,
@@ -31,14 +31,7 @@ import type {
   ReportRecord,
 } from './types'
 
-export class ApiError extends Error {
-  status: number
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
+export { ApiError }
 
 function errorFromResponse(status: number, message: string): ApiError {
   return new ApiError(message, status)
