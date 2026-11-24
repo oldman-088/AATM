@@ -662,14 +662,16 @@ html.bridge-mounted body {
   left: 24px;
   right: 24px;
   bottom: 18px;
-  height: 178px;
+  height: 212px;
   z-index: 40;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
   gap: 0;
-  border: 1px solid rgba(167, 139, 250, 0.5);
-  background: linear-gradient(180deg, rgba(20, 10, 40, 0.88), rgba(6, 6, 18, 0.95));
-  clip-path: polygon(40px 0, 100% 0, 100% calc(100% - 0px), 0 100%, 0 40px);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 12px;
+  background: rgba(10, 14, 28, 0.97);
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
   box-shadow: 0 -10px 40px rgba(2, 3, 10, 0.8), 0 0 30px rgba(167, 139, 250, 0.18);
 }
 
@@ -783,6 +785,14 @@ html.bridge-mounted body {
   border: 1px solid rgba(34, 211, 238, 0.55);
   background: rgba(34, 211, 238, 0.08);
   color: #a5f3fc;
+}
+
+.bridge-console__form .bridge-btn {
+  flex: 0 0 auto;
+  width: auto;
+  height: 44px;
+  padding: 0 14px;
+  white-space: nowrap;
 }
 
 .bridge-btn--danger {
