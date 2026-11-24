@@ -459,7 +459,7 @@ function AATMWorkspace() {
 
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-100">
-      <aside className="hidden w-64 shrink-0 flex-col border-e border-slate-800 bg-slate-900/70 p-4 md:flex">
+      <aside className="hidden w-64 shrink-0 flex-col border-e border-slate-800 bg-slate-900/80 p-4 md:flex md:sticky md:top-0 md:h-screen">
         <div className="mb-6 flex items-center gap-2.5">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-600 font-bold text-white">AA</div>
           <div>
@@ -468,10 +468,10 @@ function AATMWorkspace() {
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1">
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto pe-1">
           <button
             onClick={() => setTab('bridge')}
-            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition ${
+            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
               tab === 'bridge'
                 ? 'bg-cyan-500/20 font-medium text-cyan-300'
                 : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
@@ -491,7 +491,7 @@ function AATMWorkspace() {
             <button
               key={item.id}
               onClick={() => setTab(item.id)}
-              className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition ${
+              className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                 tab === item.id
                   ? 'bg-sky-600/20 font-medium text-sky-400'
                   : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
