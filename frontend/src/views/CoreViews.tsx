@@ -268,6 +268,27 @@ export function ManagerChatView({
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
 
+  const clearChat = async () => {
+    if (!window.confirm(t.bridge.clearChatConfirm)) return
+    setSendError(null)
+    try {
+      await apiFetch('/chat', { method: 'DELETE' })
+      onReload()
+    } catch (error: any) {
+      setSendError(error?.message || t.chat.projectRequired)
+    }
+  }
+
+  const startNewConversation = async () => {
+    setSendError(null)
+    try {
+      await apiFetch('/arena/manager/new-session', { method: 'POST', body: JSON.stringify({}) })
+      onReload()
+    } catch (error: any) {
+      setSendError(error?.message || t.chat.projectRequired)
+    }
+  }
+
   const sendDirective = async (msgText: string) => {
     if (!msgText.trim()) return
     if (!projectId && (projects?.length ?? 0) > 1) {
@@ -323,6 +344,12 @@ export function ManagerChatView({
           </Button>
           <Button size="sm" variant="secondary" onClick={() => sendDirective('merge main branch release')}>
             {t.chat.quickProtectedMerge}
+          </Button>
+          <Button size="sm" variant="secondary" disabled={sending} data-testid="manager-new-conversation" onClick={startNewConversation}>
+            {t.bridge.newConversation}
+          </Button>
+          <Button size="sm" variant="danger" disabled={sending} data-testid="manager-clear-chat" onClick={clearChat}>
+            {t.bridge.clearChat}
           </Button>
         </div>
       </div>
