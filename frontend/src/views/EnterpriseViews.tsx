@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { FolderCode, Laptop, Mail, Play, Plus, RefreshCw, ShieldAlert, Terminal, UserPlus, Wrench } from 'lucide-react'
-import { Badge, Button, Card, Input, Select } from '../components/ui'
+import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 
@@ -167,8 +167,8 @@ export function EmployeeCreatorAndOrgPanel({
       <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 text-xs">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex items-center gap-1.5">
-            <input
-              className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 font-semibold text-white"
+            <Input
+              className="min-w-0 flex-1 bg-slate-900 px-2 py-1 font-semibold text-white"
               value={nameDrafts[ag.id] ?? ag.name}
               onChange={(e) => setNameDrafts((d) => ({ ...d, [ag.id]: e.target.value }))}
               maxLength={120}
@@ -387,11 +387,11 @@ export function WorkspacesView({ agents }: { agents: any[] }) {
           <h3 className="text-sm font-semibold text-slate-200">{t.enterprise.workspaceFileTitle}</h3>
           <form onSubmit={writeFile} className="space-y-2">
             <Input value={filePath} onChange={(e) => setFilePath(e.target.value)} placeholder={t.enterprise.filePathPlaceholder} />
-            <textarea
+            <Textarea
               value={fileContent}
               onChange={(e) => setFileContent(e.target.value)}
               rows={5}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950/70 p-3 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
+              className="font-mono text-xs"
             />
             <div className="flex gap-2">
               <Button type="submit">{t.enterprise.saveFile}</Button>
