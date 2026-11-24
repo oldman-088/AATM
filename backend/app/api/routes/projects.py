@@ -140,6 +140,11 @@ async def update_project(
         cfg["worktree_mode"] = body.worktree_mode
     if body.auto_pr is not None:
         cfg["auto_pr"] = body.auto_pr
+    if body.auto_merge is not None:
+        if cfg.get("auto_merge") is not body.auto_merge:
+            db.add(AuditLog(actor=user.email, action="project.auto_merge", resource_type="project", resource_id=proj.id,
+                            details={"auto_merge": body.auto_merge}))
+        cfg["auto_merge"] = body.auto_merge
     if body.team is not None:
         team = list(dict.fromkeys(body.team))
         known = set((await db.execute(select(Agent.id).where(Agent.role == "worker", Agent.id.in_(team)))).scalars())

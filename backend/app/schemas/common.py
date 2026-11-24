@@ -59,6 +59,8 @@ class ProjectUpdate(BaseModel):
     active: bool | None = None
     worktree_mode: bool | None = None
     auto_pr: bool | None = None
+    # P2 M6: merge an approved PR automatically once CI on its head is green and it has no conflict.
+    auto_merge: bool | None = None
     # Worker ids the manager may plan for ([] = every enabled worker).
     team: list[str] | None = Field(default=None, max_length=50)
     test_command: str | None = Field(default=None, max_length=500)
