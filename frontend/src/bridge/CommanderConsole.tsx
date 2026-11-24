@@ -13,6 +13,8 @@ type CommanderConsoleProps = {
   onSubmitDirective: (content: string) => Promise<void> | void
   onDecideApproval: (approvalId: string, decision: 'approved' | 'rejected') => Promise<void> | void
   onEmergencyStop: () => Promise<void> | void
+  onClearChat?: () => Promise<void> | void
+  onNewConversation?: () => Promise<void> | void
   anyEmergencyStopped: boolean
   banner?: React.ReactNode
   mobile?: boolean
@@ -35,6 +37,8 @@ export function CommanderConsole({
   onSubmitDirective,
   onDecideApproval,
   onEmergencyStop,
+  onClearChat,
+  onNewConversation,
   anyEmergencyStopped,
   banner,
   mobile = false,
@@ -60,6 +64,20 @@ export function CommanderConsole({
     <div className={`bridge-console${mobile ? ' bridge-console--mobile' : ''}`} data-testid="bridge-console">
       <div className="bridge-console__chat">
         {banner}
+        {(onClearChat || onNewConversation) && (
+          <div className="bridge-console__toolbar" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            {onNewConversation && (
+              <button type="button" className="bridge-send" onClick={() => onNewConversation()} disabled={sending} data-testid="manager-new-conversation">
+                {t.bridge.newConversation}
+              </button>
+            )}
+            {onClearChat && (
+              <button type="button" className="bridge-send" onClick={() => onClearChat()} disabled={sending} data-testid="manager-clear-chat">
+                {t.bridge.clearChat}
+              </button>
+            )}
+          </div>
+        )}
         <div className="bridge-console__messages" role="log" aria-live="polite" data-testid="bridge-chat">
           {chats.length === 0 && <div style={{ color: 'var(--dim)' }}>{t.bridge.chatEmpty}</div>}
           {chats.slice(-40).map((message) => {
