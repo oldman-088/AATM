@@ -498,3 +498,24 @@ def test_third_party_notice_has_the_complete_mit_license_and_attribution():
         'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR',
     ):
         assert clause in notice
+
+
+@needs_chromium
+async def test_missing_composer_on_a_hidden_window_says_page_hidden(harness):
+    """E51: a minimised window that draws no composer is reported as page_hidden, not composer_not_found."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        browser = await _browser(pw)
+        try:
+            pid, script = await harness.setup_profile("worker-1")
+            page = await _open(browser, script, f"{harness.bridge.base}/mock-arena/agent/")
+            await harness.wait_state(pid, "ready")
+            await page.evaluate("document.getElementById('composer-box').remove()")
+            r = await harness.cmd(pid, "submit", "nothing to type into")
+            assert r.json()["detail"]["code"] == "composer_not_found"
+            await page.evaluate("Object.defineProperty(document, 'visibilityState', {get: () => 'hidden'})")
+            r = await harness.cmd(pid, "submit", "nothing to type into")
+            assert r.json()["detail"]["code"] == "page_hidden"
+        finally:
+            await browser.close()

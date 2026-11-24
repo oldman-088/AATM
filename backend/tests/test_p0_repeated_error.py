@@ -48,3 +48,19 @@ async def test_a_different_error_restarts_the_count(env, scripted):
         await runtime._connection_error(db, job, "bridge_unreachable", "y")
         assert job.context["same_error_count"] == 1 and job.context["last_error_code"] == "bridge_unreachable"
         assert await _alerts(db) == []
+
+
+async def test_hidden_manager_window_is_named_at_once(env, scripted):
+    """E51: a minimised manager window gets its own message and one alert on the first error."""
+    from app.orchestration.manager_arena import PAGE_HIDDEN_AR
+
+    make, project_id = scripted
+    _, runtime = make()
+    async with env() as db:
+        job = await runtime.enqueue(db, "chat", project_id=project_id, text="hello", chat_message_id=None)
+        await runtime._connection_error(db, job, "page_hidden", "page_hidden: the Arena window is minimised")
+        reply = await db.get(ChatMessage, job.reply_message_id)
+        assert reply.content == PAGE_HIDDEN_AR and job.status == "waiting_connection"
+        await runtime._connection_error(db, job, "page_hidden", "page_hidden: the Arena window is minimised")
+        rows = (await db.execute(select(Notification).where(Notification.title == "نافذة المدير مخفية"))).scalars().all()
+        assert len(rows) == 1

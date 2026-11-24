@@ -28,7 +28,7 @@ import httpx
 from app.core.config import get_settings
 from app.models import Agent, AIProvider, BrowserProfile
 
-SCRIPT_VERSION = "2.3.0"
+SCRIPT_VERSION = "2.3.1"
 ARENA_BROWSER_PROVIDER_ID = "arena-browser"
 ARENA_MODES = ("chat", "agent")
 # R7: the manager's own Arena profile (Chrome --user-data-dir=$HOME/.aatm-profiles/manager).
@@ -241,6 +241,14 @@ USERSCRIPT_BODY = r"""(function () {
   function textOf(el) { return ((el && (el.innerText || el.textContent)) || "").trim(); }
   function labelOf(el) {
     return ((el.getAttribute("aria-label") || "") + " " + (el.title || "") + " " + (el.getAttribute("data-testid") || "")).toLowerCase();
+  }
+
+  // E51: a minimised or hidden window may not draw the page, so its composer is missing for that reason.
+  function composerMissing(message) {
+    if (document.visibilityState === "hidden") {
+      return fail("page_hidden", "the Arena window is minimised or hidden, so the page is not drawn; show it on screen");
+    }
+    return fail("composer_not_found", message);
   }
 
   function isVisible(el) {
@@ -899,7 +907,7 @@ USERSCRIPT_BODY = r"""(function () {
     if (navigating) return { started: true, method: "button", navigating: true };
     await sleep(800);
     var input = await waitFor(function () { var i = findInput(); return i && !hasStopButton() && inputText(i).trim() === "" ? i : null; }, 20000);
-    if (!input) throw fail("composer_not_found", "the new session did not show a composer");
+    if (!input) throw composerMissing("the new session did not show a composer");
     evaluate(true);
     return { started: true, method: "button", navigating: false, ready: true };
   }
@@ -912,7 +920,7 @@ USERSCRIPT_BODY = r"""(function () {
     if (hasStopButton()) throw fail("busy", "the agent is still generating");
     if (!(await closeFeedbackPanel())) throw fail("feedback_not_closed", "the task feedback panel could not be closed");
     var input = findInput();
-    if (!input) throw fail("composer_not_found", "message composer not found (signed out or page changed)");
+    if (!input) throw composerMissing("message composer not found (signed out or page changed)");
     if (input.disabled || input.readOnly) throw fail("composer_busy", "the composer is disabled");
     if (args.repo) {  // nothing is typed or sent unless this chat is on the task's repository
       var selected = repoState(args.repo);
