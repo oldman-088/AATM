@@ -21,9 +21,11 @@ from app.db.session import get_db
 from app.models import (
     Agent,
     AIProvider,
+    ApprovalRequest,
     AuditLog,
     BrowserProfile,
     ChatMessage,
+    ManagerJob,
     Project,
     ProviderUsageLog,
     Task,
@@ -91,6 +93,41 @@ async def dashboard_home(db: AsyncSession = Depends(get_db)):
             "needs_human": sum(1 for p in profiles if p.connector_status == "needs_human"),
         },
     }
+
+
+# P1 "Needs you now": everything that waits for the owner, in one list. Each item names the screen (tab) to open.
+ATTENTION_LIMIT = 50
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+@router.get("/dashboard/attention")
+async def dashboard_attention(db: AsyncSession = Depends(get_db)):
+    """Pending approvals, plan drafts, manager jobs and windows that need a human, blocked tasks (newest first)."""
+    items: list[dict[str, Any]] = []
+    for row in (await db.execute(select(ApprovalRequest).where(ApprovalRequest.status == "pending"))).scalars():
+        items.append({"kind": "approval", "id": row.id, "title": row.title, "detail": row.action_type,
+                      "tab": "approvals", "at": _iso(row.created_at)})
+    jobs = (await db.execute(select(ManagerJob).where(ManagerJob.status.in_(("draft", "needs_human", "waiting_connection"))))).scalars()
+    for job in jobs:
+        repeated = int((job.context or {}).get("same_error_count", 0))
+        if job.status == "waiting_connection" and repeated < 3 and (job.context or {}).get("last_error_code") != "page_hidden":
+            continue  # a short wait for the window is normal; only a stuck one needs the owner (E52, E51)
+        kind = {"draft": "plan_draft", "needs_human": "manager_needs_human"}.get(job.status, "manager_stuck")
+        items.append({"kind": kind, "id": job.id, "title": (job.request_text or job.kind)[:160], "detail": job.error,
+                      "tab": "approvals" if job.kind == "review" and job.status == "needs_human" else "chat",
+                      "at": _iso(job.updated_at or job.created_at)})
+    for profile in (await db.execute(select(BrowserProfile).where(BrowserProfile.connector_status == "needs_human"))).scalars():
+        items.append({"kind": "window_needs_human", "id": profile.id, "title": profile.name or profile.id,
+                      "detail": profile.needs_human_reason, "tab": "browsers",
+                      "at": _iso(profile.last_heartbeat or profile.created_at)})
+    for task in (await db.execute(select(Task).where(Task.status == "blocked"))).scalars():
+        items.append({"kind": "task_blocked", "id": task.id, "title": task.title, "detail": task.error_message,
+                      "tab": "tasks", "at": _iso(task.updated_at or task.created_at)})
+    items.sort(key=lambda item: item["at"] or "", reverse=True)
+    return {"count": len(items), "items": items[:ATTENTION_LIMIT]}
 
 
 def _step(state: str, done: int = 0, total: int = 0, detail: str | None = None) -> dict[str, Any]:

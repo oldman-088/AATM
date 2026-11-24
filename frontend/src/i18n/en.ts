@@ -748,4 +748,18 @@ export const en: Translations = {
     connectorIdle: 'Ready',
     connectorOffline: 'Offline',
   },
+  needsYou: {
+    title: 'Needs you now',
+    subtitle: 'Everything that waits for your decision or action.',
+    empty: 'Nothing needs you right now.',
+    open: 'Open',
+    kinds: {
+      approval: 'Approval',
+      plan_draft: 'Plan draft',
+      manager_needs_human: 'Manager needs you',
+      manager_stuck: 'Manager stuck',
+      window_needs_human: 'Window needs you',
+      task_blocked: 'Blocked task',
+    },
+  },
 }

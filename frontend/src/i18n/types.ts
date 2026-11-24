@@ -728,4 +728,18 @@ export interface Translations {
     connectorIdle: string
     connectorOffline: string
   }
+  needsYou: {
+    title: string
+    subtitle: string
+    empty: string
+    open: string
+    kinds: {
+      approval: string
+      plan_draft: string
+      manager_needs_human: string
+      manager_stuck: string
+      window_needs_human: string
+      task_blocked: string
+    }
+  }
 }
