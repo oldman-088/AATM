@@ -304,6 +304,14 @@ class TaskScheduler:
             logger.warning("Manager Arena tick failed: %s", type(exc).__name__)
             await db.rollback()
             manager = {"error": type(exc).__name__}
+        try:
+            # P2: merge approved PRs with green CI on auto-merge projects, one at a time (never breaks dispatch).
+            from app.orchestration.merge_queue import merge_queue
+
+            await merge_queue.tick(db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Merge queue tick failed: %s", type(exc).__name__)
+            await db.rollback()
         # Employees whose Arena session still owns a PR only take that PR's follow-ups (same session).
         reserved = await arena_reservations(db)
 

@@ -858,6 +858,20 @@ export function ProjectsMemoryView({
     }
   }
 
+  /** P2 M6: auto-merge after the manager approves, CI on the head commit is green and there is no conflict. */
+  const setAutoMerge = async (project: any, value: boolean) => {
+    if (value && !window.confirm(t.projects.autoMergeConfirm)) return
+    setStatusBusy(project.id); setActionError(null)
+    try {
+      await apiFetch(`/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify({ auto_merge: value }) })
+      onReload(memQuery)
+    } catch (err: any) {
+      setActionError({ projectId: project.id, reason: 'failed', text: err?.message || t.projects.disableFailed })
+    } finally {
+      setStatusBusy('')
+    }
+  }
+
   const addMemory = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!memTitle.trim() || !memContent.trim()) return
@@ -928,6 +942,12 @@ export function ProjectsMemoryView({
                     </Button>
                   )}
                 </div>
+                {!disabled && <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                  <input type="checkbox" data-testid={`project-auto-merge-${p.id}`} checked={(p.config || {}).auto_merge === true}
+                    disabled={statusBusy === p.id} onChange={(e) => setAutoMerge(p, e.target.checked)} />
+                  <span>{t.projects.autoMerge}</span>
+                  {(p.config || {}).merge_queue?.paused && <Badge variant="danger">{t.projects.mergeQueuePaused}</Badge>}
+                </label>}
                 {confirmDisable === p.id && <div data-testid="project-disable-confirm" role="alertdialog" aria-label={t.projects.disableConfirmTitle}
                   className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 p-2 text-start text-xs text-rose-100">
                   <p className="font-semibold">{t.projects.disableConfirmTitle}</p>

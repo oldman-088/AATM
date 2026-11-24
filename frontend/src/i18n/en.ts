@@ -201,6 +201,9 @@ export const en: Translations = {
     pricingUnknownBadge: 'Pricing unknown',
   },
   projects: {
+    autoMerge: "Auto-merge: after the manager approves, CI is green and there is no conflict",
+    autoMergeConfirm: "Turn on auto-merge? AATM will merge approved pull requests with green CI into the base branch without asking you, one at a time, and pause if the base turns red.",
+    mergeQueuePaused: "Merge queue paused: base is red",
     title: 'Multi-Project Builder & 5-Tier Memory',
     newProject: 'Create Project',
     memoryTitle: 'Persistent Memory Explorer',

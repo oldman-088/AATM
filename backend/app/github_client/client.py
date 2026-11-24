@@ -324,6 +324,33 @@ class GitHubClient:
             "base": data.get("baseRefName"), "url": data.get("url"), "ci": ci, "checks": checks,
         }
 
+    async def update_pull_request_branch(self, repo: str, number: int, expected_head_sha: str) -> dict[str, Any]:
+        """P2 (E41 a): merge the latest base into a PR branch that is behind, so CI runs on what will be merged."""
+        ok_repo, repo_or_err = self.validate_repo(repo)
+        if not ok_repo or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha or ""):
+            return {"ok": False, "error": repo_or_err if not ok_repo else "Invalid head SHA."}
+        rc, out = await self._run_gh(["api", "-X", "PUT", f"repos/{repo_or_err}/pulls/{int(number)}/update-branch",
+                                      "-f", f"expected_head_sha={expected_head_sha}"])
+        return {"ok": rc == 0, "error": None if rc == 0 else out}
+
+    async def branch_ci(self, repo: str, branch: str) -> dict[str, Any]:
+        """P2 M3: CI on the head commit of a branch (for example main after a merge), read-only."""
+        ok_repo, repo_or_err = self.validate_repo(repo)
+        if not ok_repo or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", branch or "") or ".." in branch:
+            return {"available": False, "error": repo_or_err if not ok_repo else "Invalid branch name."}
+        rc, out = await self._run_gh(["api", f"repos/{repo_or_err}/commits/{branch}/check-runs",
+                                      "--jq", "{sha: .check_runs[0].head_sha, runs: [.check_runs[] | {name, status, conclusion}]}"])
+        if rc != 0:
+            return {"available": False, "error": out}
+        try:
+            data = json.loads(out)
+        except Exception:
+            return {"available": False, "error": out}
+        rollup = [{"__typename": "CheckRun", "name": r.get("name"), "status": str(r.get("status") or "").upper(),
+                   "conclusion": str(r.get("conclusion") or "").upper()} for r in data.get("runs") or []]
+        ci, checks = summarize_checks(rollup)
+        return {"available": True, "head_sha": data.get("sha"), "ci": ci, "checks": checks}
+
     async def list_issues(self, repo: str | None = None, limit: int = 10) -> dict[str, Any]:
         if repo is not None:
             ok_repo, repo_or_err = self.validate_repo(repo)

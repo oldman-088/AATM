@@ -184,3 +184,31 @@ describe('ProjectsMemoryView — create a project with repo_url (E28)', () => {
     expect(document.documentElement.dir).toBe('rtl')
   })
 })
+
+describe('Project auto-merge setting (P2 M6)', () => {
+  beforeEach(() => { localStorage.clear(); vi.restoreAllMocks() })
+
+  it('turns auto-merge on only after the owner confirms, and off without asking', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+    const { calls } = installFetchMock({ '/api/v1/projects/project-1': { id: 'project-1' } })
+    const { onReload } = renderBoard()
+    const box = screen.getByTestId('project-auto-merge-project-1') as HTMLInputElement
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+    expect(calls.filter((c) => c.method === 'PATCH')).toHaveLength(0)
+    fireEvent.click(box)
+    await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ auto_merge: true }))
+    await waitFor(() => expect(onReload).toHaveBeenCalled())
+    expect(confirm).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows a paused queue and turns auto-merge off', async () => {
+    vi.spyOn(window, 'confirm')
+    const { calls } = installFetchMock({ '/api/v1/projects/project-1': { id: 'project-1' } })
+    renderBoard({ projects: [project({ config: { auto_merge: true, merge_queue: { paused: 'main red at abc' } } })] })
+    expect(screen.getByText('Merge queue paused: base is red')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('project-auto-merge-project-1'))
+    await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ auto_merge: false }))
+    expect(window.confirm).not.toHaveBeenCalled()
+  })
+})

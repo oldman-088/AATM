@@ -203,6 +203,9 @@ export interface Translations {
     pricingUnknownBadge: string
   }
   projects: {
+    autoMerge: string
+    autoMergeConfirm: string
+    mergeQueuePaused: string
     title: string
     newProject: string
     memoryTitle: string
