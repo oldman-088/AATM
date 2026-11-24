@@ -185,6 +185,31 @@ def verify_approval(
     return True, "Approved", resolved_id
 
 
+
+_CHECK_FAILED = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+_CHECK_PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+
+def summarize_checks(rollup: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """One CI verdict for a PR head: failure > pending > success; "none" when the head has no checks."""
+    checks: list[dict[str, Any]] = []
+    for item in rollup:
+        name = str(item.get("name") or item.get("context") or "check")[:120]
+        if item.get("__typename") == "StatusContext" or "state" in item and "status" not in item:
+            raw = str(item.get("state") or "").upper()
+            result = "failure" if raw in _CHECK_FAILED else "success" if raw in _CHECK_PASSED else "pending"
+        elif str(item.get("status") or "").upper() != "COMPLETED":
+            result = "pending"
+        else:
+            raw = str(item.get("conclusion") or "").upper()
+            result = "failure" if raw in _CHECK_FAILED else "success" if raw in _CHECK_PASSED else "pending"
+        checks.append({"name": name, "result": result, "url": item.get("detailsUrl") or item.get("targetUrl")})
+    if not checks:
+        return "none", checks
+    results = {c["result"] for c in checks}
+    verdict = "failure" if "failure" in results else "pending" if "pending" in results else "success"
+    return verdict, checks
+
 class GitHubClient:
     """Octokit-compatible GitHub REST & CLI integration respecting repository permissions and protected branches."""
 
@@ -275,6 +300,29 @@ class GitHubClient:
             return {"available": True, "pull_requests": json.loads(out)}
         except Exception:
             return {"available": False, "pull_requests": [], "error": out}
+
+    async def pull_request_state(self, repo: str, number: int) -> dict[str, Any]:
+        """P1/P2: a PR's state, conflicts and CI on its head commit (read-only)."""
+        ok_repo, repo_or_err = self.validate_repo(repo)
+        if not ok_repo:
+            return {"available": False, "error": repo_or_err}
+        rc, out = await self._run_gh([
+            "pr", "view", str(int(number)), "--repo", repo_or_err, "--json",
+            "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url,statusCheckRollup",
+        ])
+        if rc != 0:
+            return {"available": False, "error": out}
+        try:
+            data = json.loads(out)
+        except Exception:
+            return {"available": False, "error": out}
+        ci, checks = summarize_checks(data.get("statusCheckRollup") or [])
+        return {
+            "available": True, "number": data.get("number"), "state": data.get("state"), "draft": bool(data.get("isDraft")),
+            "mergeable": data.get("mergeable"), "merge_state": data.get("mergeStateStatus"),
+            "conflicting": data.get("mergeable") == "CONFLICTING", "head_sha": data.get("headRefOid"),
+            "base": data.get("baseRefName"), "url": data.get("url"), "ci": ci, "checks": checks,
+        }
 
     async def list_issues(self, repo: str | None = None, limit: int = 10) -> dict[str, Any]:
         if repo is not None:

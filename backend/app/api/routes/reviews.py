@@ -86,6 +86,21 @@ async def get_pull_request_diff(task_id: str, db: AsyncSession = Depends(get_db)
     return {"available": bool(diff.get("ok")), **diff}
 
 
+@router.get("/reviews/tasks/{task_id}/pr-state")
+async def get_pull_request_state(task_id: str, db: AsyncSession = Depends(get_db)):
+    """P1 PR card: the PR's state, conflicts and CI on its head commit, read from GitHub."""
+    from app.github_client.client import github_client
+
+    task = await db.get(Task, task_id)
+    if task is None or not task.pr_number:
+        raise HTTPException(status_code=404, detail="Task with a pull request not found")
+    project = await db.get(Project, task.project_id)
+    repo = git_workflow_manager.repo_slug_from_url(project.repo_url if project else None)
+    if not repo:
+        return {"available": False, "error": "The project has no GitHub repository URL."}
+    return await github_client.pull_request_state(repo, task.pr_number)
+
+
 @router.post("/reviews/tasks/{task_id}/request-merge", dependencies=[Depends(require_role("admin", "operator"))])
 async def request_merge_approval(task_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Open (or return) the merge ApprovalRequest for a PR; the merge itself still needs a human decision."""
