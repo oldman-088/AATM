@@ -895,20 +895,23 @@ export function ProjectsMemoryView({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Button
                     size="sm"
+                    className="max-w-full min-w-0 truncate"
                     variant={p.id === activeProjectId ? 'primary' : 'secondary'}
                     aria-pressed={p.id === activeProjectId}
                     onClick={() => onSelectProject(p.id)}
                   >
                     {p.name}
                   </Button>
-                  <span className="flex flex-wrap items-center gap-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-1">
                     <span data-testid={`project-status-${p.id}`}>
                       <Badge variant={disabled ? 'warning' : 'success'}>{disabled ? t.projects.disabledBadge : t.projects.activeBadge}</Badge>
                     </span>
                     {isDefault && <span data-testid={`project-default-${p.id}`}><Badge variant="info">{t.projects.defaultBadge}</Badge></span>}
                   </span>
                 </div>
-                <div className="mt-1 truncate font-mono text-xs text-slate-400" dir="ltr">{p.repo_url || t.projects.repoUrlRequired}</div>
+                {p.repo_url
+                  ? <div className="mt-1 break-all font-mono text-xs text-slate-400" dir="ltr">{p.repo_url}</div>
+                  : <p className="mt-1 text-xs text-amber-300">{t.projects.repoUrlRequired}</p>}
                 {disabled && <p className="mt-1 text-xs text-amber-200">{t.projects.disabledNotice}</p>}
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   {disabled ? (
