@@ -189,6 +189,34 @@ async def build_timeline(db: AsyncSession, project: Project) -> list[dict[str, A
     return out
 
 
+def _minutes(start: datetime | None, end: datetime | None) -> float | None:
+    if not start or not end:
+        return None
+    if (start.tzinfo is None) != (end.tzinfo is None):
+        start, end = start.replace(tzinfo=None), end.replace(tzinfo=None)
+    value = (end - start).total_seconds() / 60
+    return value if value > 0 else None
+
+
+async def build_progress(db: AsyncSession, project: Project) -> dict[str, Any]:
+    """P3 O4: how much of the project is done and roughly how long the rest takes, from real task timings."""
+    tasks = [t for t in (await db.execute(select(Task).where(Task.project_id == project.id))).scalars()
+             if t.task_type == "implementation" and t.status != "cancelled"]
+    total = len(tasks)
+    done = sum(1 for t in tasks if t.status in FINISHED_STATUSES)
+    remaining = total - done
+    samples = sorted(m for t in tasks if t.status in FINISHED_STATUSES and (m := _minutes(t.started_at, t.completed_at)))
+    typical = samples[len(samples) // 2] if samples else None
+    team = (project.config or {}).get("team") or []
+    workers = (await db.execute(select(func.count()).select_from(Agent).where(
+        Agent.role == "worker", Agent.is_enabled.is_(True), *([Agent.id.in_(team)] if team else [])))).scalar_one()
+    parallel = max(1, min(remaining, int(workers or 1))) if remaining else 0
+    eta = round(-(-remaining // parallel) * typical) if remaining and typical else (0 if total and not remaining else None)
+    return {"total": total, "done": done, "remaining": remaining, "percent": round(100 * done / total) if total else 0,
+            "typical_task_minutes": round(typical, 1) if typical else None, "parallel_workers": parallel,
+            "eta_minutes": eta, "samples": len(samples)}
+
+
 @router.get("/projects/{project_id}/timeline")
 async def project_timeline(project_id: str, db: AsyncSession = Depends(get_db)):
     project = await db.get(Project, project_id)
@@ -196,7 +224,34 @@ async def project_timeline(project_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
     steps = await build_timeline(db, project)
     current = next((s["id"] for s in steps if s["state"] != "done"), None)
-    return {"project_id": project.id, "project_name": project.name, "status": project.status, "steps": steps, "current_step": current}
+    return {"project_id": project.id, "project_name": project.name, "status": project.status, "steps": steps, "current_step": current,
+            "progress": await build_progress(db, project)}
+
+
+@router.get("/dashboard/daily")
+async def dashboard_daily(hours: int = Query(24, ge=1, le=168), db: AsyncSession = Depends(get_db)):
+    """P3 O5: what happened in the last day (or ``hours``) and what waits for the owner."""
+    from datetime import timedelta
+
+    from app.models import ApprovalRequest, Notification
+
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    recent = list((await db.execute(select(Task).where(Task.updated_at >= since))).scalars())
+    merged = [t for t in recent if t.status in {"merged", "done"} and t.pr_number]
+    completed = [t for t in recent if t.status in FINISHED_STATUSES]
+    failed = [t for t in recent if t.status in {"failed", "blocked"}]
+    pending = (await db.execute(select(func.count()).select_from(ApprovalRequest).where(ApprovalRequest.status == "pending"))).scalar_one()
+    critical = (await db.execute(select(func.count()).select_from(Notification).where(
+        Notification.severity == "critical", Notification.created_at >= since))).scalar_one()
+    return {
+        "hours": hours,
+        "completed_tasks": len(completed),
+        "merged_prs": [{"task_id": t.id, "pr_number": t.pr_number, "title": t.title} for t in merged][:20],
+        "failed_or_blocked": [{"task_id": t.id, "title": t.title, "status": t.status, "error": (t.error_message or "")[:200]}
+                              for t in failed][:20],
+        "pending_approvals": pending,
+        "critical_alerts": critical,
+    }
 
 
 @router.get("/dashboard/employees")
