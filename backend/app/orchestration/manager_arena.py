@@ -57,6 +57,8 @@ MANAGER_PROVIDERS = ("arena_agent", "anthropic_claude", "openai_compatible", "de
 MANAGER_PROVIDER_SETTING = "manager_provider"
 
 NOT_CONNECTED_AR = "المدير غير متصل بـ Arena — افتح ملف Chrome الخاص بالمدير"
+PAGE_HIDDEN_AR = ("نافذة المدير في Chrome مصغّرة أو مخفية، فلا تظهر خانة الكتابة. أظهر النافذة على الشاشة "
+                  "وسيُرسل الطلب تلقائيًا.")
 READINESS_AR = {
     "not_enabled": "موصّل Arena متوقف (ARENA_CONNECTOR_ENABLED=false) — لا يمكن تشغيل المدير عبر Arena.",
     "bridge_unreachable": "الجسر المحلي لـ Arena غير متاح — شغّل الجسر ثم أعد الفحص.",
@@ -901,7 +903,13 @@ class ManagerArenaRuntime:
         job.status = "waiting_connection"
         job.error = error[:500]
         text = NOT_CONNECTED_AR
-        if same >= REPEATED_ERROR_ALERT:
+        if code == "page_hidden":
+            # E51: the window is minimised or hidden and draws no composer. Only the owner can show it; say so at once.
+            text = PAGE_HIDDEN_AR
+            if same == 1:
+                db.add(Notification(category="arena", severity="critical", title="نافذة المدير مخفية",
+                                    message=PAGE_HIDDEN_AR, link="/browsers"))
+        elif same >= REPEATED_ERROR_ALERT:
             text = f"{NOT_CONNECTED_AR}\n\nالخطأ نفسه تكرر {same} مرات، والسبب: {error[:300]}"
             if same == REPEATED_ERROR_ALERT:
                 db.add(Notification(category="arena", severity="critical", title="المدير يفشل بالخطأ نفسه مرارًا",

@@ -134,12 +134,25 @@ def _chrome_binary() -> str | None:
     return os.environ.get("AATM_CHROME_BIN") or shutil.which("google-chrome") or shutil.which("google-chrome-stable")
 
 
+# E51: an Arena window that is covered, in the background or minimised must keep running its page, or the
+# userscript finds no composer after a new session. Chrome applies these only when it starts the profile.
+KEEP_RENDERING_FLAGS = (
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+)
+
+
+def chrome_command(chrome: str, directory: Path, title: str, target: str) -> list[str]:
+    return [chrome, f"--user-data-dir={directory}", f"--window-name={title}", "--no-first-run",
+            "--no-default-browser-check", *KEEP_RENDERING_FLAGS, target]
+
+
 def _launch(chrome: str, window: Window, target: str) -> None:
     directory = profiles_home() / window.directory
     directory.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(
-        [chrome, f"--user-data-dir={directory}", f"--window-name={window.title}", "--no-first-run",
-         "--no-default-browser-check", target],
+        chrome_command(chrome, directory, window.title, target),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
 
