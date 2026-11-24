@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Brain, Cpu, FolderGit2, Globe, Monitor, Play, RefreshCw, ShieldAlert, Square, Sparkles, Wallet } from 'lucide-react'
-import { Badge, Button, Card, Input, Select } from '../components/ui'
+import { Badge, Button, Card, Input, Select, Textarea } from '../components/ui'
 import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
@@ -1291,13 +1291,13 @@ export function GitWorkflowsView({ gitData, approvals, agents, error, onReload }
               />
             </div>
           )}
-          {target !== 'branch' && <textarea
+          {target !== 'branch' && <Textarea
             value={bodyText}
             onChange={(e) => setBodyText(e.target.value)}
             rows={3}
             placeholder={target === 'comment' ? t.enterprise.commentBody : t.git.bodyPlaceholder}
             aria-label={target === 'comment' ? t.enterprise.commentBody : t.git.bodyPlaceholder}
-            className="w-full rounded-lg border border-slate-700 bg-slate-950/70 p-3 text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
+            className="text-xs"
           />}
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="secondary" onClick={requestApproval} disabled={requesting || (target === 'branch' && (!repo.trim() || !branchName.trim() || !fromBranch.trim())) || (target === 'comment' && (!repo.trim() || !/^[1-9][0-9]*$/.test(prNumber) || !bodyText.trim()))}>
