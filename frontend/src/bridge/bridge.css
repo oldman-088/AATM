@@ -764,6 +764,49 @@ html.bridge-mounted body {
   cursor: default;
 }
 
+.bridge-console__toolbar {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+  flex: 0 0 auto;
+  padding-block: 2px 4px;
+}
+
+.bridge-btn {
+  height: 32px;
+  padding: 0 14px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid rgba(34, 211, 238, 0.55);
+  background: rgba(34, 211, 238, 0.08);
+  color: #a5f3fc;
+}
+
+.bridge-btn--danger {
+  border-color: rgba(251, 113, 133, 0.6);
+  background: rgba(251, 113, 133, 0.08);
+  color: #fecdd3;
+}
+
+.bridge-btn:hover:not(:disabled) {
+  filter: brightness(1.25);
+}
+
+.bridge-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.bridge-btn:focus-visible,
+.bridge-send:focus-visible,
+.bridge-input:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
 .bridge-console__side {
   border-inline-start: 1px solid rgba(167, 139, 250, 0.45);
   padding: 10px 14px;
