@@ -36,6 +36,7 @@ export interface Translations {
     passwordChangeFailed: string
   }
   common: {
+    activeProject: string
     refresh: string
     create: string
     save: string

@@ -26,7 +26,7 @@ import type { Language } from './i18n/types'
 import { apiFetch, getToken } from './lib/api'
 import { AgentsView, DashboardView, ManagerChatView, TasksView } from './views/CoreViews'
 import { ArenaAgentDashboard, ArenaConnectorPanel } from './views/ArenaViews'
-import { LIVE_EVENT, MissionControl, PullRequestsView } from './views/DashboardViews'
+import { LIVE_EVENT, MissionControl, NeedsYouBadge, PullRequestsView } from './views/DashboardViews'
 import {
   AgentMessagingPanel,
   ArenaAccountsSessionsPanel,
@@ -80,6 +80,7 @@ function AATMWorkspace() {
   const [agentMessages, setAgentMessages] = useState<any[]>([])
   const [projects, setProjects] = useState<any[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const activeProject = projects.find((p: any) => p.id === activeProjectId) || null
   // Follow the project the owner marked active (the API lists it first) until the owner picks one by hand.
   // Otherwise a page that stays open keeps the project it chose at load, and orders go to the wrong project.
   const projectPickedByUser = useRef(false)
@@ -551,6 +552,9 @@ function AATMWorkspace() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {activeProject && <span data-testid="active-project-banner" className="max-w-[14rem] truncate rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 text-xs text-indigo-100"
+              title={activeProject.name}>{t.common.activeProject}: {activeProject.name}</span>}
+            <NeedsYouBadge onOpen={() => setTab('dashboard')} />
             <Button size="sm" variant={anyEmergencyStopped ? 'secondary' : 'danger'} onClick={toggleEmergencyStop}>
               <OctagonAlert className="h-4 w-4" />
               {anyEmergencyStopped ? t.common.resumeSystem : t.common.emergencyStop}

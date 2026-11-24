@@ -128,6 +128,18 @@ export function DailySummary() {
   </section></Card>
 }
 
+/** P1 T07: on every page, how many things wait for the owner; a click opens the dashboard's "Needs you now". */
+export function NeedsYouBadge({ onOpen }: { onOpen: () => void }) {
+  const { t, formatNumber } = useI18n()
+  const { data } = useLoad<any>('/dashboard/attention', ATTENTION_EVENTS)
+  const count = typeof data?.count === 'number' ? data.count : 0
+  if (!count) return null
+  return <Button size="sm" variant="secondary" data-testid="needs-you-badge" onClick={onOpen}
+    className="border-amber-500/60 text-amber-200" aria-label={`${t.needsYou.title}: ${count}`}>
+    <AlertTriangle className="h-4 w-4 text-amber-300" />{t.needsYou.title}<Badge variant="warning">{formatNumber(count)}</Badge>
+  </Button>
+}
+
 // ------------------------------------------------------------------ 8-step timeline
 
 export function ProjectTimeline({ projectId }: { projectId: string | null }) {
