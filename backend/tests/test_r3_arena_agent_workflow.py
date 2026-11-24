@@ -616,7 +616,7 @@ async def test_full_arena_agent_workflow_with_review_corrections_approval_and_ne
 
     async with env() as db:
         project = Project(name="R3", slug="r3", repo_path=str(repo), repo_url=f"https://github.com/{REPO_SLUG}", default_branch="main",
-                          config={"test_command": "pytest -q"})
+                          config={"test_command": "pytest -q", "integration_check": False})
         db.add(project)
         await db.flush()
         t1 = Task(project_id=project.id, title="Add answer()", description="Create answer() returning 42 with a test.",
