@@ -129,6 +129,8 @@ MAX_RAW_REPLY_CHARS = 20_000
 MAX_JOB_ATTEMPTS = 3
 # E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
 MAX_ATTEMPT_REFUNDS = 12
+# E52: after this many identical connection errors in a row the owner sees the cause and gets one alert.
+REPEATED_ERROR_ALERT = 3
 MAX_STATUS_QUESTION_CHARS = 200  # a long brief that mentions "status" is a goal, not a question
 # E37: a busy manager window is a transient state, not a failed attempt. Wait for it to become idle
 # (configurable timeout) before submitting; only real attempts count and get a backoff.
@@ -876,11 +878,7 @@ class ManagerArenaRuntime:
             elif exc.code == "busy_timeout":
                 await self._requeue_waiting_for_manager(db, job)
             else:
-                self._backoff_until[job.id] = time.monotonic() + self._backoff_seconds(job)
-                job.status = "waiting_connection"
-                job.error = exc.message
-                await db.commit()
-                await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
+                await self._connection_error(db, job, exc.code, exc.message)
             return {"job_id": job.id, "status": job.status, "error": exc.code}
         except ArenaAgentError as exc:
             if exc.code == "busy":
@@ -888,15 +886,28 @@ class ManagerArenaRuntime:
             elif exc.code == "needs_human":
                 await self._needs_human(db, job, f"Arena page needs a human: {exc.message}", raw=None)
             else:
-                self._backoff_until[job.id] = time.monotonic() + self._backoff_seconds(job)
-                job.status = "waiting_connection"
-                job.error = f"{exc.code}: {exc.message}"[:500]
-                await db.commit()
-                await self._reply(db, job, NOT_CONNECTED_AR, waiting=True, readiness=exc.code)
+                await self._connection_error(db, job, exc.code, f"{exc.code}: {exc.message}")
             return {"job_id": job.id, "status": job.status, "error": exc.code}
         finally:
             await self._set_manager_status(db, "idle")
             await db.commit()
+
+    async def _connection_error(self, db: AsyncSession, job: ManagerJob, code: str, error: str) -> None:
+        """The job waits for the window. E52: when the same error repeats, the owner sees the cause and is alerted once."""
+        self._backoff_until[job.id] = time.monotonic() + self._backoff_seconds(job)
+        context = dict(job.context or {})
+        same = int(context.get("same_error_count", 0)) + 1 if context.get("last_error_code") == code else 1
+        job.context = {**context, "last_error_code": code, "same_error_count": same}
+        job.status = "waiting_connection"
+        job.error = error[:500]
+        text = NOT_CONNECTED_AR
+        if same >= REPEATED_ERROR_ALERT:
+            text = f"{NOT_CONNECTED_AR}\n\nالخطأ نفسه تكرر {same} مرات، والسبب: {error[:300]}"
+            if same == REPEATED_ERROR_ALERT:
+                db.add(Notification(category="arena", severity="critical", title="المدير يفشل بالخطأ نفسه مرارًا",
+                                    message=f"{job.kind}: {error[:300]}", link="/browsers"))
+        await db.commit()
+        await self._reply(db, job, text, waiting=True, readiness=code, repeated_error=same)
 
     def _backoff_seconds(self, job: ManagerJob) -> float:
         """Pause before the next real attempt (E37); busy waits are free and never reach this."""
