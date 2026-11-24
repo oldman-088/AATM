@@ -148,6 +148,12 @@ export const fa: Translations = {
     priorityHigh: 'بالا',
     priorityMedium: 'متوسط',
     priorityLow: 'پایین',
+    summaryTotal: 'مجموع',
+    summaryActive: 'در حال اجرا',
+    summaryDone: 'تکمیل‌شده',
+    summaryFailed: 'ناموفق / تغییرات',
+    filterLabel: 'فیلتر بر اساس وضعیت',
+    filterAll: 'همه وضعیت‌ها',
   },
   browsers: {
     title: 'دیوار مرورگرها و پروفایل‌های ماندگار',

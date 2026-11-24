@@ -566,6 +566,14 @@ export function AgentsView({
   )
 }
 
+function taskTone(status: string): 'success' | 'danger' | 'warning' | 'info' | 'neutral' {
+  if (['completed', 'done', 'merged', 'approved'].includes(status)) return 'success'
+  if (['failed', 'changes_requested'].includes(status)) return 'danger'
+  if (['in_progress', 'in_review'].includes(status)) return 'warning'
+  if (status === 'pr_open') return 'info'
+  return 'neutral'
+}
+
 export function TasksView({
   tasks,
   projectId,
@@ -582,6 +590,19 @@ export function TasksView({
   const [division, setDivision] = useState('D08')
   const [priority, setPriority] = useState('high')
   const [executionMode, setExecutionMode] = useState('automatic')
+  const [statusFilter, setStatusFilter] = useState('all')
+
+  const doneStatuses = ['completed', 'done', 'merged', 'approved']
+  const activeStatuses = ['in_progress', 'in_review', 'pr_open']
+  const failedStatuses = ['failed', 'changes_requested']
+  const summary = {
+    total: tasks.length,
+    active: tasks.filter((task) => activeStatuses.includes(task.status)).length,
+    done: tasks.filter((task) => doneStatuses.includes(task.status)).length,
+    failed: tasks.filter((task) => failedStatuses.includes(task.status)).length,
+  }
+  const statusOptions = Array.from(new Set(tasks.map((task) => String(task.status)))).sort()
+  const visibleTasks = statusFilter === 'all' ? tasks : tasks.filter((task) => task.status === statusFilter)
 
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -655,27 +676,45 @@ export function TasksView({
       ) : tasks.length === 0 ? (
         <EmptyState variant="empty" testId="tasks-empty" />
       ) : (
-        <div className="space-y-2.5">
-        {tasks.map((task) => (
+        <>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4" data-testid="tasks-summary">
+            <Card className="p-4">
+              <div className="text-xs text-slate-400">{t.tasks.summaryTotal}</div>
+              <div className="text-2xl font-semibold text-white">{summary.total}</div>
+            </Card>
+            <Card className="p-4">
+              <div className="text-xs text-slate-400">{t.tasks.summaryActive}</div>
+              <div className="text-2xl font-semibold text-amber-300">{summary.active}</div>
+            </Card>
+            <Card className="p-4">
+              <div className="text-xs text-slate-400">{t.tasks.summaryDone}</div>
+              <div className="text-2xl font-semibold text-emerald-300">{summary.done}</div>
+            </Card>
+            <Card className="p-4">
+              <div className="text-xs text-slate-400">{t.tasks.summaryFailed}</div>
+              <div className="text-2xl font-semibold text-rose-300">{summary.failed}</div>
+            </Card>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-slate-400">{t.tasks.filterLabel}</span>
+            <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} data-testid="tasks-filter">
+              <option value="all">{t.tasks.filterAll}</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </Select>
+          </div>
+
+          <div className="space-y-2.5">
+        {visibleTasks.map((task) => (
           <Card key={task.id} className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="info">{task.division_code}</Badge>
-                <Badge
-                  variant={
-                    task.status === 'completed' || task.status === 'done' || task.status === 'merged' || task.status === 'approved'
-                      ? 'success'
-                      : task.status === 'failed' || task.status === 'changes_requested'
-                        ? 'danger'
-                        : task.status === 'in_progress' || task.status === 'in_review'
-                          ? 'warning'
-                          : task.status === 'pr_open'
-                            ? 'info'
-                            : 'neutral'
-                  }
-                >
-                  {task.status}
-                </Badge>
+                <Badge variant={taskTone(task.status)}>{task.status}</Badge>
                 {task.branch_name && (
                   <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[11px] text-sky-300">
                     {task.branch_name}
@@ -717,7 +756,8 @@ export function TasksView({
             </div>
           </Card>
         ))}
-        </div>
+          </div>
+        </>
       )}
     </div>
   )
