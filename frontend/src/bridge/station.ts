@@ -17,8 +17,8 @@ export const SEAT_POSITIONS: SeatPosition[] = [
 /** Extra employees sit in a second, smaller arc behind the first (scale 0.8). */
 export const EXTRA_POSITIONS: SeatPosition[] = [
   { left: '12%', top: '18%', tilt: '14deg' },
-  { left: '31%', top: '34%', tilt: '6deg' },
-  { left: '55%', top: '34%', tilt: '-6deg' },
+  { left: '31%', top: '31%', tilt: '6deg' },
+  { left: '43%', top: '31%', tilt: '-6deg' },
   { left: '72%', top: '18%', tilt: '-14deg' },
 ]
 
@@ -30,7 +30,7 @@ export function seatPosition(index: number): { position: SeatPosition; extra: bo
   if (index < SEAT_POSITIONS.length) return { position: SEAT_POSITIONS[index], extra: false }
   const slot = EXTRA_POSITIONS[(index - SEAT_POSITIONS.length) % EXTRA_POSITIONS.length]
   const row = Math.floor((index - SEAT_POSITIONS.length) / EXTRA_POSITIONS.length)
-  const top = Math.min(36, parseFloat(slot.top) + row * 10)
+  const top = Math.min(31, parseFloat(slot.top) + row * 10)
   return { position: { ...slot, top: `${top}%` }, extra: true }
 }
 
