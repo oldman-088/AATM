@@ -1,6 +1,6 @@
 import React from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider } from '../../i18n/I18nContext'
 import { installFetchMock } from '../../test/mockApi'
 import { ArenaAgentDashboard, ArenaConnectorPanel } from '../ArenaViews'
@@ -251,5 +251,60 @@ describe('ArenaAgentDashboard manager card (R7)', () => {
     expect(within(card).getByTestId('arena-manager-activity').textContent).toContain('بانتظار الاتصال')
     expect((within(card).getByRole('button', { name: /اختبار/ }) as HTMLButtonElement).disabled).toBe(true)
     expect(document.documentElement.dir).toBe('rtl')
+  })
+})
+
+describe('ArenaAgentDashboard close session and cancel request (P1)', () => {
+  beforeEach(() => localStorage.clear())
+  afterEach(() => vi.restoreAllMocks())
+
+  const openWorker = () => employee({ session: { ...employee().session, is_open: true } })
+
+  it('closes an open worker session after the owner confirms', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { calls } = installFetchMock({
+      '/api/v1/arena/agent/overview': overview([openWorker()]),
+      '/api/v1/tasks': [],
+      '/api/v1/arena/sessions/sess-1/close': { session_id: 'sess-1', is_open: false, worker_freed: true },
+    })
+    renderDashboard()
+    fireEvent.click(await screen.findByTestId('arena-close-worker-1'))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/arena/sessions/sess-1/close')?.method).toBe('POST'))
+    expect(window.confirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends nothing when the owner declines, and shows no close button for a closed session', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { calls } = installFetchMock({
+      '/api/v1/arena/agent/overview': overview([openWorker(), employee({ agent_id: 'worker-2', profile_id: 'p-2' })]),
+      '/api/v1/tasks': [],
+    })
+    renderDashboard()
+    fireEvent.click(await screen.findByTestId('arena-close-worker-1'))
+    expect(calls.some((c) => c.path.endsWith('/close'))).toBe(false)
+    expect(screen.queryByTestId('arena-close-worker-2')).toBeNull()
+  })
+
+  it('cancels a waiting manager request, and offers no cancel while the manager is answering', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const waiting = manager({ activity: { job_id: 'job-7', kind: 'plan', status: 'waiting_connection', updated_at: '2026-11-17T09:00:05' } })
+    const { calls } = installFetchMock({
+      '/api/v1/arena/agent/overview': overview([employee()], { manager: waiting }),
+      '/api/v1/tasks': [],
+      '/api/v1/arena/manager/jobs/job-7/cancel': { id: 'job-7', status: 'failed' },
+    })
+    renderDashboard()
+    fireEvent.click(await screen.findByTestId('arena-manager-cancel'))
+    await waitFor(() => expect(calls.find((c) => c.path === '/api/v1/arena/manager/jobs/job-7/cancel')?.method).toBe('POST'))
+  })
+
+  it('hides cancel for a running job and labels the buttons in Arabic', async () => {
+    installFetchMock({
+      '/api/v1/arena/agent/overview': overview([openWorker()], { manager: manager({ activity: { job_id: 'job-8', kind: 'plan', status: 'running' } }) }),
+      '/api/v1/tasks': [],
+    })
+    renderDashboard('ar')
+    expect((await screen.findByTestId('arena-close-worker-1')).textContent).toContain('إغلاق الجلسة')
+    expect(screen.queryByTestId('arena-manager-cancel')).toBeNull()
   })
 })

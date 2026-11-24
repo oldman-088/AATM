@@ -520,6 +520,8 @@ export const ar: Translations = {
     resumeSession: 'استئناف الجلسة',
     viewLiveDiff: 'عرض التغييرات المباشرة',
     viewPr: 'عرض طلب الدمج',
+    closeSession: 'إغلاق الجلسة',
+    closeSessionConfirm: "إغلاق جلسة Arena هذه؟ يتحرر العامل وتُعلَّق مهمته غير المكتملة (تُؤخذ نسخة احتياطية أولًا).",
     liveDiff: 'التغييرات المباشرة',
     files: 'الملفات المعدّلة مؤخراً',
     commits: 'الإيداعات الجديدة',
@@ -539,6 +541,8 @@ export const ar: Translations = {
     manager: {
       title: 'المدير (manager-0) — Arena',
       subtitle: 'المدير يعمل عبر Arena مثل الموظفين: ملف Chrome خاص به («manager») ونفس السكربت والموصّل.',
+      cancelJob: 'إلغاء الطلب',
+      cancelJobConfirm: "إلغاء الطلب الحالي للمدير؟ لن يُنشأ شيء مما خطّط له (تُؤخذ نسخة احتياطية أولًا).",
       connected: 'متصل',
       notConnected: 'غير متصل',
       notConnectedHint: 'المدير غير متصل بـ Arena — افتح ملف Chrome الخاص بالمدير',

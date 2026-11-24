@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { AlertTriangle, BookOpen, Check, ExternalLink, FileDiff, GitBranch, KeyRound, ListChecks, PencilLine, Play, PlayCircle, Plus, RefreshCw, Send, Workflow, X } from 'lucide-react'
+import { AlertTriangle, BookOpen, Check, ExternalLink, FileDiff, GitBranch, KeyRound, ListChecks, PencilLine, Play, PlayCircle, Plus, RefreshCw, Send, Workflow, X, XCircle } from 'lucide-react'
 import { Badge, Button, Card } from '../components/ui'
 import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
@@ -334,6 +334,9 @@ export function ManagerDraftPanel({ message, onUpdated }: { message: any; onUpda
   </div>
 }
 
+// The manager job states the backend lets an admin cancel (a running prompt cannot be cancelled mid-flight).
+const CANCELLABLE_JOB_STATES = new Set(['queued', 'waiting_connection', 'needs_human', 'draft'])
+
 export function ArenaAgentDashboard() {
   const { t } = useI18n()
   const a = t.arenaAgent
@@ -405,6 +408,20 @@ export function ArenaAgentDashboard() {
   const managerNewSession = (row: any) => run(`${row.agent_id}:new_session`, async () => {
     await apiFetch<any>('/arena/manager/new-session', { method: 'POST', body: JSON.stringify({}) })
   })
+  // P1: close a worker's open Arena session (frees the worker; the backend takes a backup first).
+  const closeSession = (row: any, sessionId: string) => {
+    if (!window.confirm(a.closeSessionConfirm)) return
+    return run(`${row.agent_id}:close`, async () => {
+      await apiFetch<any>(`/arena/sessions/${encodeURIComponent(sessionId)}/close`, { method: 'POST' })
+    })
+  }
+  // P1: cancel the manager job that is waiting, queued, in draft or needs a human (never a running one).
+  const cancelManagerJob = (row: any, jobId: string) => {
+    if (!window.confirm(a.manager.cancelJobConfirm)) return
+    return run(`${row.agent_id}:cancel`, async () => {
+      await apiFetch<any>(`/arena/manager/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+    })
+  }
   const assign = (row: any) => run(`${row.agent_id}:assign`, async () => {
     const taskId = choice[row.agent_id]
     if (!taskId) return
@@ -493,6 +510,7 @@ export function ArenaAgentDashboard() {
           <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('read_last_reply')} onClick={() => command(m, 'read_last_reply')}><BookOpen className="me-1 h-4 w-4" />{a.readLastReply}</Button>
           <Button size="sm" variant="secondary" disabled={!canCommand || busy === mk('keep_working')} onClick={() => command(m, 'keep_working')}><Play className="me-1 h-4 w-4" />{a.continueWorking}</Button>
           {(m.page_state === 'needs_human' || m.connector_status === 'needs_human') && <Button size="sm" disabled={busy === mk('resume')} onClick={() => resume(m)}><PlayCircle className="me-1 h-4 w-4" />{a.resumeSession}</Button>}
+          {act?.job_id && CANCELLABLE_JOB_STATES.has(act.status) && <Button size="sm" variant="danger" data-testid="arena-manager-cancel" disabled={busy === mk('cancel')} onClick={() => cancelManagerJob(m, act.job_id)}><XCircle className="me-1 h-4 w-4" />{a.manager.cancelJob}</Button>}
         </div>
         {output && output.agent === m.agent_id && <div className="mt-2 space-y-1" data-testid={`arena-output-${m.agent_id}`}>
           {output.kind === 'reply' && <><div className="text-xs text-slate-400">{a.lastReply}</div>
@@ -546,6 +564,7 @@ export function ArenaAgentDashboard() {
             <Button size="sm" variant="secondary" disabled={!canCommand || busy === key('selector_test')} onClick={() => command(r, 'selector_test')}><ListChecks className="me-1 h-4 w-4" />{a.selectorTest}</Button>
             <Button size="sm" variant="secondary" disabled={!gate?.enabled || busy === key('script')} onClick={() => script(r)}><KeyRound className="me-1 h-4 w-4" />{r.token_issued ? a.rotateScript : a.generateScript}</Button>
             {(r.page_state === 'needs_human' || r.connector_status === 'needs_human' || r.agent_status === 'needs_human') && <Button size="sm" disabled={busy === key('resume')} onClick={() => resume(r)}><PlayCircle className="me-1 h-4 w-4" />{a.resumeSession}</Button>}
+            {s?.is_open && <Button size="sm" variant="danger" data-testid={`arena-close-${r.agent_id}`} disabled={busy === key('close')} onClick={() => closeSession(r, s.id)}><XCircle className="me-1 h-4 w-4" />{a.closeSession}</Button>}
             {s && <Button size="sm" variant="secondary" onClick={() => setDiffFor(diffFor === s.id ? null : s.id)}><FileDiff className="me-1 h-4 w-4" />{a.viewLiveDiff}</Button>}
             {s?.pr_url && <a className="inline-flex items-center rounded-lg border border-slate-700 px-2 py-1 text-xs text-sky-300" href={s.pr_url} target="_blank" rel="noreferrer"><ExternalLink className="me-1 h-4 w-4" />{a.viewPr}</a>}
           </div>
