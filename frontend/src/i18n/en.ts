@@ -760,6 +760,7 @@ export const en: Translations = {
       manager_stuck: 'Manager stuck',
       window_needs_human: 'Window needs you',
       task_blocked: 'Blocked task',
+      repo_access: 'Repository not visible',
     },
   },
 }

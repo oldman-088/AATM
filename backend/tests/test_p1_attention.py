@@ -53,3 +53,15 @@ async def test_every_kind_of_waiting_item_is_listed_with_its_screen(env):
     assert "short wait" not in by_title and "finished" not in by_title
     assert len(new) == 6 and data["count"] >= 6
     assert set(new) <= set(ids)
+
+
+async def test_a_repository_the_arena_app_cannot_see_is_listed(env):
+    from app.db.base import utcnow
+    from app.models import Project
+
+    async with env() as db:
+        db.add(Project(name="Private", slug="private-attention", default_branch="main",
+                       config={"repo_access_denied": {"worker-2": {"at": utcnow().isoformat(), "repo": "acme/private"}}}))
+        await db.commit()
+    item = next(i for i in (await _attention(env))["items"] if i["kind"] == "repo_access")
+    assert item["title"] == "acme/private" and item["detail"] == "worker-2" and item["tab"] == "browsers"

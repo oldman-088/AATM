@@ -365,6 +365,14 @@ class ArenaAgentRunner:
         except ArenaAgentError as exc:
             session.error_message = f"{exc.code}: {exc.message}"[:500]
             append_event(session, "submit_failed", session.error_message)
+            if exc.code == "repo_not_available" and fresh:
+                # E43: this account cannot see the repository (nothing was sent). Close the session and let
+                # another worker take the task, instead of stopping a healthy window for a human.
+                from app.runtime.loop.common import RepoAccessError
+
+                await close_session(db, session, phase="closed", reason=f"repo not available: {exc.message}"[:240])
+                await db.commit()
+                raise RepoAccessError(profile_id, repo_slug(await self._project(db, task)) or "", exc.message) from exc
             if exc.code == "needs_human" or exc.code in REPO_SAFETY_CODES:
                 session.phase = "needs_human"
                 session.needs_human_reason = exc.message[:240]

@@ -124,6 +124,96 @@ class NeedsHumanError(RuntimeError):
     def __init__(self, profile_id: str, message: str) -> None:
         super().__init__(message)
         self.profile_id = profile_id
+class RepoAccessError(RuntimeError):
+    """E43: this employee's Arena account cannot see the project's repository. The window itself is fine."""
+
+    def __init__(self, profile_id: str, repo: str, message: str) -> None:
+        super().__init__(message)
+        self.profile_id = profile_id
+        self.repo = repo
+
+
+# E43: a worker whose Arena account cannot see a project's repository gets none of its tasks for this long;
+# after that AATM tries again (the owner may have granted access in the meantime).
+REPO_ACCESS_RETRY_HOURS = 2
+
+
+def repo_access_denied(project: Any, now: Any = None) -> set[str]:
+    """The agent ids whose Arena account recently could not see this project's repository."""
+    from datetime import datetime, timedelta
+
+    denied = ((getattr(project, "config", None) or {}).get("repo_access_denied") or {}) if project is not None else {}
+    cutoff = (now or utcnow()) - timedelta(hours=REPO_ACCESS_RETRY_HOURS)
+    active: set[str] = set()
+    for agent_id, entry in denied.items():
+        try:
+            at = datetime.fromisoformat(str((entry or {}).get("at")))
+        except ValueError:
+            continue
+        if at.tzinfo is None and cutoff.tzinfo is not None:
+            at = at.replace(tzinfo=cutoff.tzinfo)
+        if at > cutoff:
+            active.add(agent_id)
+    return active
+
+
+async def _requeue_for_repo_access_impl(db: AsyncSession, message: AgentMessage, task: Task, agent: Agent,
+                                        exc: RepoAccessError) -> None:
+    """E43: record that this account cannot see the repo, free the worker and give the task to another one."""
+    from sqlalchemy import select
+
+    from app.models import Notification, Project
+
+    now = utcnow()
+    project = await db.get(Project, task.project_id) if task.project_id else None
+    first = True
+    if project is not None:
+        first = agent.id not in repo_access_denied(project, now)
+        config = dict(project.config or {})
+        denied = dict(config.get("repo_access_denied") or {})
+        denied[agent.id] = {"at": now.isoformat(), "profile_id": exc.profile_id, "repo": exc.repo,
+                            "detail": _safe_excerpt(str(exc), 200)}
+        project.config = {**config, "repo_access_denied": denied}
+    blocked_for = repo_access_denied(project, now) if project is not None else {agent.id}
+    candidates = (await db.execute(select(Agent).where(
+        Agent.role == "worker", Agent.is_enabled.is_(True), Agent.browser_profile_id.is_not(None)))).scalars().all()
+    remaining = [w.id for w in candidates if w.id not in blocked_for]
+
+    message.execution_status = "cancelled"
+    message.claimed_by = None
+    message.claimed_at = None
+    message.response_payload = {**(message.response_payload or {}), "repo_access_denied": exc.repo,
+                                "browser_profile_id": exc.profile_id}
+    if agent.current_task_id == task.id:
+        agent.current_task_id = None
+    agent.status = "idle"
+    task.lock_owner = None
+    task.locked_at = None
+    if task.execution_mode == "manual" or not remaining:
+        task.status = "blocked"
+        task.error_message = (f"No Arena account that may take this task can see {exc.repo}. Grant the Arena GitHub app "
+                              f"access to {exc.repo}, then re-queue the task.")[:1_000]
+    else:
+        task.status = "queued"
+        task.assigned_agent_id = None
+    task.checkpoints = list(task.checkpoints or []) + [
+        {"ts": now.isoformat(), "event": "repo_access_denied", "agent_id": agent.id, "browser_profile_id": exc.profile_id,
+         "repo": exc.repo, "requeued": task.status == "queued"}
+    ]
+    if first:
+        db.add(Notification(
+            category="arena", severity="critical", title=f"Arena cannot see {exc.repo}"[:200],
+            message=(f"{agent.name} (profile {exc.profile_id}) cannot select {exc.repo} in Arena. Grant the Arena GitHub "
+                     f"app access to this repository for that account. Its tasks go to other workers meanwhile.")[:1_000],
+            link="/browsers"))
+    db.add(AuditLog(actor=agent.id, action="arena.repo_access_denied", resource_type="task", resource_id=task.id,
+                    details={"repo": exc.repo, "profile_id": exc.profile_id, "requeued": task.status == "queued",
+                             "remaining_workers": len(remaining)}, severity="warning"))
+    await db.commit()
+    await event_bus.emit("task.updated", {"task_id": task.id, "status": task.status})
+    await event_bus.emit("agent.heartbeat", {"agent_id": agent.id, "status": agent.status})
+
+
 async def _block_for_human_impl(db: AsyncSession, message: AgentMessage, task: Task, agent: Agent, exc: NeedsHumanError) -> None:
     from app.models import BrowserProfile, Notification
 

@@ -760,6 +760,7 @@ export const ar: Translations = {
       manager_stuck: 'المدير متوقف',
       window_needs_human: 'نافذة تحتاجك',
       task_blocked: 'مهمة معلّقة',
+      repo_access: 'المستودع غير مرئي',
     },
   },
 }

@@ -123,6 +123,16 @@ async def dashboard_attention(db: AsyncSession = Depends(get_db)):
         items.append({"kind": "window_needs_human", "id": profile.id, "title": profile.name or profile.id,
                       "detail": profile.needs_human_reason, "tab": "browsers",
                       "at": _iso(profile.last_heartbeat or profile.created_at)})
+    from app.runtime.loop.common import repo_access_denied
+
+    for project in (await db.execute(select(Project))).scalars():
+        denied = repo_access_denied(project)
+        if denied:  # E43: the Arena GitHub app cannot see this repository on these accounts
+            entries = (project.config or {}).get("repo_access_denied") or {}
+            repo = next((e.get("repo") for e in entries.values() if e and e.get("repo")), None) or project.name
+            latest = max((str((entries.get(a) or {}).get("at") or "") for a in denied), default="")
+            items.append({"kind": "repo_access", "id": project.id, "title": repo, "detail": ", ".join(sorted(denied)),
+                          "tab": "browsers", "at": latest or None})
     for task in (await db.execute(select(Task).where(Task.status == "blocked"))).scalars():
         items.append({"kind": "task_blocked", "id": task.id, "title": task.title, "detail": task.error_message,
                       "tab": "tasks", "at": _iso(task.updated_at or task.created_at)})

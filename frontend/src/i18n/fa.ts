@@ -760,6 +760,7 @@ export const fa: Translations = {
       manager_stuck: 'مدیر متوقف شده',
       window_needs_human: 'پنجره به شما نیاز دارد',
       task_blocked: 'کار مسدود',
+      repo_access: 'مخزن قابل مشاهده نیست',
     },
   },
 }
