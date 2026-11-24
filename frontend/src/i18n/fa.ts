@@ -748,4 +748,18 @@ export const fa: Translations = {
     connectorIdle: 'آماده',
     connectorOffline: 'آفلاین',
   },
+  needsYou: {
+    title: 'الان به شما نیاز دارد',
+    subtitle: 'هر چیزی که منتظر تصمیم یا اقدام شماست.',
+    empty: 'الان چیزی به شما نیاز ندارد.',
+    open: 'باز کردن',
+    kinds: {
+      approval: 'تأیید',
+      plan_draft: 'پیش‌نویس برنامه',
+      manager_needs_human: 'مدیر به شما نیاز دارد',
+      manager_stuck: 'مدیر متوقف شده',
+      window_needs_human: 'پنجره به شما نیاز دارد',
+      task_blocked: 'کار مسدود',
+    },
+  },
 }

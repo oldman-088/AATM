@@ -597,7 +597,7 @@ function AATMWorkspace() {
             </div>
           )}
 
-          {tab === 'dashboard' && <MissionControl projectId={activeProjectId} />}
+          {tab === 'dashboard' && <MissionControl projectId={activeProjectId} onNavigate={(next) => setTab(next as NavTab)} />}
           {tab === 'dashboard' && (
             <DashboardView
               overview={overview}

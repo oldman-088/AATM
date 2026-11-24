@@ -70,6 +70,39 @@ export function HomeOverview() {
   </section>
 }
 
+// ------------------------------------------------------------------ P1: needs you now
+
+const ATTENTION_EVENTS = [...TASK_EVENTS, 'approval.requested', 'approval.plan_release', 'manager.activity']
+
+export function NeedsYouPanel({ onNavigate }: { onNavigate?: (tab: string) => void }) {
+  const { t } = useI18n()
+  const n = t.needsYou
+  const { data, error, reload } = useLoad<any>('/dashboard/attention', ATTENTION_EVENTS)
+  if (error) return <EmptyState variant="error" onRetry={reload} testId="needs-you-error" />
+  if (!data || !Array.isArray(data.items)) return null
+  const items: any[] = data.items
+  return <Card className={items.length ? 'border-amber-500/50' : ''}>
+    <section data-testid="needs-you" className="text-start">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
+          <AlertTriangle className={`h-4 w-4 ${items.length ? 'text-amber-300' : 'text-slate-400'}`} />{n.title}
+          {items.length > 0 && <Badge variant="warning">{data.count ?? items.length}</Badge>}
+        </h3>
+        <p className="text-xs text-slate-400">{n.subtitle}</p>
+      </div>
+      {items.length === 0 && <p data-testid="needs-you-empty" className="mt-2 text-xs text-emerald-300">{n.empty}</p>}
+      {items.length > 0 && <ul className="mt-2 divide-y divide-slate-800">
+        {items.map((item) => <li key={`${item.kind}:${item.id}`} data-testid={`needs-you-${item.kind}`} className="flex flex-wrap items-center gap-2 py-2 text-xs">
+          <Badge variant={item.kind === 'approval' || item.kind === 'plan_draft' ? 'info' : 'warning'}>{(n.kinds as Record<string, string>)[item.kind] || item.kind}</Badge>
+          <span dir="auto" className="min-w-0 flex-1 truncate text-slate-200">{item.title}</span>
+          {item.detail && <span dir="auto" className="min-w-0 max-w-full truncate text-slate-400 sm:max-w-xs">{item.detail}</span>}
+          {onNavigate && <Button size="sm" variant="secondary" onClick={() => onNavigate(item.tab)}>{n.open}</Button>}
+        </li>)}
+      </ul>}
+    </section>
+  </Card>
+}
+
 // ------------------------------------------------------------------ 8-step timeline
 
 export function ProjectTimeline({ projectId }: { projectId: string | null }) {
@@ -285,8 +318,9 @@ export function RecoveryPanel() {
   </Card>
 }
 
-export function MissionControl({ projectId }: { projectId: string | null }) {
+export function MissionControl({ projectId, onNavigate }: { projectId: string | null; onNavigate?: (tab: string) => void }) {
   return <div className="space-y-4" data-testid="mission-control">
+    <NeedsYouPanel onNavigate={onNavigate} />
     <HomeOverview />
     <ProjectTimeline projectId={projectId} />
     <div className="grid gap-4 xl:grid-cols-2">

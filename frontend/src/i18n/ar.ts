@@ -748,4 +748,18 @@ export const ar: Translations = {
     connectorIdle: 'جاهز',
     connectorOffline: 'غير متصل',
   },
+  needsYou: {
+    title: 'يحتاجك الآن',
+    subtitle: 'كل ما ينتظر قرارك أو تدخلك.',
+    empty: 'لا شيء يحتاجك الآن.',
+    open: 'فتح',
+    kinds: {
+      approval: 'موافقة',
+      plan_draft: 'مسودة خطة',
+      manager_needs_human: 'المدير يحتاجك',
+      manager_stuck: 'المدير متوقف',
+      window_needs_human: 'نافذة تحتاجك',
+      task_blocked: 'مهمة معلّقة',
+    },
+  },
 }
