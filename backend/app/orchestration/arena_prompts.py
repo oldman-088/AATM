@@ -439,6 +439,8 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         " into one task.",
         "- E50: name exact file paths (for example tests/test_reports_pdf.py), never glob patterns such as"
         " test_*.py: an asterisk is read as Markdown and disappears. Put every path in backticks.",
+        "- E41: database migrations (for example Alembic revisions) belong to one task. If two tasks must each add"
+        " one, the second lists the first in depends_on, so two revisions never share a parent.",
         "- Front-end and back-end integration: when the plan has a frontend task and a backend task that must"
         " agree on an interface, exactly one implementation task (not a documentation-only task) creates and"
         " owns one shared contract file, for example docs/API.md or docs/CONTRACTS.md. The frontend task's"
