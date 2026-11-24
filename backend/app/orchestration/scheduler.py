@@ -49,6 +49,42 @@ PROTECTED_BRANCH_NAMES = ("main", "master", "production", "prod", "release")
 # being executed silently. The patterns are deliberately tolerant of phrasing so that
 # variants ("merge master into main", "push to production", "rm -rf the database")
 # cannot slip past the governance gate.
+# P2 T16 (E31, E41 c): tasks of one project that change the same files, or that both add database migrations,
+# do not run at the same time. A shared contract or doc file (docs/, *.md) is meant to be shared and never blocks.
+_FOOTPRINT_PATH_RE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,6}|[\w-]+\.(?:py|tsx?|jsx?|ya?ml|json|toml|sql|css|html))(?![\w/-])"
+)
+_MIGRATION_RE = re.compile(r"\b(alembic|migrations?|db revision|schema migration)\b", re.IGNORECASE)
+UNMERGED_PR_STATUSES = {"pr_open", "in_review", "changes_requested", "approved"}
+
+
+def task_footprint(task: Any) -> tuple[frozenset[str], bool]:
+    """(files the task names, whether it adds a database migration), read from its title and description."""
+    text = f"{getattr(task, 'title', '') or ''}\n{getattr(task, 'description', '') or ''}"
+    paths = frozenset(
+        p.lower().lstrip("./") for p in _FOOTPRINT_PATH_RE.findall(text)
+        if not p.lower().endswith(".md") and not p.lower().startswith(("docs/", "./docs/"))
+    )
+    migration = bool(_MIGRATION_RE.search(text)) or any("alembic" in p or "/migrations/" in p for p in paths)
+    return paths, migration
+
+
+def footprint_conflict(task: Any, others: list[Any]) -> str | None:
+    """Why ``task`` must wait for one of ``others`` (same project, running or with an unmerged migration PR)."""
+    paths, migration = task_footprint(task)
+    for other in others:
+        if other.id == task.id or other.project_id != task.project_id:
+            continue
+        other_paths, other_migration = task_footprint(other)
+        if migration and other_migration:
+            return f"waits for {other.id}: both add database migrations"
+        if other.status in {"assigned", "in_progress"}:
+            shared = sorted(paths & other_paths)
+            if shared:
+                return f"waits for {other.id}: both change {', '.join(shared[:3])}"
+    return None
+
+
 HIGH_RISK_DIRECTIVE_RULES: list[tuple[re.Pattern[str], str, str]] = [
     (
         re.compile(
@@ -333,6 +369,9 @@ class TaskScheduler:
 
         tasks_res = await db.execute(select(Task).where(Task.status.in_(["queued", "assigned", "in_progress"])))
         tasks = list(tasks_res.scalars().all())
+        # Open, unmerged PRs still count for migrations: two Alembic revisions on one parent break the base (E41).
+        unmerged = list((await db.execute(select(Task).where(
+            Task.status.in_(UNMERGED_PR_STATUSES), Task.task_type == "implementation"))).scalars().all())
         queued = [t for t in tasks if t.status == "queued" and (only_task_ids is None or t.id in only_task_ids)]
         queued.sort(key=lambda t: (-PRIORITY_WEIGHT.get(t.priority, 2), to_naive_utc(t.created_at) or to_naive_utc(utcnow())))
 
@@ -367,6 +406,13 @@ class TaskScheduler:
             limit = project_limit[task.project_id]
             if limit is not None and project_in_flight.get(task.project_id, 0) >= limit:
                 continue
+            if task.task_type == "implementation":
+                # T16: never run two tasks that change the same files, or two migrations, of one project at once.
+                busy = [t for t in tasks if t.project_id == task.project_id and t.id != task.id and t.task_type == "implementation"
+                        and (t.status in {"assigned", "in_progress"} or t.status in UNMERGED_PR_STATUSES)]
+                busy += [t for t in unmerged if t.project_id == task.project_id and t.id != task.id]
+                if busy and footprint_conflict(task, busy):
+                    continue
             if task.project_id not in repo_blocked:
                 # E43: workers whose Arena account cannot see this project's repository get none of its tasks.
                 from app.runtime.loop.common import repo_access_denied
