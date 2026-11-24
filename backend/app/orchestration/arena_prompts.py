@@ -198,6 +198,9 @@ def build_task_prompt(task: Task, project: Project | None, agent: Agent | None =
         "- Add or update automated tests for every change.",
         f"- Run the test suite{f' (`{test_command}`)' if test_command else ''} and the linters before you finish.",
         "- Report the exact commands you ran and their real results.",
+        "- E49: before you open the pull request, read the CI workflow files (.github/workflows/). Every CI job must"
+        " pass with your change. A test that needs a package only some jobs install goes where that job runs it, or"
+        " guards the import with `pytest.importorskip(...)`.",
         "",
         "## Security requirements",
         "- Never commit secrets, API keys, tokens, passwords, cookies, .env files or local databases.",
@@ -434,6 +437,8 @@ def build_manager_plan_prompt(goal: str, project: Project | None, team: list[dic
         "- Ownership: every task names the files it creates or changes and the functions it changes."
         " Two tasks must never change the same function; if two pieces of work touch one function, merge them"
         " into one task.",
+        "- E50: name exact file paths (for example tests/test_reports_pdf.py), never glob patterns such as"
+        " test_*.py: an asterisk is read as Markdown and disappears. Put every path in backticks.",
         "- Front-end and back-end integration: when the plan has a frontend task and a backend task that must"
         " agree on an interface, exactly one implementation task (not a documentation-only task) creates and"
         " owns one shared contract file, for example docs/API.md or docs/CONTRACTS.md. The frontend task's"
@@ -631,6 +636,8 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
             REVIEW_FORMAT,
             "```",
             "- approve only when every acceptance criterion is met by the diff. After approve, merge the pull request yourself when CI on its head commit is green.",
+            "- E49: check every CI job on the pull request's head commit on GitHub. A failing job is request_changes:"
+            " name the job and the error in a comment.",
             "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
             "- summary_ar: your verdict for the owner, in Arabic.",
             f"- pr_number: {task.pr_number or 'the number of the pull request above'}. Review only this pull request; "

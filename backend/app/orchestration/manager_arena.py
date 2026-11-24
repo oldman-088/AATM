@@ -267,14 +267,23 @@ def validate_plan_graph(tasks: list[dict[str, Any]]) -> list[str]:
     return errors
 
 
+# E50: "test_reports_*.py" loses its asterisk when Markdown renders it, leaving "test_reports_.py".
+_LOST_GLOB_RE = re.compile(r"(?<![\w*])([\w/.-]*[^\W_]_\.(?:py|tsx?|jsx?|md|ya?ml|json))(?![\w*])")
+
+
 def plan_warnings(tasks: list[dict[str, Any]]) -> list[str]:
-    """Warn when more than half of the tasks depend on one task: the plan is a chain, not parallel work."""
+    """Warn when the plan is a chain, not parallel work, or names a file whose glob asterisk was lost (E50)."""
     count = len(tasks)
-    return [
+    warnings = [
         f"{n} of {count} tasks depend on task {dep} ({tasks[dep]['title']}). "
         "Check that each of them really needs that output; independent tasks should run in parallel."
         for dep, n in chained_dependencies(tasks)
     ]
+    for index, task in enumerate(tasks):
+        for name in sorted(set(_LOST_GLOB_RE.findall(f"{task.get('title', '')} {task.get('description', '')}"))):
+            warnings.append(f"task {index} ({task['title']}) names {name}, which looks like a pattern whose * was lost; "
+                            "name the exact file.")
+    return warnings
 
 
 # A frontend and a backend task of one plan must name the same contract file (E29). Sides are read from the
