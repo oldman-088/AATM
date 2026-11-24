@@ -16,6 +16,7 @@ state lives in ``arena_sessions`` / ``tasks``, so a backend or bridge restart re
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -88,6 +89,7 @@ NO_PR_QUIET_CHECKS = 2    # quiet GitHub checks without a PR before a nudge
 SUBMIT_FAILURES_BEFORE_HUMAN = 3
 MAX_REPORT_CHARS = 60_000
 SENDABLE_TASK_STATUSES = {"queued", "assigned", "in_progress", "pr_open", "in_review", "changes_requested", "approved", "merged"}
+BASE_HEAD_RETRY_DELAYS = (2.0, 6.0)  # E47: waits before the 2nd and 3rd base-head lookups
 LIVE_CODE_MIN_SECONDS = 10.0   # at most one GitHub live-diff publish per session per interval
 LIVE_CODE_MAX_FILES = 20       # files streamed per new head (the summary lists all of them)
 FOLLOW_UP_FAILURES_BEFORE_HUMAN = 3  # failed follow-up sends in a row before the owner is asked to look
@@ -213,13 +215,21 @@ class ArenaAgentRunner:
         if not valid:
             raise ArenaAgentError("invalid_base_branch", "The project's base branch name is invalid.")
         cwd = Path(project.repo_path if project and project.repo_path else ".")
-        code, out, err = await git_workflow_manager._exec(
-            ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{base}"], cwd,
-        )
-        match = re.match(r"^([0-9a-fA-F]{40,64})\s+refs/heads/", out)
-        if code != 0 or match is None:
-            raise ArenaAgentError("base_head_unavailable", err or f"Could not resolve origin/{base}.")
-        return match.group(1).lower()
+        delays = (0.0, *BASE_HEAD_RETRY_DELAYS)
+        err = ""
+        for attempt, delay in enumerate(delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            code, out, err = await git_workflow_manager._exec(
+                ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{base}"], cwd,
+            )
+            match = re.match(r"^([0-9a-fA-F]{40,64})\s+refs/heads/", out)
+            if code == 0 and match is not None:
+                return match.group(1).lower()
+            if code == 2:  # --exit-code: the branch does not exist on origin; retrying cannot help
+                break
+            logger.warning("base head lookup for origin/%s failed (attempt %d/%d): %s", base, attempt, len(delays), err[:200])
+        raise ArenaAgentError("base_head_unavailable", err or f"Could not resolve origin/{base}.")
 
     async def _refresh_send_target(self, db: AsyncSession, session: ArenaSession, *, task_id: str | None = None,
                                    kind: str = "follow_up") -> tuple[ArenaSession | None, Task | None]:
