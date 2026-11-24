@@ -187,6 +187,27 @@ export function CommandBridge({
     [data.projectId, data.reload, t.bridge.orderFailed],
   )
 
+  const clearChat = useCallback(async () => {
+    if (!window.confirm(t.bridge.clearChatConfirm)) return
+    setChatError(null)
+    try {
+      await apiFetch('/chat', { method: 'DELETE' })
+      await data.reload()
+    } catch (error: any) {
+      setChatError(error?.message || t.bridge.orderFailed)
+    }
+  }, [data.reload, t.bridge.clearChatConfirm, t.bridge.orderFailed])
+
+  const newConversation = useCallback(async () => {
+    setChatError(null)
+    try {
+      await apiFetch('/arena/manager/new-session', { method: 'POST', body: JSON.stringify({}) })
+      await data.reload()
+    } catch (error: any) {
+      setChatError(error?.message || t.bridge.orderFailed)
+    }
+  }, [data.reload, t.bridge.orderFailed])
+
   const decideApproval = useCallback(
     async (approvalId: string, decision: 'approved' | 'rejected') => {
       await runAction(() => apiFetch(`/approvals/${approvalId}/decide`, { method: 'POST', body: JSON.stringify({ decision }) }))
@@ -365,6 +386,8 @@ export function CommandBridge({
       onSubmitDirective={submitDirective}
       onDecideApproval={decideApproval}
       onEmergencyStop={toggleEmergencyStop}
+      onClearChat={clearChat}
+      onNewConversation={newConversation}
       anyEmergencyStopped={anyStopped}
       banner={focusId ? null : onboardingBanner}
       mobile={isMobile}

@@ -653,6 +653,9 @@ export interface Translations {
     emergencyStop: string
     resumeSystem: string
     directivePlaceholder: string
+    clearChat: string
+    clearChatConfirm: string
+    newConversation: string
     send: string
     sending: string
     chatEmpty: string
