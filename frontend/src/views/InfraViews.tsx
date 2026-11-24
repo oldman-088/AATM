@@ -882,7 +882,7 @@ export function ProjectsMemoryView({
         {t.projects.title}
       </h2>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid items-start gap-4 md:grid-cols-2">
         <Card className="space-y-3">
           {projects.length === 0 ? (
             <EmptyState variant="empty" testId="projects-empty" />
