@@ -525,6 +525,48 @@ class ReviewMergeService:
             logger.warning("automatic snapshot failed with exit code %s", result.returncode)
 
     # ------------------------------------------------------------------ step 8
+    async def _ensure_integration_task(self, db: AsyncSession, project: Project, tasks: list[Task], work: list[Task]) -> bool:
+        """P4 Q4: before a project is closed, one worker runs the whole product end to end and reports (E29, E42).
+
+        Returns True when a new integration task was created (the project stays open until it is done). A task that
+        was added after the last integration check gets a new check; a cancelled check is the owner's decision."""
+        prefix = f"integration:{project.id}:"
+        checks = [t for t in work if (t.idempotency_key or "").startswith(prefix)]
+        others = [t for t in work if t not in checks]
+        if not others:
+            return False
+        newest = max((_naive(t.created_at) for t in others if t.created_at), default=None)
+        if any(newest is None or (t.created_at and _naive(t.created_at) >= newest) for t in checks):
+            return False
+        key = f"{prefix}{len(others)}"[:128]
+        if any(t.idempotency_key == key for t in tasks):
+            return False
+        base = project_base_branch(project)
+        task = Task(
+            project_id=project.id, title=f"Integration check: run {project.name} end to end"[:240], priority="high",
+            status="queued", task_type="implementation", idempotency_key=key,
+            description="\n".join([
+                "Every planned task of this project is merged. Before the project is closed, check the product as a whole:",
+                f"1. Start from the latest {base}. Install the dependencies the way the README and CI do.",
+                "2. Start the application and use its main flows end to end: every page and endpoint the tasks added.",
+                "3. Run the full test suite and the linters.",
+                "4. Check that every API route requires authentication unless it is explicitly public.",
+                "5. Check that the frontend and the backend agree on the shared contract file (for example docs/API.md).",
+                "6. Write docs/INTEGRATION_REPORT.md: the exact commands you ran, what worked and what failed.",
+                "7. Fix what is broken in the same pull request when the fix is small; otherwise list it in the report.",
+                "Open one pull request with the report and the fixes.",
+            ]),
+        )
+        db.add(task)
+        db.add(ChatMessage(project_id=project.id, sender_type="manager", sender_id="manager-0",
+                           content=f"All planned tasks of '{project.name}' are merged. A final integration check runs before "
+                                   "the project is closed.", metadata_json={"kind": "integration_check"}))
+        db.add(AuditLog(actor="manager-0", action="project.integration_check", resource_type="project", resource_id=project.id,
+                        details={"tasks": len(others), "idempotency_key": key}))
+        await db.commit()
+        await event_bus.emit("task.created", {"task_id": task.id, "project_id": project.id})
+        return True
+
     async def check_project_completion(self, db: AsyncSession, project_id: str | None) -> bool:
         if not project_id:
             return False
@@ -538,6 +580,9 @@ class ReviewMergeService:
         if any(t.status not in FINISHED_TASK_STATUSES for t in work):
             return False
         if any(t.status in ACTIVE_TASK_STATUSES for t in tasks):
+            return False
+        if (project.config or {}).get("integration_check", True) is not False and await self._ensure_integration_task(
+                db, project, tasks, work):
             return False
 
         task_ids = [t.id for t in tasks]
