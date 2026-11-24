@@ -16,7 +16,7 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 light:border-slate-200 light:bg-white',
+        'rounded-xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-sm shadow-black/20 backdrop-blur-sm light:border-slate-200 light:bg-white',
         className
       )}
     >
@@ -66,17 +66,17 @@ export function Button({
   size?: 'sm' | 'md'
 }) {
   const vClass = {
-    primary: 'bg-sky-600 hover:bg-sky-500 text-white border-sky-500',
-    secondary: 'bg-slate-800 hover:bg-slate-700 text-slate-100 border-slate-700',
-    danger: 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500',
+    primary: 'bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border-sky-500 shadow-sm shadow-sky-950/30',
+    secondary: 'bg-slate-800/80 hover:bg-slate-700 active:bg-slate-800 text-slate-100 border-slate-700',
+    danger: 'bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white border-rose-500',
     ghost: 'bg-transparent hover:bg-slate-800/60 text-slate-300 border-transparent',
   }[variant]
-  const sClass = size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3.5 py-2 text-sm'
+  const sClass = size === 'sm' ? 'px-2.5 py-1.5 text-xs' : 'px-4 py-2 text-sm'
   return (
     <button
       {...props}
       className={cn(
-        'inline-flex items-center justify-center gap-1.5 rounded-lg border font-medium transition disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex items-center justify-center gap-1.5 rounded-lg border font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-50',
         vClass,
         sClass,
         className
