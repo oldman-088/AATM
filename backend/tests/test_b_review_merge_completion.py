@@ -240,7 +240,7 @@ async def _setup_project(factory, tmp_path: Path) -> tuple[str, Path, Path]:
             repo_path=str(repo),
             repo_url=f"https://github.com/{REPO_SLUG}",
             default_branch="main",
-            config={"worktree_mode": True, "auto_pr": True},
+            config={"worktree_mode": True, "auto_pr": True, "integration_check": False},
         )
         db.add(project)
         await db.commit()
