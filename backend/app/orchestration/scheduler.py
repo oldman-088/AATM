@@ -114,6 +114,35 @@ HIGH_RISK_DIRECTIVE_RULES: list[tuple[re.Pattern[str], str, str]] = [
 ]
 
 
+# E45: standard pull-request workflow wording names main without asking anyone to change it
+# ("open a pull request against main", "rebase onto main", "merge main into your branch").
+# These phrases are removed before the gate runs; any other mention of main is still gated.
+_GAP = r"(?:(?!\b(?:push|merge|force|cherry|deploy)\b)[^.;,!?\n]){0,%d}?"
+BENIGN_WORKFLOW_PHRASES = re.compile(
+    r"\b(pull[\s\-]?requests?|PRs?)\b" + _GAP % 30 + r"\b(against|into|to|targeting|on|for|onto)\s+(the\s+)?(origin/)?(main|master)\b"
+    r"|\b(rebase|update|sync|refresh|bring)\b" + _GAP % 40 + r"\b(on|onto|with|from)\s+(the\s+)?(latest\s+)?(origin/)?(main|master)\b"
+    r"|\bmerge\s+(the\s+latest\s+)?(origin/)?(main|master)\s+into\s+(your|the|this|its|their|each)\b[^.]{0,20}?\bbranch\b"
+    r"|\b(pull|fetch)\s+(the\s+latest\s+)?(origin/)?(main|master)\b"
+    r"|\bbranch(ed)?\s+(off|from)\s+(the\s+)?(origin/)?(main|master)\b",
+    re.IGNORECASE,
+)
+# A rule for the workers such as "do not push to main" forbids the action; only a negation directly
+# before the verb counts, so "don't wait, just push to main" is still gated.
+_DIRECT_NEGATION = re.compile(r"(\b(never|not|no)|n't)\s+(directly\s+|ever\s+)?$", re.IGNORECASE)
+
+
+def high_risk_directive_categories(content: str) -> list[tuple[str, str]]:
+    """The (action_type, title) pairs a Manager Chat directive must get owner approval for (E45)."""
+    text = BENIGN_WORKFLOW_PHRASES.sub(" ", content or "")
+    found: list[tuple[str, str]] = []
+    for pattern, action_type, title in HIGH_RISK_DIRECTIVE_RULES:
+        if any(action_type == seen for seen, _ in found):
+            continue
+        if any(not _DIRECT_NEGATION.search(text[max(0, m.start() - 30):m.start()]) for m in pattern.finditer(text)):
+            found.append((action_type, title))
+    return found
+
+
 class TaskScheduler:
     """Dependency-aware DAG scheduler, lock manager, retry engine & Manager coordinator."""
 
@@ -843,9 +872,7 @@ class TaskScheduler:
 
         # Keep the regex gate as an independent safety layer, before model planning.
         gated_categories: set[str] = set()
-        for pattern, action_type, title in HIGH_RISK_DIRECTIVE_RULES:
-            if action_type in gated_categories or not pattern.search(content):
-                continue
+        for action_type, title in high_risk_directive_categories(content):
             gated_categories.add(action_type)
             approval = ApprovalRequest(
                 project_id=project_id,
@@ -853,7 +880,7 @@ class TaskScheduler:
                 title=title,
                 description=f"Requested via Manager Chat directive: {content}",
                 requested_by="manager-0",
-                payload={"directive": content[:500], "action_type": action_type},
+                payload={"directive": content[:500], "action_type": action_type, "chat_message_id": user_message_id},
                 status="pending",
             )
             db.add(approval)

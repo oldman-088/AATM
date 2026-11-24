@@ -145,6 +145,14 @@ async def decide_approval(
         await db.refresh(app)
         if scale_result is not None:
             await event_bus.emit("approval.scale_result", {"approval_id": app.id, **scale_result})
+    if (app.payload or {}).get("chat_message_id"):
+        # E45: a plan the high-risk gate held for this Manager Chat message is released or cancelled.
+        from app.orchestration.manager_arena import manager_arena_runtime
+
+        release = await manager_arena_runtime.release_deferred_plan(db, app)
+        await db.refresh(app)
+        if release is not None:
+            await event_bus.emit("approval.plan_release", {"approval_id": app.id, **release})
     if app.action_type == "merge":
         from app.orchestration.review import review_service
 

@@ -1312,6 +1312,13 @@ class ManagerArenaRuntime:
         """Validate a model plan before any task exists: policy, graph, then draft-or-create (E8)."""
         gated = list((job.context or {}).get("gated_categories") or [])
         if gated:
+            # E45: the plan waits only while an owner approval for this request is still open.
+            gated, rejected = await self._gate_state(db, job, gated)
+            if rejected:
+                await self._finish(db, job, status="failed", error="owner rejected the high-risk approval", raw=raw)
+                await self._reply(db, job, "رفض المالك الموافقة على الطلب عالي الخطورة، فلم تُنشأ أي مهام.", failed=True)
+                return
+        if gated:
             await self._finish(db, job, result={"plan": plan, "deferred": gated}, raw=raw)
             await self._reply(db, job, plan["summary_ar"] + "\n\nلم تُنشأ المهام: طلب عالي الخطورة ينتظر موافقة المالك.", plan=plan,
                               deferred=gated)
@@ -1334,6 +1341,47 @@ class ManagerArenaRuntime:
             await self._make_draft(db, job, plan, raw=raw, warnings=warnings, reasons=reasons)
             return
         await self._create_plan_tasks(db, job, plan, raw=raw, warnings=warnings)
+
+    @staticmethod
+    async def _gate_approvals(db: AsyncSession, chat_message_id: str | None) -> list[ApprovalRequest]:
+        """The owner approvals the high-risk gate opened for one Manager Chat message."""
+        if not chat_message_id:
+            return []
+        rows = (await db.execute(select(ApprovalRequest).where(ApprovalRequest.requested_by == MANAGER_AGENT_ID))).scalars()
+        return [a for a in rows if (a.payload or {}).get("chat_message_id") == chat_message_id]
+
+    async def _gate_state(self, db: AsyncSession, job: ManagerJob, gated: list[str]) -> tuple[list[str], bool]:
+        """(categories still waiting for the owner, whether the owner rejected one). Unlinked categories keep waiting."""
+        approvals = await self._gate_approvals(db, job.chat_message_id)
+        if any(a.status == "rejected" for a in approvals):
+            return gated, True
+        approved = {a.action_type for a in approvals if a.status == "approved"}
+        return [c for c in gated if c not in approved], False
+
+    async def release_deferred_plan(self, db: AsyncSession, approval: ApprovalRequest) -> dict[str, Any] | None:
+        """E45: when the owner decides a gate approval, a plan that was waiting for it goes on (or is cancelled)."""
+        chat_message_id = (approval.payload or {}).get("chat_message_id")
+        if approval.requested_by != MANAGER_AGENT_ID or not chat_message_id:
+            return None
+        job = (await db.execute(
+            select(ManagerJob).where(ManagerJob.chat_message_id == chat_message_id, ManagerJob.kind == "plan")
+            .order_by(ManagerJob.created_at.desc()))).scalars().first()
+        result = (job.result or {}) if job is not None else {}
+        if job is None or job.status != "done" or not result.get("deferred") or not isinstance(result.get("plan"), dict):
+            return None  # no plan yet: _apply_plan checks the approvals when the manager's reply arrives
+        waiting, rejected = await self._gate_state(db, job, list(result["deferred"]))
+        if rejected:
+            job.result = {k: v for k, v in result.items() if k != "deferred"}
+            await self._finish(db, job, status="failed", error="owner rejected the high-risk approval")
+            await self._reply(db, job, "رفض المالك الموافقة على الطلب عالي الخطورة، فلم تُنشأ أي مهام.", failed=True)
+            return {"job_id": job.id, "released": False, "rejected": True}
+        if waiting:
+            return {"job_id": job.id, "released": False, "waiting": waiting}
+        plan = result["plan"]
+        job.result = {**{k: v for k, v in result.items() if k != "deferred"}, "released_by_approval": approval.id}
+        job.context = {**(job.context or {}), "gated_categories": []}
+        await self._apply_plan(db, job, plan, raw=job.raw_reply or "")
+        return {"job_id": job.id, "released": True, "status": job.status}
 
     async def _refuse(self, db: AsyncSession, job: ManagerJob, reason: str, *, raw: str | None = None) -> ChatMessage:
         """A goal the policy forbids: no tasks, the job fails with the reason, and the owner sees why."""
