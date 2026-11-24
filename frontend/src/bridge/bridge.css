@@ -511,6 +511,8 @@ html.bridge-mounted body {
 /* name tag */
 
 .bridge-tag {
+  position: relative;
+  z-index: 2;
   min-height: 58px;
   width: min(100%, 220px);
   display: flex;
