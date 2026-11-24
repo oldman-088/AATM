@@ -9,17 +9,17 @@ export type SeatPosition = { left: string; top: string; tilt: string }
 /** The 4 default workstations form an arc: outer seats higher, inner seats lower (spec §2.4). */
 export const SEAT_POSITIONS: SeatPosition[] = [
   { left: '2.5%', top: '12%', tilt: '18deg' },
-  { left: '21%', top: '32%', tilt: '10deg' },
-  { left: '55%', top: '32%', tilt: '-10deg' },
+  { left: '21%', top: '28%', tilt: '10deg' },
+  { left: '55%', top: '28%', tilt: '-10deg' },
   { left: '73.5%', top: '12%', tilt: '-18deg' },
 ]
 
 /** Extra employees sit in a second, smaller arc behind the first (scale 0.8). */
 export const EXTRA_POSITIONS: SeatPosition[] = [
-  { left: '12%', top: '20%', tilt: '14deg' },
-  { left: '31%', top: '40%', tilt: '6deg' },
-  { left: '55%', top: '40%', tilt: '-6deg' },
-  { left: '72%', top: '20%', tilt: '-14deg' },
+  { left: '12%', top: '18%', tilt: '14deg' },
+  { left: '31%', top: '34%', tilt: '6deg' },
+  { left: '55%', top: '34%', tilt: '-6deg' },
+  { left: '72%', top: '18%', tilt: '-14deg' },
 ]
 
 export function seatColor(index: number): string {
@@ -30,7 +30,7 @@ export function seatPosition(index: number): { position: SeatPosition; extra: bo
   if (index < SEAT_POSITIONS.length) return { position: SEAT_POSITIONS[index], extra: false }
   const slot = EXTRA_POSITIONS[(index - SEAT_POSITIONS.length) % EXTRA_POSITIONS.length]
   const row = Math.floor((index - SEAT_POSITIONS.length) / EXTRA_POSITIONS.length)
-  const top = Math.min(72, parseFloat(slot.top) + row * 10)
+  const top = Math.min(36, parseFloat(slot.top) + row * 10)
   return { position: { ...slot, top: `${top}%` }, extra: true }
 }
 
