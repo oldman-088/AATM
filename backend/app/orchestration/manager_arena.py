@@ -336,9 +336,18 @@ def clarification_question(data: Any) -> str | None:
     return question.strip()
 
 
+def _review_pr_mismatch(job: ManagerJob, verdict: dict[str, Any]) -> str | None:
+    """E48: a verdict that names another pull request is never posted (the reply belongs to an older review)."""
+    expected = (job.context or {}).get("pr_number")
+    stated = verdict.get("pr_number")
+    if not expected or not stated or int(stated) == int(expected):
+        return None
+    return f"the review reply names PR #{stated}, but this review is for PR #{expected}; nothing was posted"
+
+
 def _json_retry_prompt(kind: str) -> str:
     """The second chance for a reply without JSON: the retry carries an empty JSON template to fill (E33)."""
-    template = ('{"verdict": "", "summary_ar": "", "comments": []}' if kind == "review"
+    template = ('{"pr_number": 0, "verdict": "", "summary_ar": "", "comments": []}' if kind == "review"
                 else '{"summary_ar": "", "tasks": []}')
     return (MANAGER_JSON_RETRY + "\n\nFill in this exact template (replace the empty values) and reply with only "
             "the JSON block:\n```json\n" + template + "\n```")
@@ -845,6 +854,9 @@ class ManagerArenaRuntime:
                 if parsed is None:
                     await self._needs_human(db, job, f"invalid JSON after one retry: {error}", raw=reply)
                     return {"job_id": job.id, "status": job.status, "error": error}
+                if job.kind == "review" and (mismatch := _review_pr_mismatch(job, parsed)):
+                    await self._needs_human(db, job, mismatch, raw=reply)
+                    return {"job_id": job.id, "status": job.status, "error": "wrong_pull_request"}
                 if job.kind == "review":
                     # E23: a large review is split into parts; combine the manager's own verdicts.
                     parts = self._review_prompt_parts.get(job.id) or []
@@ -911,6 +923,9 @@ class ManagerArenaRuntime:
                     parsed, error = validate_manager_review(prose)
             if parsed is None:
                 await self._needs_human(db, job, f"review part {offset} had no verdict: {error}", raw=reply)
+                return None
+            if mismatch := _review_pr_mismatch(job, parsed):
+                await self._needs_human(db, job, f"review part {offset}: {mismatch}", raw=reply)
                 return None
             verdicts.append(parsed)
         return _combine_review_verdicts(verdicts)
@@ -1223,6 +1238,7 @@ class ManagerArenaRuntime:
         ]
         self._review_prompt_parts[job.id] = prompts
         job.context = {**(job.context or {}), "parent_task_id": parent.id, "pr_url": parent.pr_url,
+                       "pr_number": parent.pr_number,
                        "changed_files": [f["filename"] for f in files][:100], "diff_chars": len(diff),
                        "review_parts": len(prompts), "prompt_chars": sum(len(p) for p in prompts)}
         return prompts

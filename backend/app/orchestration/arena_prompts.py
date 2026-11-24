@@ -333,7 +333,7 @@ PLAN_FORMAT = (
     '   "acceptance_criteria": ["..."], "depends_on": []}\n'
     "]}"
 )
-REVIEW_FORMAT = '{"verdict": "approve" | "request_changes", "summary_ar": "...", "comments": ["..."]}'
+REVIEW_FORMAT = '{"pr_number": 0, "verdict": "approve" | "request_changes", "summary_ar": "...", "comments": ["..."]}'
 
 
 def manager_marker(kind: str) -> str:
@@ -602,7 +602,7 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
             manager_role_block(team, project),
             "",
             f"## Review of {pr_title_prefix(task.id)} {task.title} — round {round_number}{part_note}",
-            f"Pull request: {pr_url or 'unknown'} · Worker: {task.assigned_agent_id or 'unknown'}",
+            f"Pull request: #{task.pr_number or '?'} {pr_url or 'unknown'} · Worker: {task.assigned_agent_id or 'unknown'}",
             f"Files: {total} changed ({len(page_files)} in this part) · Diff: {len(diff or '')} characters",
             "",
             "## Task",
@@ -633,6 +633,8 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
             "- approve only when every acceptance criterion is met by the diff. After approve, merge the pull request yourself when CI on its head commit is green.",
             "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
             "- summary_ar: your verdict for the owner, in Arabic.",
+            f"- pr_number: {task.pr_number or 'the number of the pull request above'}. Review only this pull request; "
+            "AATM discards a verdict that names another pull request.",
         ])
 
     report_limit = max(1_000, max_chars // 5)
@@ -839,5 +841,11 @@ def validate_manager_review(data: dict[str, Any] | None) -> tuple[dict[str, Any]
         return None, "comments must be a list of non-empty strings."
     if verdict == "request_changes" and not comments:
         return None, "request_changes needs at least one comment."
-    return {"verdict": verdict, "summary_ar": data["summary_ar"].strip()[:5_000],
-            "comments": [c.strip()[:2_000] for c in comments][:30]}, ""
+    result: dict[str, Any] = {"verdict": verdict, "summary_ar": data["summary_ar"].strip()[:5_000],
+                              "comments": [c.strip()[:2_000] for c in comments][:30]}
+    pr_number = data.get("pr_number")
+    if isinstance(pr_number, str) and pr_number.strip().lstrip("#").isdigit():
+        pr_number = int(pr_number.strip().lstrip("#"))
+    if isinstance(pr_number, int) and not isinstance(pr_number, bool) and pr_number > 0:
+        result["pr_number"] = pr_number  # E48: the PR the manager says it reviewed (0 or missing = not stated)
+    return result, ""
