@@ -255,6 +255,7 @@ export function ManagerChatView({
   onSelectProject,
   error,
   onReload,
+  onChatCleared,
 }: {
   messages: any[]
   projectId: string | null
@@ -262,6 +263,7 @@ export function ManagerChatView({
   onSelectProject?: (id: string) => void
   error?: string | null
   onReload: () => void
+  onChatCleared?: () => void
 }) {
   const { t, formatDate } = useI18n()
   const [text, setText] = useState('')
@@ -273,6 +275,7 @@ export function ManagerChatView({
     setSendError(null)
     try {
       await apiFetch('/chat', { method: 'DELETE' })
+      onChatCleared?.()
       onReload()
     } catch (error: any) {
       setSendError(error?.message || t.chat.projectRequired)
