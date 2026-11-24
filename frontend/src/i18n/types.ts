@@ -740,6 +740,7 @@ export interface Translations {
       manager_stuck: string
       window_needs_human: string
       task_blocked: string
+      repo_access: string
     }
   }
 }

@@ -335,6 +335,7 @@ class TaskScheduler:
         # tasks run at once; a project without the setting has no extra cap beyond the worker ceiling.
         project_limit: dict[str | None, int | None] = {}
         project_in_flight: dict[str | None, int] = {}
+        repo_blocked: dict[str | None, set[str]] = {}
         for t in tasks:
             if t.status in {"assigned", "in_progress"}:
                 project_in_flight[t.project_id] = project_in_flight.get(t.project_id, 0) + 1
@@ -358,6 +359,11 @@ class TaskScheduler:
             limit = project_limit[task.project_id]
             if limit is not None and project_in_flight.get(task.project_id, 0) >= limit:
                 continue
+            if task.project_id not in repo_blocked:
+                # E43: workers whose Arena account cannot see this project's repository get none of its tasks.
+                from app.runtime.loop.common import repo_access_denied
+
+                repo_blocked[task.project_id] = repo_access_denied(await db.get(Project, task.project_id)) if task.project_id else set()
 
             chosen: Agent | None = None
             wants_reviewer = task.task_type == "review"
@@ -366,6 +372,7 @@ class TaskScheduler:
                 if (w.role == "reviewer") == wants_reviewer
                 and (w.id not in reserved or reserved[w.id] in {task.id, task.parent_task_id})
                 and w.id not in disconnected_agents
+                and w.id not in repo_blocked.get(task.project_id, set())
             ]
             if task.execution_mode == "manual":
                 if not task.assigned_agent_id:

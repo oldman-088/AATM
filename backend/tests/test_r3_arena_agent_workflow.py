@@ -51,7 +51,6 @@ from app.orchestration.scheduler import TaskScheduler
 from app.providers.adapters.arena_agent import ArenaAgentAdapter, ArenaAgentError, keep_working_allowed
 from app.providers.base import ProviderRequest
 from app.runtime.agent_loop import AgentLoop
-from app.runtime.loop.common import NeedsHumanError
 
 WORKFLOW_BLOCK = (
     "Work on ONE branch.\n\nCreate ONE pull request.\n\nPush changes after every completed implementation item.\n\n"
@@ -420,12 +419,15 @@ async def test_repo_picker_that_renders_late_is_retried(env, arena_settings, mon
 async def test_worker_prompt_is_not_sent_when_the_task_repo_cannot_be_selected(env, arena_settings, monkeypatch, tmp_path):
     page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
     page.repo_available = False
-    with pytest.raises(NeedsHumanError):
+    from app.runtime.loop.common import RepoAccessError
+
+    with pytest.raises(RepoAccessError) as raised:  # E43: another worker takes it; the window is not stopped
         await _fresh_start(env, runner, task_id, session_id, agent_id)
+    assert raised.value.repo == REPO_SLUG
     assert "submit" not in [c for c, _ in page.commands]
     async with env() as db:
         session = await db.get(ArenaSession, session_id)
-        assert session.phase == "needs_human" and REPO_SLUG in session.needs_human_reason
+        assert session.phase == "closed" and not session.is_open
 
 
 async def test_agent_without_github_access_goes_to_a_human_at_once(env, arena_settings, monkeypatch, tmp_path):

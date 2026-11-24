@@ -28,7 +28,9 @@ from app.runtime.agent_protocol import (
 )
 from app.runtime.loop.common import (
     NeedsHumanError,
+    RepoAccessError,
     _block_for_human_impl,
+    _requeue_for_repo_access_impl,
 )
 
 
@@ -268,6 +270,9 @@ class ApprovalsMixin:
                 return
             if agent.is_emergency_stopped or task.status in {"blocked", "cancelled"}:
                 await self._pause_for_stop(db, message, task, agent, "Emergency stop took precedence over execution failure.")
+                return
+            if isinstance(exc, RepoAccessError):
+                await _requeue_for_repo_access_impl(db, message, task, agent, exc)
                 return
             if isinstance(exc, NeedsHumanError):
                 await self._block_for_human(db, message, task, agent, exc)
