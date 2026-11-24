@@ -65,14 +65,14 @@ export function CommanderConsole({
       <div className="bridge-console__chat">
         {banner}
         {(onClearChat || onNewConversation) && (
-          <div className="bridge-console__toolbar" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <div className="bridge-console__toolbar">
             {onNewConversation && (
-              <button type="button" className="bridge-send" onClick={() => onNewConversation()} disabled={sending} data-testid="manager-new-conversation">
+              <button type="button" className="bridge-btn" onClick={() => onNewConversation()} disabled={sending} data-testid="manager-new-conversation">
                 {t.bridge.newConversation}
               </button>
             )}
             {onClearChat && (
-              <button type="button" className="bridge-send" onClick={() => onClearChat()} disabled={sending} data-testid="manager-clear-chat">
+              <button type="button" className="bridge-btn bridge-btn--danger" onClick={() => onClearChat()} disabled={sending} data-testid="manager-clear-chat">
                 {t.bridge.clearChat}
               </button>
             )}
