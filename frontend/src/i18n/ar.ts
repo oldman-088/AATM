@@ -36,6 +36,7 @@ export const ar: Translations = {
     passwordChangeFailed: 'تعذر تحديث كلمة المرور',
   },
   common: {
+    activeProject: 'المشروع',
     refresh: 'تحديث',
     create: 'إنشاء',
     save: 'حفظ',

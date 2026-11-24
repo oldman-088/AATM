@@ -36,6 +36,7 @@ export const en: Translations = {
     passwordChangeFailed: 'Unable to update password',
   },
   common: {
+    activeProject: 'Project',
     refresh: 'Refresh',
     create: 'Create',
     save: 'Save',

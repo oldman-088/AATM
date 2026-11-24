@@ -36,6 +36,7 @@ export const fa: Translations = {
     passwordChangeFailed: 'تغییر رمز عبور ناموفق بود',
   },
   common: {
+    activeProject: 'پروژه',
     refresh: 'بروزرسانی',
     create: 'ایجاد',
     save: 'ذخیره',
