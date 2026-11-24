@@ -787,6 +787,18 @@ html.bridge-mounted body {
   color: #a5f3fc;
 }
 
+.bridge-console__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bridge-console__actions .bridge-btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
 .bridge-console__form .bridge-btn {
   flex: 0 0 auto;
   width: auto;
