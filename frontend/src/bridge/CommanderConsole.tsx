@@ -92,20 +92,22 @@ export function CommanderConsole({
           <button className="bridge-send" type="submit" disabled={sending || !directive.trim()} data-testid="bridge-send">
             {sending ? t.bridge.sending : t.bridge.send}
           </button>
-          {onNewConversation && (
-            <button type="button" className="bridge-btn" onClick={() => onNewConversation()} disabled={sending} data-testid="manager-new-conversation">
-              {t.bridge.newConversation}
-            </button>
-          )}
-          {onClearChat && (
-            <button type="button" className="bridge-btn bridge-btn--danger" onClick={() => onClearChat()} disabled={sending} data-testid="manager-clear-chat">
-              {t.bridge.clearChat}
-            </button>
-          )}
         </form>
       </div>
 
       <div className="bridge-console__side">
+        <div className="bridge-console__actions">
+        {onNewConversation && (
+          <button type="button" className="bridge-btn" onClick={() => onNewConversation()} disabled={sending} data-testid="manager-new-conversation">
+            {t.bridge.newConversation}
+          </button>
+        )}
+        {onClearChat && (
+          <button type="button" className="bridge-btn bridge-btn--danger" onClick={() => onClearChat()} disabled={sending} data-testid="manager-clear-chat">
+            {t.bridge.clearChat}
+          </button>
+        )}
+        </div>
         <div className="bridge-console__label">
           <span>{t.bridge.stages}</span>
           <span className="bridge-mono" style={{ color: 'var(--dim)' }}>
