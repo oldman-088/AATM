@@ -229,6 +229,25 @@ export function LiveAgentLog({ max = 200 }: { max?: number }) {
 
 // ------------------------------------------------------------------ PR view
 
+// P1 PR card: CI on the head commit and merge conflicts, read from GitHub for each open PR.
+export function PullRequestStatus({ taskId }: { taskId: string }) {
+  const { t } = useI18n()
+  const h = t.home
+  const { data, error } = useLoad<any>(`/reviews/tasks/${encodeURIComponent(taskId)}/pr-state`, ['task.updated'])
+  if (error || (data && data.available === false)) return <p data-testid={`pr-state-${taskId}`} className="mt-1 text-xs text-slate-500">{h.prStateUnavailable}</p>
+  if (!data) return null
+  const ci: Record<string, [string, 'success' | 'danger' | 'warning' | 'neutral']> = {
+    success: [h.ciPassed, 'success'], failure: [h.ciFailed, 'danger'], pending: [h.ciPending, 'warning'], none: [h.ciNone, 'neutral'],
+  }
+  const [ciText, ciTone] = ci[data.ci] || ci.none
+  const failing = (data.checks || []).filter((c: any) => c.result === 'failure')
+  return <div data-testid={`pr-state-${taskId}`} className="mt-1 flex flex-wrap items-center gap-1 text-xs">
+    <Badge variant={ciTone}>{ciText}</Badge>
+    {data.state === 'OPEN' && <Badge variant={data.conflicting ? 'danger' : 'neutral'}>{data.conflicting ? h.conflict : h.noConflict}</Badge>}
+    {failing.length > 0 && <span className="text-rose-300">{h.failingChecks}: <span dir="ltr">{failing.map((c: any) => c.name).join(', ')}</span></span>}
+  </div>
+}
+
 export function PullRequestsView({ projectId }: { projectId?: string | null }) {
   const { t } = useI18n()
   const { data: raw, error: loadError, reload } = useLoad<any[]>(projectId ? `/reviews/pull-requests?project_id=${projectId}` : '/reviews/pull-requests', TASK_EVENTS)
@@ -262,6 +281,7 @@ export function PullRequestsView({ projectId }: { projectId?: string | null }) {
           <Badge variant={merged ? 'success' : pr.status === 'changes_requested' ? 'warning' : 'info'}>{pr.status}</Badge>
         </div>
         <p className="text-xs text-slate-400" dir="ltr">{pr.branch_name}</p>
+        {!merged && <PullRequestStatus taskId={pr.task_id} />}
         {pr.reviews?.length > 0 && <details className="mt-1 text-xs text-slate-300"><summary>{t.home.reviews} ({pr.reviews.length})</summary>
           <ul className="ms-4 list-disc">{pr.reviews.map((r: any) => <li key={r.task_id}>{r.task_type} #{r.round}: {r.status}{r.summary ? ` — ${r.summary}` : ''}</li>)}</ul>
         </details>}

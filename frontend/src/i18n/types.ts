@@ -581,6 +581,14 @@ export interface Translations {
     phases: Record<string, string>
   }
   home: {
+    ciPassed: string
+    ciFailed: string
+    ciPending: string
+    ciNone: string
+    conflict: string
+    noConflict: string
+    failingChecks: string
+    prStateUnavailable: string
     title: string
     architecture: string
     archDashboard: string
