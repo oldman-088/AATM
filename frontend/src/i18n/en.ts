@@ -520,6 +520,8 @@ export const en: Translations = {
     resumeSession: 'Resume session',
     viewLiveDiff: 'View live diff',
     viewPr: 'View pull request',
+    closeSession: 'Close session',
+    closeSessionConfirm: "Close this Arena session? The worker is freed and its unfinished task is set to blocked (a backup is taken first).",
     liveDiff: 'Live diff',
     files: 'Recently modified files',
     commits: 'New commits',
@@ -539,6 +541,8 @@ export const en: Translations = {
     manager: {
       title: 'Manager (manager-0) — Arena',
       subtitle: 'The manager works through Arena like the workers: its own Chrome profile ("manager"), the same userscript and connector.',
+      cancelJob: 'Cancel request',
+      cancelJobConfirm: "Cancel the manager's current request? Nothing it planned is created (a backup is taken first).",
       connected: 'Connected',
       notConnected: 'Not connected',
       notConnectedHint: 'The manager is not connected to Arena — open the manager Chrome profile',

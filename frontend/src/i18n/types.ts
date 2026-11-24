@@ -523,6 +523,8 @@ export interface Translations {
     resumeSession: string
     viewLiveDiff: string
     viewPr: string
+    closeSession: string
+    closeSessionConfirm: string
     liveDiff: string
     files: string
     commits: string
@@ -542,6 +544,8 @@ export interface Translations {
     manager: {
       title: string
       subtitle: string
+      cancelJob: string
+      cancelJobConfirm: string
       connected: string
       notConnected: string
       notConnectedHint: string

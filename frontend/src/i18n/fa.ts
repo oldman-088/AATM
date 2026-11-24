@@ -520,6 +520,8 @@ export const fa: Translations = {
     resumeSession: 'ادامهٔ جلسه',
     viewLiveDiff: 'نمایش تغییرات زنده',
     viewPr: 'نمایش درخواست ادغام',
+    closeSession: 'بستن نشست',
+    closeSessionConfirm: "این نشست Arena بسته شود؟ کارمند آزاد می‌شود و کار ناتمامش مسدود می‌شود (اول نسخهٔ پشتیبان گرفته می‌شود).",
     liveDiff: 'تغییرات زنده',
     files: 'فایل\u200cهای تغییرکرده',
     commits: 'کامیت\u200cهای جدید',
@@ -539,6 +541,8 @@ export const fa: Translations = {
     manager: {
       title: 'مدیر (manager-0) — Arena',
       subtitle: 'مدیر مانند کارکنان از طریق Arena کار می‌کند: پروفایل Chrome خودش («manager») و همان اسکریپت و اتصال‌دهنده.',
+      cancelJob: 'لغو درخواست',
+      cancelJobConfirm: "درخواست فعلی مدیر لغو شود؟ هیچ‌چیز از برنامهٔ آن ساخته نمی‌شود (اول نسخهٔ پشتیبان گرفته می‌شود).",
       connected: 'متصل',
       notConnected: 'متصل نیست',
       notConnectedHint: 'مدیر به Arena متصل نیست — پروفایل Chrome مدیر را باز کنید',
