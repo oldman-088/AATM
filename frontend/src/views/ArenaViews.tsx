@@ -6,7 +6,7 @@ import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
 import { LIVE_EVENT } from './DashboardViews'
 
-const DOT: Record<string, string> = { green: 'bg-emerald-400', yellow: 'bg-amber-400', red: 'bg-red-500' }
+const DOT: Record<string, string> = { green: 'bg-emerald-400', yellow: 'bg-amber-400', red: 'bg-rose-500' }
 
 export function connectorLabel(t: any, status: string | null | undefined): string {
   switch (status) {
@@ -74,7 +74,7 @@ export function ArenaConnectorPanel() {
             {connectorLabel(t, p.connector_status)}
           </span>
         </div>
-        {p.connector_status === 'needs_human' && <p className="mt-1 text-xs text-red-300"><Badge variant="danger">{t.arena.needsHuman}</Badge> {p.needs_human_reason}</p>}
+        {p.connector_status === 'needs_human' && <p className="mt-1 text-xs text-rose-300"><Badge variant="danger">{t.arena.needsHuman}</Badge> {p.needs_human_reason}</p>}
         <div className="mt-2 flex flex-wrap gap-2">
           <Button variant="secondary" disabled={!gate?.enabled || busy === p.profile_id} onClick={() => generate(p.profile_id)}>
             <KeyRound className="me-1 h-4 w-4" />{p.token_issued ? t.arena.rotate : t.arena.generate}
@@ -95,7 +95,7 @@ export function ArenaConnectorPanel() {
       <textarea readOnly dir="ltr" aria-label={t.arena.review} className="h-48 w-full rounded-lg bg-slate-950 p-2 font-mono text-xs text-slate-200" value={script.text} />
       <Button variant="secondary" onClick={copy}>{copied ? t.arena.copied : t.arena.copy}</Button>
     </div>}
-    {error && <p className="text-xs text-red-300">{error}</p>}
+    {error && <p className="text-xs text-rose-300">{error}</p>}
   </Card></section>
 }
 
@@ -142,7 +142,7 @@ export function ArenaLiveDiff({ sessionId, branch, frames }: { sessionId: string
         {diff.compare_url && <a className="inline-flex items-center gap-1 text-sky-300 underline" href={diff.compare_url} target="_blank" rel="noreferrer"><ExternalLink className="h-3 w-3" />{a.compare}</a>}
       </>}
     </div>
-    {error && <p className="text-xs text-red-300">{error}</p>}
+    {error && <p className="text-xs text-rose-300">{error}</p>}
     {diff && !diff.ok && <p className="text-xs text-slate-400">{a.noDiff}</p>}
     {diff?.ok && <div className="grid gap-2 md:grid-cols-2">
       <div>
@@ -441,7 +441,7 @@ export function ArenaAgentDashboard() {
       <Stat testId="arena-stat-running" label={a.runningTasks} value={counts.running_tasks ?? 0} tone="text-sky-300" />
       <Stat testId="arena-stat-completed" label={a.completedTasks} value={counts.completed_tasks ?? 0} tone="text-emerald-300" />
       <Stat testId="arena-stat-failed" label={a.failedTasks} value={counts.failed_tasks ?? 0} tone="text-rose-300" />
-      <Stat testId="arena-stat-human" label={a.needsHumanCount} value={counts.needs_human ?? humans.length} tone={humans.length ? 'text-red-300' : 'text-white'} />
+      <Stat testId="arena-stat-human" label={a.needsHumanCount} value={counts.needs_human ?? humans.length} tone={humans.length ? 'text-rose-300' : 'text-white'} />
     </div>
 
     {data?.task_distribution && Object.keys(data.task_distribution).length > 0 && <div data-testid="arena-distribution" className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
@@ -449,7 +449,7 @@ export function ArenaAgentDashboard() {
       {Object.entries(data.task_distribution).map(([status, n]) => <Badge key={status} variant="neutral">{status}: {String(n)}</Badge>)}
     </div>}
 
-    {humans.length > 0 && <div role="alert" data-testid="arena-human-alert" className="rounded-lg border border-red-500/50 bg-red-500/10 p-3 text-start text-sm text-red-200">
+    {humans.length > 0 && <div role="alert" data-testid="arena-human-alert" className="rounded-lg border border-rose-500/50 bg-rose-500/10 p-3 text-start text-sm text-rose-200">
       <div className="flex items-center gap-2 font-semibold"><AlertTriangle className="h-4 w-4" />{a.humanAlert}</div>
       <p className="mt-1 text-xs">{a.humanAlertHint}</p>
       <ul className="mt-2 space-y-1 text-xs">
@@ -534,7 +534,7 @@ export function ArenaAgentDashboard() {
             <dt className="text-slate-400">{a.keepWorking}</dt><dd className="text-slate-200" data-testid={`arena-kw-${r.agent_id}`}>{s?.keep_working_count ?? r.keep_working_clicks ?? 0}</dd>
             {(s?.error_message || r.last_error) && <><dt className="text-slate-400">{a.error}</dt><dd className="truncate text-rose-300">{s?.error_message || r.last_error}</dd></>}
           </dl>
-          {(r.human_events || []).length > 0 && <div className="mt-2 text-xs text-red-200">
+          {(r.human_events || []).length > 0 && <div className="mt-2 text-xs text-rose-200">
             <div className="text-slate-400">{a.humanEvents}</div>
             <ul>{r.human_events.map((e: any, i: number) => <li key={i}>{fmtTime(e.ts)} · {e.detail || e.kind}</li>)}</ul>
           </div>}
@@ -570,6 +570,6 @@ export function ArenaAgentDashboard() {
         </div>
       })}
     </div>
-    {error && <p className="text-xs text-red-300">{error}</p>}
+    {error && <p className="text-xs text-rose-300">{error}</p>}
   </Card></section>
 }

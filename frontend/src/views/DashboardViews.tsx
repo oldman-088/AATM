@@ -59,7 +59,7 @@ export function HomeOverview() {
       <Card><p className="text-xs text-slate-400">{t.home.activeEmployees}</p><p data-testid="counter-active" className="text-xl text-white">{formatNumber(c.active_employees)} / {formatNumber(c.total_employees)}</p></Card>
       <Card><p className="text-xs text-slate-400">{t.home.openPrs}</p><p data-testid="counter-prs" className="text-xl text-white">{formatNumber(c.open_prs)}</p></Card>
       <Card><p className="text-xs text-slate-400">{t.home.costToday}</p><p className="text-xl text-white" dir="ltr">${c.cost_today_usd.toFixed(2)} / ${c.daily_budget_usd.toFixed(2)}</p></Card>
-      <Card><p className="text-xs text-slate-400">{t.home.needsHuman}</p><p className={`text-xl ${c.needs_human ? 'text-red-300' : 'text-white'}`}>{formatNumber(c.needs_human)}</p></Card>
+      <Card><p className="text-xs text-slate-400">{t.home.needsHuman}</p><p className={`text-xl ${c.needs_human ? 'text-rose-300' : 'text-white'}`}>{formatNumber(c.needs_human)}</p></Card>
     </div>
     <Card>
       <p className="mb-1 text-xs text-slate-400">{t.home.tasksByStatus}</p>
@@ -152,7 +152,7 @@ export function EmployeeCards() {
       </Card>)}
     </div>
     )}
-    {error && <p className="text-xs text-red-300">{error}</p>}
+    {error && <p className="text-xs text-rose-300">{error}</p>}
   </section>
 }
 
@@ -187,7 +187,7 @@ export function LiveAgentLog({ max = 200 }: { max?: number }) {
       <EmptyState variant="empty" testId="agent-log-empty" />
     ) : null}
     <ul role="log" aria-live="polite" className="max-h-72 space-y-1 overflow-y-auto font-mono text-xs" dir="ltr">
-      {entries.map((e, i) => <li key={i} className={e.failed ? 'text-red-300' : 'text-slate-300'}>
+      {entries.map((e, i) => <li key={i} className={e.failed ? 'text-rose-300' : 'text-slate-300'}>
         <span className="text-indigo-300">[{e.agent_id}]</span> {e.summary}
       </li>)}
     </ul>
@@ -242,10 +242,10 @@ export function PullRequestsView({ projectId }: { projectId?: string | null }) {
         {diff && diff.task === pr.task_id && (diff.text === null
           ? <p className="mt-1 text-xs text-slate-400">{t.home.diffUnavailable}</p>
           : <pre data-testid="pr-diff" dir="ltr" className="mt-2 max-h-80 overflow-auto rounded bg-slate-950 p-2 text-start text-xs">{diff.text.split('\n').map((line, i) =>
-            <div key={i} className={line.startsWith('+') ? 'text-emerald-300' : line.startsWith('-') ? 'text-red-300' : 'text-slate-300'}>{line}</div>)}</pre>)}
+            <div key={i} className={line.startsWith('+') ? 'text-emerald-300' : line.startsWith('-') ? 'text-rose-300' : 'text-slate-300'}>{line}</div>)}</pre>)}
       </div>
     })}
-    {error && <p className="text-xs text-red-300">{error}</p>}
+    {error && <p className="text-xs text-rose-300">{error}</p>}
   </Card>
 }
 
@@ -271,7 +271,7 @@ export function RecoveryPanel() {
       <Button size="sm" variant="ghost" onClick={reload}><RefreshCw className="h-3 w-3" /></Button>
     </div>
     {empty && <p className="text-xs text-slate-400">{t.home.nothingToRecover}</p>}
-    {data.needs_human.map((n: any) => <div key={n.profile_id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-red-500/40 p-2 text-xs text-red-200">
+    {data.needs_human.map((n: any) => <div key={n.profile_id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-rose-500/40 p-2 text-xs text-rose-200">
       <span><Badge variant="danger">{t.home.needsHuman}</Badge> {n.agent_id}: {n.reason}</span>
       <Button size="sm" onClick={() => resume(n.profile_id)}>{t.arena.resume}</Button>
     </div>)}

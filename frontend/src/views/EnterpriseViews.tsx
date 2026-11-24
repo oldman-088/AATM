@@ -880,6 +880,6 @@ export function TeamScalingPanel({ onReload }: { onReload: () => void }) {
       <Button disabled={busy} onClick={request}><UserPlus className="me-1 h-4 w-4" />{t.scaling.addEmployee}</Button>
     </div>
     {message && <p className="text-xs text-emerald-300">{message}</p>}
-    {error && <p className="text-xs text-red-300">{error}</p>}
+    {error && <p className="text-xs text-rose-300">{error}</p>}
   </Card></section>
 }
