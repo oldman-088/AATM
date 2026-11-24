@@ -6,16 +6,17 @@
  */
 
 .bridge-root {
-  --bg: #02030a;
-  --panel-a: rgba(3, 10, 22, 0.72);
-  --panel-b: rgba(4, 10, 24, 0.92);
-  --text: #e2f3ff;
+  --bg: #0b1220;
+  --panel-a: rgba(15, 23, 42, 0.78);
+  --panel-b: rgba(15, 23, 42, 0.95);
+  --text: #e2e8f0;
   --muted: #94a3b8;
   --dim: #64748b;
   --line-no: #334155;
-  --cyan: #22d3ee;
-  --violet: #a78bfa;
-  --magenta: #f0abfc;
+  --cyan: #38bdf8;
+  --violet: #a5b4fc;
+  --magenta: #c4b5fd;
+  --radius: 8px;
   --done: #34d399;
   --active: #fbbf24;
   --pending: #475569;
@@ -732,30 +733,30 @@ html.bridge-mounted body {
   flex: 1 1 auto;
   height: 44px;
   padding: 0 14px;
-  background: rgba(2, 8, 20, 0.9);
-  border: 1px solid rgba(34, 211, 238, 0.5);
+  background: rgba(2, 6, 23, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: var(--radius);
   color: var(--text);
   font-family: inherit;
   font-size: 13px;
   outline: none;
-  clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 8px 100%, 0 50%);
 }
 
 .bridge-input:focus {
-  border-color: rgba(34, 211, 238, 0.9);
-  box-shadow: 0 0 18px rgba(34, 211, 238, 0.3);
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
 }
 
 .bridge-send {
   height: 44px;
   padding: 0 20px;
   border: 1px solid var(--cyan);
-  background: rgba(34, 211, 238, 0.15);
-  color: #a5f3fc;
+  border-radius: var(--radius);
+  background: var(--cyan);
+  color: #0b1220;
   font-family: inherit;
   font-weight: 700;
   cursor: pointer;
-  clip-path: polygon(12px 0, 100% 0, 100% 100%, 0 100%, 0 12px);
 }
 
 .bridge-send:disabled {
