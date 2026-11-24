@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Activity, AlertTriangle, ArrowLeftRight, GitPullRequest, OctagonX, Pause, Play, RefreshCw, UserRoundCog } from 'lucide-react'
-import { Badge, Button, Card } from '../components/ui'
+import { Badge, Button, Card, Progress } from '../components/ui'
 import { EmptyState } from '../components/EmptyState'
 import { useI18n } from '../i18n/I18nContext'
 import { apiFetch } from '../lib/api'
@@ -103,6 +103,31 @@ export function NeedsYouPanel({ onNavigate }: { onNavigate?: (tab: string) => vo
   </Card>
 }
 
+// ------------------------------------------------------------------ P3 O5: the last 24 hours
+
+export function DailySummary() {
+  const { t, formatNumber } = useI18n()
+  const d = t.home
+  const { data, error, reload } = useLoad<any>('/dashboard/daily', TASK_EVENTS)
+  if (error) return <EmptyState variant="error" onRetry={reload} testId="daily-summary-error" />
+  if (!data || typeof data.completed_tasks !== 'number') return null
+  const merged: any[] = data.merged_prs || []
+  const failed: any[] = data.failed_or_blocked || []
+  return <Card className="text-start"><section data-testid="daily-summary">
+    <h3 className="mb-2 text-sm font-semibold text-white">{d.dailyTitle}</h3>
+    <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+      <div><p className="text-slate-400">{d.dailyCompleted}</p><p className="text-lg text-emerald-300">{formatNumber(data.completed_tasks)}</p></div>
+      <div><p className="text-slate-400">{d.dailyMerged}</p><p className="text-lg text-white">{formatNumber(merged.length)}</p></div>
+      <div><p className="text-slate-400">{d.dailyFailed}</p><p className={`text-lg ${failed.length ? 'text-rose-300' : 'text-white'}`}>{formatNumber(failed.length)}</p></div>
+      <div><p className="text-slate-400">{d.dailyWaiting}</p><p className={`text-lg ${data.pending_approvals ? 'text-amber-300' : 'text-white'}`}>{formatNumber(data.pending_approvals)}</p></div>
+    </div>
+    {merged.length > 0 && <ul className="mt-2 space-y-0.5 text-xs text-slate-300">{merged.slice(0, 5).map((m) =>
+      <li key={m.task_id} className="truncate"><span dir="ltr">#{m.pr_number}</span> {m.title}</li>)}</ul>}
+    {failed.length > 0 && <ul className="mt-2 space-y-0.5 text-xs text-rose-200">{failed.slice(0, 5).map((f) =>
+      <li key={f.task_id} className="truncate">{f.title} ({f.status})</li>)}</ul>}
+  </section></Card>
+}
+
 // ------------------------------------------------------------------ 8-step timeline
 
 export function ProjectTimeline({ projectId }: { projectId: string | null }) {
@@ -120,6 +145,15 @@ export function ProjectTimeline({ projectId }: { projectId: string | null }) {
   }
   return <Card data-testid="project-timeline">
     <h3 className="mb-2 text-sm font-semibold text-white">{t.home.timeline}{data ? ` — ${data.project_name}` : ''}</h3>
+    {data?.progress && data.progress.total > 0 && <div data-testid="project-progress" className="mb-3 text-start text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-slate-300">
+        <span>{t.home.progressDone}: <span dir="ltr">{formatNumber(data.progress.done)}/{formatNumber(data.progress.total)}</span> ({formatNumber(data.progress.percent)}%)</span>
+        <span data-testid="project-eta">{data.progress.remaining === 0 ? t.home.etaDone
+          : data.progress.eta_minutes == null ? t.home.etaUnknown
+          : `${t.home.etaLeft}: ${data.progress.eta_minutes >= 90 ? `${formatNumber(Math.round(data.progress.eta_minutes / 6) / 10)} ${t.home.hoursShort}` : `${formatNumber(data.progress.eta_minutes)} ${t.home.minutesShort}`}`}</span>
+      </div>
+      <Progress value={data.progress.percent} className="mt-1" />
+    </div>}
     {error ? (
       <EmptyState variant="error" onRetry={reload} testId="project-timeline-error" />
     ) : !projectId ? (
@@ -343,6 +377,7 @@ export function MissionControl({ projectId, onNavigate }: { projectId: string | 
     <NeedsYouPanel onNavigate={onNavigate} />
     <HomeOverview />
     <ProjectTimeline projectId={projectId} />
+    <DailySummary />
     <div className="grid gap-4 xl:grid-cols-2">
       <LiveAgentLog />
       <RecoveryPanel />

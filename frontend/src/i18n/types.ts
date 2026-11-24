@@ -584,6 +584,17 @@ export interface Translations {
     phases: Record<string, string>
   }
   home: {
+    progressDone: string
+    etaLeft: string
+    etaUnknown: string
+    etaDone: string
+    minutesShort: string
+    hoursShort: string
+    dailyTitle: string
+    dailyCompleted: string
+    dailyMerged: string
+    dailyFailed: string
+    dailyWaiting: string
     ciPassed: string
     ciFailed: string
     ciPending: string
