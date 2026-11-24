@@ -204,6 +204,8 @@ def build_task_prompt(task: Task, project: Project | None, agent: Agent | None =
         "",
         "## Security requirements",
         "- Never commit secrets, API keys, tokens, passwords, cookies, .env files or local databases.",
+        "- Q5: every new API route requires authentication through the project's existing auth dependency, unless the"
+        " task says the route is public. Add a test that calls it without credentials and expects 401 or 403.",
         "- Validate untrusted input; do not weaken authentication, authorization or existing security checks.",
         "- Do not add CAPTCHA bypass, anti-bot evasion or unauthorized scraping.",
         "",
@@ -640,6 +642,7 @@ def build_manager_review_prompt(task: Task, *, acceptance: list[str], report: st
             "- approve only when every acceptance criterion is met by the diff. After approve, merge the pull request yourself when CI on its head commit is green.",
             "- E49: check every CI job on the pull request's head commit on GitHub. A failing job is request_changes:"
             " name the job and the error in a comment.",
+            "- Q5: a new API route without authentication (and not marked public by the task) is request_changes.",
             "- request_changes needs at least one concrete comment; the comments go back to the same worker session.",
             "- summary_ar: your verdict for the owner, in Arabic.",
             f"- pr_number: {task.pr_number or 'the number of the pull request above'}. Review only this pull request; "

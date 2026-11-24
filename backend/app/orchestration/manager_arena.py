@@ -142,6 +142,8 @@ REAL_RETRY_BACKOFF_SECONDS = 2.0
 # E23: a review prompt never carries the whole diff; it carries a per-file summary plus risky hunks only.
 REVIEW_FILES_PER_PART = 40
 REVIEW_PROMPT_MAX_CHARS = 16_000
+FALLBACK_REVIEW_FILES = 15  # M5: the second, simpler review after the full one failed
+FALLBACK_REVIEW_MAX_CHARS = 8_000
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -1252,15 +1254,20 @@ class ManagerArenaRuntime:
         session = await session_for_task(db, parent.id)
         changes = await arena_runner._compare(project, session) if session is not None else {"ok": False}
         files = list(changes.get("files", [])) if changes.get("ok") else []
+        fallback = bool((job.context or {}).get("fallback_review"))
+        if fallback:
+            # M5: one short part only; CI on the PR is still required before any merge.
+            files = files[:FALLBACK_REVIEW_FILES]
         diff = "\n".join(f"--- {f['filename']}\n{f.get('patch', '')}" for f in files)
-        parts = max(1, -(-len(files) // REVIEW_FILES_PER_PART)) if files else 1
+        parts = 1 if fallback else (max(1, -(-len(files) // REVIEW_FILES_PER_PART)) if files else 1)
         prompts = [
             build_manager_review_prompt(
                 parent, acceptance=task_acceptance_criteria(parent, project),
                 report=(session.report if session else "") or "", diff=diff, pr_url=parent.pr_url,
                 round_number=parent.review_round, project=project, team=team,
                 discrepancies=(material or {}).get("mechanical_discrepancies"),
-                files=files, part=index, parts=parts, max_chars=REVIEW_PROMPT_MAX_CHARS,
+                files=files, part=index, parts=parts,
+                max_chars=FALLBACK_REVIEW_MAX_CHARS if fallback else REVIEW_PROMPT_MAX_CHARS,
             )
             for index in range(parts)
         ]
@@ -1314,7 +1321,26 @@ class ManagerArenaRuntime:
         await db.commit()
         await event_bus.emit("manager.activity", _job_dict(job) or {})
 
+    async def _fallback_review(self, db: AsyncSession, job: ManagerJob, reason: str, *, raw: str | None) -> bool:
+        """M5: a failed manager review is retried once as a short review before a human is asked.
+
+        Only the shape of the prompt changes: the verdict is applied the same way, and a merge still needs a
+        green CI on the PR's head commit (merge queue M2), so a PR with failing CI is never merged by it."""
+        if job.kind != "review" or not job.review_task_id or (job.context or {}).get("fallback_review"):
+            return False
+        await self._finish(db, job, status="failed", raw=raw, error=f"fallback review queued: {reason}"[:500],
+                           result={"fallback_review_queued": True})
+        context = {k: v for k, v in (job.context or {}).items() if k in {"parent_task_id", "pr_url", "pr_number"}}
+        retry = await self.enqueue(db, "review", project_id=job.project_id, review_task_id=job.review_task_id,
+                                   context={**context, "fallback_review": True, "fallback_of": job.id, "fallback_reason": reason[:300]})
+        db.add(Notification(category="manager", severity="info", title="المدير يعيد المراجعة بشكل مختصر",
+                            message=f"{reason[:200]} — job {retry.id}", link="/approvals"))
+        await db.commit()
+        return True
+
     async def _needs_human(self, db: AsyncSession, job: ManagerJob, reason: str, *, raw: str | None) -> None:
+        if await self._fallback_review(db, job, reason, raw=raw):
+            return
         await self._finish(db, job, status="needs_human", raw=raw, error=reason[:500])
         db.add(Notification(category="manager", severity="critical", title="طلب المدير يحتاج تدخلًا بشريًا",
                             message=f"{job.kind}: {reason[:300]}", link="/chat" if job.kind != "review" else "/approvals"))
