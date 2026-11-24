@@ -5,6 +5,7 @@ For a project whose ``config["auto_merge"]`` is true, AATM merges a pull request
 - the manager's review approved it (the task is ``in_review`` / ``reviewed`` with a pending, non-escalated merge
   approval) (M2),
 - CI on the PR's head commit is green and GitHub reports no conflict (M2),
+- a PR that is behind its base is first updated from it, so CI runs on what will be merged (E41 a),
 - the base branch is still green after the previous merge (M3): a red base pauses the queue and opens one
   repair task; a later green run resumes it.
 
@@ -109,6 +110,18 @@ class MergeQueue:
         if pr.get("conflicting"):
             created = await self._conflict_follow_up(db, task, base, head)
             return {"status": "conflict", "task_id": task.id, "follow_up_created": created}
+        if pr.get("merge_state") == "BEHIND":
+            # E41 (a): bring the PR up to date with the base first, so CI tests what will really be merged.
+            key = f"update_branch:{task.id}:{head}"
+            if key not in (state.get("updated") or []):
+                result = await self.github.update_pull_request_branch(repo, int(task.pr_number), head)
+                state["updated"] = ((state.get("updated") or []) + [key])[-50:]
+                _save(project, state)
+                self._audit(db, project, "merge_queue.update_branch", {"task_id": task.id, "pr_number": task.pr_number,
+                                                                       "head_sha": head, "ok": result.get("ok")})
+                await db.commit()
+                return {"status": "updating_branch", "task_id": task.id, "ok": result.get("ok")}
+            return {"status": "waiting_update", "task_id": task.id}
         if pr.get("ci") == "failure":
             await self._notify_once(db, project, state, f"ci_failed:{task.id}:{head}",
                                     f"CI failed on PR #{task.pr_number}",

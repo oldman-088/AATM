@@ -25,6 +25,10 @@ class FakeGitHub:
     async def branch_ci(self, repo: str, branch: str) -> dict[str, Any]:
         return dict(self.base)
 
+    async def update_pull_request_branch(self, repo: str, number: int, expected_head_sha: str) -> dict[str, Any]:
+        self.updates = getattr(self, "updates", []) + [(number, expected_head_sha)]
+        return {"ok": True}
+
 
 async def _setup(env, *, auto_merge: bool = True, escalated: bool = False) -> tuple[str, str, str]:
     async with env() as db:
@@ -155,3 +159,23 @@ async def test_owner_turns_auto_merge_on_and_it_is_audited(env):
         assert (await db.get(Project, project_id)).config["auto_merge"] is True
         logs = (await db.execute(select(AuditLog).where(AuditLog.action == "project.auto_merge"))).scalars().all()
         assert len(logs) == 1 and logs[0].details == {"auto_merge": True}
+
+
+async def test_a_pr_behind_its_base_is_updated_once_before_any_merge(env, monkeypatch):
+    merged = _merges(monkeypatch)
+    gh = FakeGitHub()
+    gh.pr["merge_state"] = "BEHIND"
+    queue = MergeQueue(gh, interval=0)
+    project_id, _task_id, _ = await _setup(env)
+    assert (await _tick(env, queue, project_id))["status"] == "updating_branch"
+    assert (await _tick(env, queue, project_id))["status"] == "waiting_update"
+    assert gh.updates == [(7, "a" * 40)] and merged == []
+    gh.pr.update(merge_state="CLEAN", head_sha="c" * 40)
+    assert (await _tick(env, queue, project_id))["status"] == "merged"
+
+
+async def test_update_branch_refuses_a_bad_repo_or_sha():
+    from app.github_client.client import github_client
+
+    assert (await github_client.update_pull_request_branch("acme/demo", 1, "not-a-sha"))["ok"] is False
+    assert (await github_client.update_pull_request_branch("bad repo", 1, "a" * 40))["ok"] is False

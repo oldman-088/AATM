@@ -324,6 +324,15 @@ class GitHubClient:
             "base": data.get("baseRefName"), "url": data.get("url"), "ci": ci, "checks": checks,
         }
 
+    async def update_pull_request_branch(self, repo: str, number: int, expected_head_sha: str) -> dict[str, Any]:
+        """P2 (E41 a): merge the latest base into a PR branch that is behind, so CI runs on what will be merged."""
+        ok_repo, repo_or_err = self.validate_repo(repo)
+        if not ok_repo or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha or ""):
+            return {"ok": False, "error": repo_or_err if not ok_repo else "Invalid head SHA."}
+        rc, out = await self._run_gh(["api", "-X", "PUT", f"repos/{repo_or_err}/pulls/{int(number)}/update-branch",
+                                      "-f", f"expected_head_sha={expected_head_sha}"])
+        return {"ok": rc == 0, "error": None if rc == 0 else out}
+
     async def branch_ci(self, repo: str, branch: str) -> dict[str, Any]:
         """P2 M3: CI on the head commit of a branch (for example main after a merge), read-only."""
         ok_repo, repo_or_err = self.validate_repo(repo)
