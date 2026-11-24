@@ -148,6 +148,12 @@ export const ar: Translations = {
     priorityHigh: 'عالية',
     priorityMedium: 'متوسطة',
     priorityLow: 'منخفضة',
+    summaryTotal: 'الإجمالي',
+    summaryActive: 'قيد التنفيذ',
+    summaryDone: 'مكتملة',
+    summaryFailed: 'فاشلة / تعديلات',
+    filterLabel: 'تصفية حسب الحالة',
+    filterAll: 'كل الحالات',
   },
   browsers: {
     title: 'جدار المتصفحات والملفات الشخصية الدائمة',

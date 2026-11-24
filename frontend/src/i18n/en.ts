@@ -148,6 +148,12 @@ export const en: Translations = {
     priorityHigh: 'high',
     priorityMedium: 'medium',
     priorityLow: 'low',
+    summaryTotal: 'Total',
+    summaryActive: 'Active',
+    summaryDone: 'Done',
+    summaryFailed: 'Failed / changes',
+    filterLabel: 'Filter by status',
+    filterAll: 'All statuses',
   },
   browsers: {
     title: 'Persistent Browser Wall & Profiles',

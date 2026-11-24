@@ -150,6 +150,12 @@ export interface Translations {
     priorityHigh: string
     priorityMedium: string
     priorityLow: string
+    summaryTotal: string
+    summaryActive: string
+    summaryDone: string
+    summaryFailed: string
+    filterLabel: string
+    filterAll: string
   }
   browsers: {
     title: string
