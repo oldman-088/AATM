@@ -82,6 +82,8 @@ RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starti
 PR_STATE_PHASES = ("reviewing", "awaiting_approval")
 PR_STATE_POLL_SECONDS = 300.0  # poll the PR state of those sessions every 5 minutes
 STALL_MINUTES = 20
+STALL_CONTINUES = 2       # E39: "continue" messages sent to a quiet, unfinished agent before it is handed to a human
+STALL_CONTINUE_PAGES = {"idle", "ready", "keep_working_visible", "tool_call_limit"}
 NO_PR_NUDGES = 2          # follow-ups asking for the PR before the task is escalated to the owner
 AGENT_ACTIVE_STATES = {"generating", "keep_working_visible", "tool_call_limit", "pr_ready"}
 CREATE_PR_WAIT_MINUTES = 5  # after pressing Arena's Create PR, before falling back to asking the agent
@@ -937,6 +939,12 @@ class ArenaAgentRunner:
                 append_event(session, "finished_while_generating")
                 await self._close_feedback_once(session)
                 return await self._collect_report(db, session, parent, active, project)
+            if page in STALL_CONTINUE_PAGES and not session.pr_number:
+                # E39: the agent stopped before finishing. Tell it to continue (as the old Auto Continue userscript
+                # did) before asking a human; each send restarts the stall timer.
+                sent = sum(1 for e in session.events or [] if e.get("kind") == "stall_continue")
+                if sent < STALL_CONTINUES and await self._follow_up(db, session, "stall_continue", TOOL_LIMIT_CONTINUE):
+                    return {"phase": session.phase, "stall_continue": sent + 1}
             await self._block_needs_human(db, session, active, f"stalled: no Arena activity or new commits for {int(self.stall_minutes)} minutes")
             return {"phase": session.phase, "stalled": True}
 
