@@ -154,6 +154,18 @@ describe('Analytics', () => {
   })
 })
 
+describe('Host resources', () => {
+  it('shows CPU, memory and disk measured on the backend host', () => {
+    mockApi()
+    wrap(<AnalyticsView agents={agents} tasks={tasks} projects={[project]} usage={null} devices={[]}
+      resources={{ cpu_percent: 12.5, cpu_count: 8, ram_used_gb: 6.2, ram_total_gb: 31.1, ram_percent: 20, disk_free_gb: 100, disk_total_gb: 400, disk_percent: 75 }} />)
+    const rows = screen.getAllByTestId('resource-row')
+    expect(rows).toHaveLength(3)
+    expect(rows[0].textContent).toContain('12.5% · 8 cores')
+    expect(rows[1].textContent).toContain('6.2 / 31.1 GB')
+  })
+})
+
 describe('System administration', () => {
   it('rejects invalid JSON and saves a valid setting through PUT /settings/{key}', async () => {
     const calls = mockApi({ '/settings': { concurrency: { value: { max_workers: 4 }, description: 'Worker slots' } }, '/scaling/status': {} })

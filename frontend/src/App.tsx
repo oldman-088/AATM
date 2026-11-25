@@ -513,7 +513,7 @@ function AATMWorkspace() {
           <div className="animate-nx-fade-in space-y-6" key={`${route.section}/${sub}`}>
             {route.section === 'command' && (sub === 'overview' || sub === 'bridge') && (
               <CommandCenter overview={overview} agents={agents} tasks={tasks} projects={projects} approvals={approvals}
-                devices={devices} health={health} onNavigate={navigate} />
+                devices={devices} resources={qaData?.resources} health={health} onNavigate={navigate} />
             )}
             {route.section === 'command' && sub === 'mission' && (
               <>
@@ -609,7 +609,7 @@ function AATMWorkspace() {
             {route.section === 'integrations' && sub === 'devices' && (<>{legacyHeader}<MultiDeviceNodesPanel devices={devices} onReload={reload} /></>)}
 
             {route.section === 'analytics' && sub === 'metrics' && (
-              <AnalyticsView agents={agents} tasks={tasks} projects={projects} usage={providerUsage} devices={devices} />
+              <AnalyticsView agents={agents} tasks={tasks} projects={projects} usage={providerUsage} devices={devices} resources={qaData?.resources} />
             )}
             {route.section === 'analytics' && sub === 'quality' && (
               <>{legacyHeader}<QAView qaData={qaData} securityPosture={securityPosture} error={errors.qa} onReload={reload} /></>

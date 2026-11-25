@@ -21,8 +21,8 @@ function minutesBetween(a?: string | null, b?: string | null) {
   return Number.isFinite(d) && d >= 0 ? d : null
 }
 
-export function AnalyticsView({ agents, tasks, projects, usage, devices }: {
-  agents: any[]; tasks: any[]; projects: any[]; usage: any; devices: any[]
+export function AnalyticsView({ agents, tasks, projects, usage, devices, resources }: {
+  agents: any[]; tasks: any[]; projects: any[]; usage: any; devices: any[]; resources?: any
 }) {
   const { t, formatNumber } = useI18n()
   const a = t.nexus.analytics
@@ -122,11 +122,22 @@ export function AnalyticsView({ agents, tasks, projects, usage, devices }: {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SectionCard title={<span className="flex items-center gap-2"><Cpu className="h-4 w-4 text-nexus-cyan" />{a.resources}</span>} testId="metric-resources">
           <dl className="space-y-2 text-sm">
-            <div className="flex justify-between gap-2"><dt className="text-nexus-muted">{t.nexus.cc.healthCpu}</dt><dd><Unavailable text={local?.cpu_cores ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.cpu_cores)} cores` : undefined} /></dd></div>
-            <div className="flex justify-between gap-2"><dt className="text-nexus-muted">{t.nexus.cc.healthMemory}</dt><dd><Unavailable text={local?.ram_gb ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.ram_gb)} GB` : undefined} /></dd></div>
+            {resources ? ([
+              { label: t.nexus.cc.healthCpu, value: resources.cpu_percent, text: fill(t.nexus.cc.cpuValue, { p: resources.cpu_percent, n: resources.cpu_count }, formatNumber) },
+              { label: t.nexus.cc.healthMemory, value: resources.ram_percent, text: fill(t.nexus.cc.memoryValue, { a: resources.ram_used_gb, b: resources.ram_total_gb, p: resources.ram_percent }, formatNumber) },
+              { label: a.disk, value: resources.disk_percent, text: fill(a.diskValue, { a: resources.disk_free_gb, b: resources.disk_total_gb, p: resources.disk_percent }, formatNumber) },
+            ].map((row) => (
+              <div key={row.label} data-testid="resource-row">
+                <div className="mb-1 flex justify-between gap-2 text-xs"><dt className="text-nexus-muted">{row.label}</dt><dd className="tabular-nums text-nexus-text">{row.text}</dd></div>
+                <Progress value={row.value} />
+              </div>
+            ))) : (<>
+              <div className="flex justify-between gap-2"><dt className="text-nexus-muted">{t.nexus.cc.healthCpu}</dt><dd><Unavailable text={local?.cpu_cores ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.cpu_cores)} cores` : undefined} /></dd></div>
+              <div className="flex justify-between gap-2"><dt className="text-nexus-muted">{t.nexus.cc.healthMemory}</dt><dd><Unavailable text={local?.ram_gb ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.ram_gb)} GB` : undefined} /></dd></div>
+            </>)}
             <div className="flex justify-between gap-2"><dt className="text-nexus-muted"><Gauge className="me-1 inline h-3.5 w-3.5" />{t.nexus.admin.workerConfig}</dt>
               <dd className="text-nexus-text">{scaling ? fill(t.nexus.admin.workersRuntime, { a: scaling.default_workers, b: scaling.extra_workers, c: scaling.parallel_slots }, formatNumber) : <Unavailable />}</dd></div>
-            <p className="pt-1 text-xs text-nexus-dim">{t.nexus.cc.healthCpuHint}</p>
+            <p className="pt-1 text-xs text-nexus-dim">{resources ? a.resourcesHint : t.nexus.cc.healthCpuHint}</p>
           </dl>
         </SectionCard>
         <SectionCard title={<span className="flex items-center gap-2"><FolderKanban className="h-4 w-4 text-nexus-violet" />{a.projectPerformance}</span>} testId="metric-projects">

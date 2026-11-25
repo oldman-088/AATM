@@ -193,8 +193,8 @@ function SystemHealth({ checks }: { checks: HealthCheck[] }) {
   )
 }
 
-export function CommandCenter({ overview, agents, tasks, projects, approvals, devices, health, onNavigate }: {
-  overview: any; agents: any[]; tasks: any[]; projects: any[]; approvals: any[]; devices: any[]
+export function CommandCenter({ overview, agents, tasks, projects, approvals, devices, resources, health, onNavigate }: {
+  overview: any; agents: any[]; tasks: any[]; projects: any[]; approvals: any[]; devices: any[]; resources?: any
   health: { state: HealthState; data: any }; onNavigate: (r: Route) => void
 }) {
   const { t, formatNumber } = useI18n()
@@ -245,10 +245,13 @@ export function CommandCenter({ overview, agents, tasks, projects, approvals, de
       value: kpis ? fill(c.providersValue, { a: kpis.healthy_providers, b: kpis.total_providers }, formatNumber) : <Unavailable /> },
     { id: 'bridge', label: c.healthBridge, ok: connector ? bridgeProfiles.length === 0 || bridgeConnected === bridgeProfiles.length : null,
       value: connector ? fill(c.bridgeValue, { a: bridgeConnected, b: bridgeProfiles.length }, formatNumber) : <Unavailable /> },
-    { id: 'cpu', label: c.healthCpu, ok: null,
-      value: <Unavailable text={local?.cpu_cores ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.cpu_cores)} cores` : undefined} /> },
-    { id: 'memory', label: c.healthMemory, ok: null,
-      value: <Unavailable text={local?.ram_gb ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.ram_gb)} GB` : undefined} /> },
+    // Host CPU/memory come from /qa/summary (psutil on the backend host); before it answers, device capacity is shown.
+    { id: 'cpu', label: c.healthCpu, ok: resources ? resources.cpu_percent < 90 : null,
+      value: resources ? fill(c.cpuValue, { p: resources.cpu_percent, n: resources.cpu_count }, formatNumber)
+        : <Unavailable text={local?.cpu_cores ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.cpu_cores)} cores` : undefined} /> },
+    { id: 'memory', label: c.healthMemory, ok: resources ? resources.ram_percent < 90 : null,
+      value: resources ? fill(c.memoryValue, { a: resources.ram_used_gb, b: resources.ram_total_gb, p: resources.ram_percent }, formatNumber)
+        : <Unavailable text={local?.ram_gb ? `${t.nexus.common.dataUnavailable} · ${formatNumber(local.ram_gb)} GB` : undefined} /> },
   ]
   const measured = checks.filter((x) => x.ok !== null)
   const healthyCount = measured.filter((x) => x.ok).length
