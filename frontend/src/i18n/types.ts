@@ -115,6 +115,7 @@ export interface Translations {
     approvalsSublabel: string
   }
   chat: {
+    inactiveProject: string
     title: string
     placeholder: string
     send: string

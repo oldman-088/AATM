@@ -113,6 +113,7 @@ export const en: Translations = {
     approvalsSublabel: 'Approval Center',
   },
   chat: {
+    inactiveProject: 'Project “{name}” is completed or disabled and does not take new requests. Choose an active project above.',
     title: 'Chief AI Engineering Manager Chat',
     placeholder: 'Issue an executive directive (e.g., "create task build metrics", "orchestrate", "merge main")...',
     send: 'Send Directive',

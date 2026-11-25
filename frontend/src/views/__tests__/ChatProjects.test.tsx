@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { I18nProvider } from '../../i18n/I18nContext'
 import { ManagerChatView } from '../CoreViews'
@@ -28,5 +28,19 @@ describe('Manager chat project list', () => {
     renderChat('old')
     const options = Array.from((screen.getByRole('combobox') as HTMLSelectElement).options).map((o) => o.textContent)
     expect(options).toEqual(['AATM Platform', 'aatm-arena-test', 'AATM self-dev'])
+  })
+})
+
+describe('Manager chat on an inactive project', () => {
+  it('warns and does not send', () => {
+    renderChat('done')
+    expect(screen.getByTestId('chat-inactive-project').textContent).toContain('test-program')
+    fireEvent.change(screen.getByPlaceholderText(/./), { target: { value: 'build it' } })
+    expect((screen.getByRole('button', { name: 'Send Directive' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows no warning on an active project', () => {
+    renderChat('a')
+    expect(screen.queryByTestId('chat-inactive-project')).toBeNull()
   })
 })
