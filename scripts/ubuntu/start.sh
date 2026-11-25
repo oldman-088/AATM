@@ -153,7 +153,7 @@ else
   echo "[AATM] Frontend skipped (frontend/node_modules is missing)."
 fi
 
-# Read-only watchdog (notifications + logs/watchdog.log). It never restarts or changes anything.
+# Watchdog (notifications + logs/watchdog.log). It only reloads a disconnected Arena window (E56).
 if [[ "${WATCHDOG_AUTOSTART:-true}" == "true" ]]; then
   if [[ -f logs/watchdog.pid ]] && kill -0 "$(cat logs/watchdog.pid)" 2>/dev/null; then
     echo "[AATM] Watchdog already running (PID $(cat logs/watchdog.pid))."

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """AATM watchdog — read-only monitoring loop (started by scripts/ubuntu/watchdog.sh).
 
-It only *observes*: HTTP GETs, TCP connects, ``docker inspect``, reading log files and opening the
-SQLite database with ``mode=ro``. It never restarts, changes or fixes anything.
+It mostly *observes*: HTTP GETs, TCP connects, ``docker inspect``, reading log files and opening the
+SQLite database with ``mode=ro``. It never restarts a service and never writes to the database.
+
+The one repair it makes (E56) is to load Arena again in a window that has stayed disconnected from the
+bridge for 3 minutes — the same step ``start-all`` takes once. Loading the page only re-runs the
+userscript; nothing is typed or sent to Arena. A window whose Chrome is closed is opened again. Each
+window gets at most 3 tries, 10 minutes apart; after that the owner gets one alert. The counter resets
+when the window connects. ``AATM_WATCHDOG_REOPEN=0`` turns this off.
 
 Every interval it checks the backend health endpoint, the bridge and frontend ports, the Redis and
 RabbitMQ containers, each Arena profile's state (via the bridge admin API, token read from .env and
@@ -52,6 +58,9 @@ ACTIVE_TASK_STATUSES = ("in_progress", "running", "working")
 CONTAINERS = ("aatm-redis", "aatm-rabbitmq")
 SERVICE_GRACE_SECONDS = 90.0   # a normal restart finishes within this time
 PROFILE_GRACE_SECONDS = 180.0  # Arena windows reconnect by themselves within this time
+REOPEN_COOLDOWN_SECONDS = 600.0  # time between two reloads of the same window (E56)
+REOPEN_MAX_TRIES = 3             # after this many reloads the owner is asked to look at the window
+STACK_SCRIPT = ROOT_DIR / "scripts" / "ubuntu" / "aatm_stack.py"
 LOG_PATTERNS = re.compile(r"(?:^|\s)ERROR[:\s]|(?i:orchestration[^\n]*fail|tick failed|job \S+ failed)")
 ACCESS_LINE = re.compile(r'"[A-Z]+ \S+ HTTP/[\d.]+" (\d{3})')
 SHUTDOWN_ERRORS = re.compile(r"^(?:asyncio\.(?:exceptions\.)?)?CancelledError|^KeyboardInterrupt|^SystemExit|ConnectionClosed")
@@ -312,6 +321,21 @@ def run_doctor(timeout: float = DOCTOR_TIMEOUT_SECONDS) -> tuple[int, dict[str, 
 
 
 # --------------------------------------------------------------------------------------------- watchdog
+def load_stack():
+    """Import the sibling aatm_stack.py by path (the scripts are not a package)."""
+    import importlib.util
+
+    name = "aatm_stack_for_watchdog"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, STACK_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class Watchdog:
     def __init__(self, alerter: Alerter, env: dict[str, str]) -> None:
         self.alerter = alerter
@@ -329,6 +353,11 @@ class Watchdog:
         self.first_seen: dict[str, float] = {}
         self.doctor_interval = float(os.environ.get("AATM_DOCTOR_INTERVAL", DOCTOR_INTERVAL_SECONDS))
         self.next_doctor = 0.0  # the first cycle runs it right away: this is the after-boot pass
+        self.reopen_enabled = os.environ.get("AATM_WATCHDOG_REOPEN", "1") != "0"
+        self.missing_since: dict[str, float] = {}
+        self.reopen_tries: dict[str, int] = {}
+        self.last_reopen: dict[str, float] = {}
+        self._stack = None
 
     def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
         """Only problems that outlasted a normal restart or reconnect are reported."""
@@ -424,9 +453,49 @@ class Watchdog:
         # it did not run at all (no python, no script, a crash, a timeout): say so instead of going quiet
         self.alerter.set_problems("doctor", {"unavailable": "فحص aatm doctor لم يعمل؛ راجع scripts/ubuntu/aatm_doctor.py"})
 
+    def stack(self):
+        """scripts/ubuntu/aatm_stack.py, loaded once: it knows the windows, their folders and URLs."""
+        if self._stack is None:
+            self._stack = load_stack()
+        return self._stack
+
+    def check_windows(self) -> None:
+        """E56: load Arena again in a window that stays disconnected, so nobody has to do it by hand."""
+        if not self.reopen_enabled:
+            return
+        stack = self.stack()
+        _, _, _, missing = stack.readiness()  # `missing` is empty while the bridge is down
+        now = self.alerter.clock()
+        ids = {w.profile_id for w in missing}
+        for pid in [p for p in self.missing_since if p not in ids]:  # connected again: start over
+            self.missing_since.pop(pid, None)
+            self.reopen_tries.pop(pid, None)
+            self.last_reopen.pop(pid, None)
+        problems: dict[str, str] = {}
+        chrome = stack._chrome_binary()
+        for window in missing:
+            pid = window.profile_id
+            since = self.missing_since.setdefault(pid, now)
+            tries = self.reopen_tries.get(pid, 0)
+            if tries >= REOPEN_MAX_TRIES:
+                problems[pid] = (f"{window.title}: لم يتصل بعد {tries} محاولات إعادة تحميل؛ "
+                                 "افتح نافذته وتأكد من تسجيل الدخول إلى Arena وتفعيل السكربت")
+                continue
+            if not chrome or now - since < PROFILE_GRACE_SECONDS:
+                continue
+            if now - self.last_reopen.get(pid, -REOPEN_COOLDOWN_SECONDS) < REOPEN_COOLDOWN_SECONDS:
+                continue
+            running = bool(stack.chrome_main_processes(window.directory))
+            stack._launch(chrome, window, window.url)
+            self.reopen_tries[pid] = tries + 1
+            self.last_reopen[pid] = now
+            how = "أعيد تحميل صفحة Arena" if running else "أعيد فتح النافذة"
+            write_log(f"[watchdog] {window.title} ({pid}) غير متصل: {how} (المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
+        self.alerter.set_problems("window", problems)
+
     def cycle(self) -> None:
-        for check in (self.check_services, self.check_profiles, self.check_logs, self.check_tasks,
-                      self.check_doctor):
+        for check in (self.check_services, self.check_profiles, self.check_windows, self.check_logs,
+                      self.check_tasks, self.check_doctor):
             try:
                 check()
             except Exception as exc:  # a broken probe must never stop the watchdog
