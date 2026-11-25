@@ -32,7 +32,7 @@ from bridge.server import create_app as create_bridge_app
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_b_review_merge_completion import REPO_SLUG, _init_repo, fake_gh  # noqa: F401 - fixture re-export
 
 from app.browser.arena_connector import arena_gate, build_userscript, match_patterns
@@ -42,7 +42,7 @@ from app.core.config import get_settings
 from app.core.security import create_access_token
 from app.db.base import Base
 from app.db.seed import seed_initial_data
-from app.db.session import get_db
+from app.db.session import _make_engine, get_db
 from app.main import app
 from app.models import Agent, AIProvider, BrowserProfile, Notification, Project, Task, User, Userscript
 from app.orchestration.scheduler import TaskScheduler
@@ -115,7 +115,8 @@ def arena_settings(monkeypatch):
 
 @pytest.fixture()
 async def env(tmp_path: Path, monkeypatch, arena_settings):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'phase6.db'}")
+    # Same engine settings as the app (WAL + busy timeout): four profiles write at once here.
+    engine = _make_engine(f"sqlite+aiosqlite:///{tmp_path / 'phase6.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
