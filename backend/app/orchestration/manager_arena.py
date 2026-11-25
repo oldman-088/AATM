@@ -10,9 +10,6 @@ import time
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.browser.arena_connector import (
     MANAGER_AGENT_ID,
     MANAGER_PROFILE_ID,
@@ -50,6 +47,8 @@ from app.orchestration.arena_prompts import (
     validate_manager_review,
 )
 from app.runtime.agent_protocol import redact_secrets
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +123,8 @@ async def manager_readiness(profile_id: str = MANAGER_PROFILE_ID) -> dict[str, A
 STALL_MINUTES = 20
 QUIET_STATES = {"idle", "ready", "pr_ready"}
 BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
+HUMAN_CHECK_WAIT_AR = ("صفحة المدير في Arena تعرض فحصًا بشريًا، ولا يحلّه AATM بنفسه. الطلب محفوظ وسيكمله المدير "
+                       "تلقائيًا بمجرد زوال الفحص، دون إعادة إرسال.")
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
@@ -729,6 +730,8 @@ class ManagerArenaRuntime:
                 for job in waiting:
                     job.status = "queued"
                     job.error = None
+                    if (job.context or {}).get("human_check_waiting"):  # E57: a later check alerts again
+                        job.context = {k: v for k, v in job.context.items() if k != "human_check_waiting"}
                     released += 1
                 await db.commit()
         queued = (await db.execute(select(ManagerJob.id).where(ManagerJob.status == "queued"))).first() is not None
@@ -921,7 +924,9 @@ class ManagerArenaRuntime:
                 await self._reply(db, job, reply or "(لم يرسل المدير أي رد)")
             return {"job_id": job.id, "status": job.status}
         except ManagerArenaError as exc:
-            if exc.code in {"stalled", "needs_human"}:
+            if exc.code == "page_human_check":
+                await self._wait_for_human_check(db, job, exc.message)
+            elif exc.code in {"stalled", "needs_human"}:
                 await self._needs_human(db, job, exc.message, raw=None)
             elif exc.code == "busy_timeout":
                 await self._requeue_waiting_for_manager(db, job)
@@ -932,7 +937,7 @@ class ManagerArenaRuntime:
             if exc.code == "busy":
                 await self._requeue_waiting_for_manager(db, job)
             elif exc.code == "needs_human":
-                await self._needs_human(db, job, f"Arena page needs a human: {exc.message}", raw=None)
+                await self._wait_for_human_check(db, job, f"Arena page needs a human: {exc.message}")
             else:
                 await self._connection_error(db, job, exc.code, f"{exc.code}: {exc.message}")
             return {"job_id": job.id, "status": job.status, "error": exc.code}
@@ -962,6 +967,26 @@ class ManagerArenaRuntime:
                                     message=f"{job.kind}: {error[:300]}", link="/browsers"))
         await db.commit()
         await self._reply(db, job, text, waiting=True, readiness=code, repeated_error=same)
+
+    async def _wait_for_human_check(self, db: AsyncSession, job: ManagerJob, reason: str) -> None:
+        """E57: a human check on the page is not a bad reply. The job waits and resumes by itself once the page is clear.
+
+        AATM never solves or bypasses the check; it only stops, tells the owner once, and carries on afterwards.
+        The job is marked interrupted, so a prompt that already reached Arena is read back instead of sent twice.
+        """
+        self._refund_attempt(job)
+        context = dict(job.context or {})
+        first = not context.get("human_check_waiting")
+        job.context = {**context, "interrupted": True, "human_check_waiting": True}
+        job.status = "waiting_connection"
+        job.error = reason[:500]
+        if first:
+            db.add(Notification(category="arena", severity="critical", title="صفحة المدير تعرض فحصًا بشريًا",
+                                message=f"{job.kind}: {reason[:300]}", link="/browsers"))
+        await db.commit()
+        if first:
+            await self._reply(db, job, HUMAN_CHECK_WAIT_AR, waiting=True, readiness="needs_human")
+        await event_bus.emit("manager.activity", _job_dict(job) or {})
 
     def _backoff_seconds(self, job: ManagerJob) -> float:
         """Pause before the next real attempt (E37); busy waits are free and never reach this."""
@@ -1112,7 +1137,7 @@ class ManagerArenaRuntime:
             current = str(state.get("agent_state") or ("offline" if not state.get("connected") else "")) or "offline"
             if state.get("status") == "needs_human" or current == "needs_human":
                 raise ManagerArenaError(
-                    "needs_human", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
+                    "page_human_check", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
             if current != "generating":  # only a generating page refuses a submit with "busy"
                 try:
                     await self.adapter.submit(session.profile_id, text, source="manager")
@@ -1180,7 +1205,8 @@ class ManagerArenaRuntime:
                     await db.commit()
             if state.get("status") == "needs_human" or current == "needs_human":
                 await self._session_needs_human(db, session, str(state.get("needs_human_reason") or "human check on the Arena page"))
-                raise ManagerArenaError("needs_human", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
+                raise ManagerArenaError("page_human_check",
+                                        f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
             if current in BUSY_STATES:
                 seen_busy = True
             if current == "keep_working_visible":

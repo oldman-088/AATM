@@ -60,6 +60,9 @@ SERVICE_GRACE_SECONDS = 90.0   # a normal restart finishes within this time
 PROFILE_GRACE_SECONDS = 180.0  # Arena windows reconnect by themselves within this time
 REOPEN_COOLDOWN_SECONDS = 600.0  # time between two reloads of the same window (E56)
 REOPEN_MAX_TRIES = 3             # after this many reloads the owner is asked to look at the window
+HUMAN_RECHECK_SECONDS = 120.0    # how often a window marked "needs a human" is looked at again (E57)
+HUMAN_RELOAD_SECONDS = 900.0     # time between two reloads of a window that still shows a human check
+HUMAN_RELOAD_MAX = 3             # reloads before the watchdog only waits for the owner
 STACK_SCRIPT = ROOT_DIR / "scripts" / "ubuntu" / "aatm_stack.py"
 LOG_PATTERNS = re.compile(r"(?:^|\s)ERROR[:\s]|(?i:orchestration[^\n]*fail|tick failed|job \S+ failed)")
 ACCESS_LINE = re.compile(r'"[A-Z]+ \S+ HTTP/[\d.]+" (\d{3})')
@@ -142,6 +145,20 @@ def port_open(port: int, host: str = "127.0.0.1") -> bool:
 
 def http_get(url: str, token: str | None = None, timeout: float = 4.0) -> tuple[int, bytes]:
     req = urllib.request.Request(url, method="GET")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return 0, b""
+
+
+def http_post(url: str, token: str | None = None, body: dict | None = None, timeout: float = 40.0) -> tuple[int, bytes]:
+    data = json.dumps(body or {}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -357,6 +374,9 @@ class Watchdog:
         self.missing_since: dict[str, float] = {}
         self.reopen_tries: dict[str, int] = {}
         self.last_reopen: dict[str, float] = {}
+        self.human_checked: dict[str, float] = {}
+        self.human_reloads: dict[str, int] = {}
+        self.human_last_reload: dict[str, float] = {}
         self._stack = None
 
     def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
@@ -493,8 +513,75 @@ class Watchdog:
             write_log(f"[watchdog] {window.title} ({pid}) غير متصل: {how} (المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
         self.alerter.set_problems("window", problems)
 
+    def page_report(self, pid: str) -> dict | None:
+        """The page's own read-only selector test: what it shows now, not what it showed when it stopped."""
+        status, body = http_post(f"http://127.0.0.1:{self.bridge_port}/v1/connector/profiles/{pid}/command",
+                                 self._token or None, {"command": "selector_test", "args": {}, "timeout_seconds": 30})
+        if status != 200:
+            return None
+        try:
+            result = json.loads(body).get("result")
+        except (ValueError, AttributeError):
+            return None
+        return result if isinstance(result, dict) else None
+
+    def check_human_windows(self) -> None:
+        """E57: a window stays "needs a human" until somebody presses resume, even after the check is gone.
+
+        The watchdog never touches the check. It asks the page what it shows now: when there is no
+        check any more it resumes the window; when the check is still there it reloads the page a few
+        times (a plain reload, as a person would) and otherwise leaves it to the owner.
+        """
+        if not self.reopen_enabled or not port_open(self.bridge_port):
+            return
+        status, body = http_get(f"http://127.0.0.1:{self.bridge_port}/v1/connector/profiles", self._token or None)
+        if status != 200:
+            return
+        try:
+            profiles = json.loads(body).get("profiles") or []
+        except (ValueError, AttributeError):
+            return
+        now = self.alerter.clock()
+        stuck = {str(p.get("profile_id")): p for p in profiles if p.get("status") == "needs_human"}
+        for pid in [p for p in self.human_checked if p not in stuck]:
+            self.human_checked.pop(pid, None)
+            self.human_reloads.pop(pid, None)
+            self.human_last_reload.pop(pid, None)
+        for pid, profile in stuck.items():
+            if not profile.get("connected"):
+                continue  # check_windows reopens a disconnected window
+            if now - self.human_checked.get(pid, -HUMAN_RECHECK_SECONDS) < HUMAN_RECHECK_SECONDS:
+                continue
+            self.human_checked[pid] = now
+            report = self.page_report(pid)
+            if report is None:
+                continue
+            check = report.get("human_check") or {}
+            if not check.get("found") and report.get("state") != "needs_human":
+                code, _ = http_post(f"http://127.0.0.1:{self.bridge_port}/v1/connector/profiles/{pid}/reset",
+                                    self._token or None, timeout=10)
+                if code == 200:
+                    write_log(f"[watchdog] {pid}: لا يوجد فحص بشري على الصفحة الآن؛ استؤنفت النافذة تلقائيًا")
+                continue
+            reloads = self.human_reloads.get(pid, 0)
+            if reloads >= HUMAN_RELOAD_MAX:
+                continue
+            if now - self.human_last_reload.get(pid, -HUMAN_RELOAD_SECONDS) < HUMAN_RELOAD_SECONDS:
+                continue
+            stack = self.stack()
+            chrome = stack._chrome_binary()
+            window = next((w for w in stack.enabled_windows() if w.profile_id == pid), None)
+            if not chrome or window is None:
+                continue
+            stack._launch(chrome, window, window.url)
+            self.human_reloads[pid] = reloads + 1
+            self.human_last_reload[pid] = now
+            write_log(f"[watchdog] {pid}: الفحص البشري ما زال ظاهرًا؛ أعيد تحميل الصفحة "
+                      f"(المحاولة {reloads + 1}/{HUMAN_RELOAD_MAX})")
+
     def cycle(self) -> None:
-        for check in (self.check_services, self.check_profiles, self.check_windows, self.check_logs,
+        for check in (self.check_services, self.check_profiles, self.check_windows, self.check_human_windows,
+                      self.check_logs,
                       self.check_tasks, self.check_doctor):
             try:
                 check()
