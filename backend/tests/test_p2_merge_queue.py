@@ -179,3 +179,27 @@ async def test_update_branch_refuses_a_bad_repo_or_sha():
 
     assert (await github_client.update_pull_request_branch("acme/demo", 1, "not-a-sha"))["ok"] is False
     assert (await github_client.update_pull_request_branch("bad repo", 1, "a" * 40))["ok"] is False
+
+
+async def test_owner_resolve_conflict_button_sends_one_follow_up(env, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from app.github_client.client import github_client
+    from app.main import app
+
+    gh = FakeGitHub()
+    monkeypatch.setattr(github_client, "pull_request_state", gh.pull_request_state)
+    project_id, task_id, _ = await _setup(env, auto_merge=False)
+    headers = await _client_headers(env)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        url = f"/api/v1/reviews/tasks/{task_id}/resolve-conflict"
+        assert (await client.post(url, headers=headers)).status_code == 409  # no conflict: nothing to do
+        gh.pr["conflicting"] = True
+        first, again = await client.post(url, headers=headers), await client.post(url, headers=headers)
+    assert first.json()["follow_up_created"] is True and again.json()["follow_up_created"] is False
+    async with env() as db:
+        follow = (await db.execute(select(Task).where(Task.parent_task_id == task_id))).scalars().all()
+        assert len(follow) == 1 and follow[0].assigned_agent_id == "worker-1"
+        from app.models import AuditLog
+        log = (await db.execute(select(AuditLog).where(AuditLog.action == "merge_queue.conflict_follow_up"))).scalars().one()
+        assert log.actor != "aatm-merge-queue" and log.resource_id == project_id

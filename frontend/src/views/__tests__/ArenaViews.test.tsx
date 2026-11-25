@@ -28,6 +28,7 @@ describe('ArenaConnectorPanel (Phase 6)', () => {
   })
 
   it('generates a reviewable userscript in mock mode and resumes a needs_human profile', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true) // Resume explains its consequences first
     const { calls } = installFetchMock({
       '/api/v1/arena/profiles/profile-backend-docs/userscript': { script: '// ==UserScript==\n// @grant        none' },
       '/api/v1/arena/profiles/profile-backend-docs/resume': { requeued_tasks: ['t1'] },
@@ -151,6 +152,7 @@ describe('ArenaAgentDashboard (R5)', () => {
   })
 
   it('alerts when a session needs a human and resumes it', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true) // Resume explains its consequences first
     const { calls } = installFetchMock({
       '/api/v1/arena/agent/overview': overview([employee({ page_state: 'needs_human', needs_human_reason: 'stalled: no Arena activity for 20 minutes',
         human_events: [{ ts: '2026-11-16T10:00:00', kind: 'needs_human', detail: 'stalled' }] })]),

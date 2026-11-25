@@ -37,6 +37,7 @@ export function ArenaConnectorPanel() {
     } catch (err: any) { setError(err?.message || t.enterprise.operationFailed) } finally { setBusy('') }
   }
   const resume = async (profileId: string) => {
+    if (!window.confirm(t.arena.resumeConfirm)) return
     setBusy(profileId); setError('')
     try { await apiFetch<any>(`/arena/profiles/${profileId}/resume`, { method: 'POST' }); await load() }
     catch (err: any) { setError(err?.message || t.enterprise.operationFailed) } finally { setBusy('') }
@@ -401,7 +402,7 @@ export function ArenaAgentDashboard() {
     const res = await apiFetch<any>(`/arena/profiles/${row.profile_id}/userscript`, { method: 'POST' })
     setOutput({ agent: row.agent_id, kind: 'script', value: res.script })
   })
-  const resume = (row: any) => run(`${row.agent_id}:resume`, async () => {
+  const resume = (row: any) => !window.confirm(t.arena.resumeConfirm) ? undefined : run(`${row.agent_id}:resume`, async () => {
     await apiFetch<any>(`/arena/profiles/${row.profile_id}/resume`, { method: 'POST' })
   })
   // R7: the manager's New session goes through the manager runtime (new long-lived session + context prompt).

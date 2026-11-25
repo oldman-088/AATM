@@ -280,6 +280,8 @@ export function PullRequestStatus({ taskId }: { taskId: string }) {
   const { t } = useI18n()
   const h = t.home
   const { data, error } = useLoad<any>(`/reviews/tasks/${encodeURIComponent(taskId)}/pr-state`, ['task.updated'])
+  const [sending, setSending] = useState(false)
+  const [note, setNote] = useState('')
   if (error || (data && data.available === false)) return <p data-testid={`pr-state-${taskId}`} className="mt-1 text-xs text-slate-500">{h.prStateUnavailable}</p>
   if (!data) return null
   const ci: Record<string, [string, 'success' | 'danger' | 'warning' | 'neutral']> = {
@@ -287,10 +289,21 @@ export function PullRequestStatus({ taskId }: { taskId: string }) {
   }
   const [ciText, ciTone] = ci[data.ci] || ci.none
   const failing = (data.checks || []).filter((c: any) => c.result === 'failure')
+  const resolveConflict = async () => {
+    if (!window.confirm(h.resolveConflictConfirm)) return
+    setSending(true); setNote('')
+    try {
+      const res = await apiFetch<any>(`/reviews/tasks/${encodeURIComponent(taskId)}/resolve-conflict`, { method: 'POST' })
+      setNote(res?.follow_up_created ? h.resolveConflictSent : h.resolveConflictAlready)
+    } catch (err: any) { setNote(err?.message || t.enterprise.operationFailed) } finally { setSending(false) }
+  }
   return <div data-testid={`pr-state-${taskId}`} className="mt-1 flex flex-wrap items-center gap-1 text-xs">
     <Badge variant={ciTone}>{ciText}</Badge>
     {data.state === 'OPEN' && <Badge variant={data.conflicting ? 'danger' : 'neutral'}>{data.conflicting ? h.conflict : h.noConflict}</Badge>}
     {failing.length > 0 && <span className="text-rose-300">{h.failingChecks}: <span dir="ltr">{failing.map((c: any) => c.name).join(', ')}</span></span>}
+    {data.state === 'OPEN' && data.conflicting && <Button size="sm" variant="secondary" disabled={sending} data-testid={`resolve-conflict-${taskId}`}
+      onClick={resolveConflict}>{h.resolveConflict}</Button>}
+    {note && <span data-testid={`resolve-conflict-note-${taskId}`} className="text-slate-300">{note}</span>}
   </div>
 }
 
@@ -354,6 +367,7 @@ export function RecoveryPanel() {
   const { t } = useI18n()
   const { data, error, reload } = useLoad<any>('/dashboard/recovery', TASK_EVENTS)
   const resume = async (profileId: string) => {
+    if (!window.confirm(t.arena.resumeConfirm)) return
     await apiFetch(`/arena/profiles/${profileId}/resume`, { method: 'POST' }).catch(() => undefined)
     await reload()
   }

@@ -1,6 +1,6 @@
 import React from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { I18nProvider, resolveInitialLanguage } from '../../i18n/I18nContext'
 import { installFetchMock } from '../../test/mockApi'
 import { EmployeeCards, HomeOverview, LIVE_EVENT, LiveAgentLog, ProjectTimeline, PullRequestsView, RecoveryPanel } from '../DashboardViews'
@@ -99,6 +99,7 @@ describe('Phase 7 dashboard (infographic)', () => {
   })
 
   it('errors & recovery panel lists failures and resumes needs_human sessions', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true) // Resume explains its consequences first
     const { calls } = installFetchMock({ '/api/v1/dashboard/recovery': {
       failed_tasks: [{ id: 'f1', title: 'Broken build', status: 'failed', retry_count: 3, max_retries: 3, error: 'tests failed' }],
       retried_tasks: [], blocked_tasks: [], replacements: [{ id: 'a1', resource_id: 'worker-2', actor: 'system' }],

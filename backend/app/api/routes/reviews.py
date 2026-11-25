@@ -101,6 +101,29 @@ async def get_pull_request_state(task_id: str, db: AsyncSession = Depends(get_db
     return await github_client.pull_request_state(repo, task.pr_number)
 
 
+@router.post("/reviews/tasks/{task_id}/resolve-conflict", dependencies=[Depends(require_role("admin", "operator"))])
+async def resolve_conflict(task_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """P1 PR card: send the PR back to its worker to merge the base and resolve the conflict (once per head commit)."""
+    from app.github_client.client import github_client
+    from app.orchestration.merge_queue import merge_queue
+
+    task = await db.get(Task, task_id)
+    if task is None or not task.pr_number:
+        raise HTTPException(status_code=404, detail="Task with a pull request not found")
+    project = await db.get(Project, task.project_id)
+    repo = git_workflow_manager.repo_slug_from_url(project.repo_url if project else None)
+    if not repo:
+        raise HTTPException(status_code=409, detail="The project has no GitHub repository URL.")
+    state = await github_client.pull_request_state(repo, task.pr_number)
+    if not state.get("available"):
+        raise HTTPException(status_code=502, detail="GitHub did not answer; try again.")
+    if state.get("state") != "OPEN" or not state.get("conflicting"):
+        raise HTTPException(status_code=409, detail="The pull request has no merge conflict.")
+    created = await merge_queue.conflict_follow_up(db, task, project_base_branch(project), state.get("head_sha") or "",
+                                                   actor=user.email)
+    return {"task_id": task.id, "pr_number": task.pr_number, "follow_up_created": created}
+
+
 @router.post("/reviews/tasks/{task_id}/request-merge", dependencies=[Depends(require_role("admin", "operator"))])
 async def request_merge_approval(task_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Open (or return) the merge ApprovalRequest for a PR; the merge itself still needs a human decision."""
