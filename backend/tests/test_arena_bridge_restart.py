@@ -91,6 +91,18 @@ async def test_goal_for_a_completed_project_is_refused_and_never_waits_for_arena
         job = (await db.execute(select(ManagerJob))).scalars().one()
     assert job.status == "failed" and job.error == "project is completed"
     assert "finished" in reply.content and reply.metadata_json.get("failed") is True
+    assert "مكتمل" in reply.content
+
+
+async def test_goal_for_a_disabled_project_says_disabled_not_completed(env, arena_settings):
+    async with env() as db:
+        project = Project(name="paused", slug="paused", status="disabled")
+        db.add(project)
+        await db.commit()
+        reply = await manager_arena_runtime.handle_owner_message(db, project.id, "Build a new page")
+        job = (await db.execute(select(ManagerJob))).scalars().one()
+    assert job.status == "failed" and job.error == "project is disabled"
+    assert "معطّل" in reply.content and "مكتمل" not in reply.content
 
 
 async def test_status_question_about_a_completed_project_is_still_allowed(env, arena_settings):

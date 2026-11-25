@@ -113,6 +113,7 @@ export const ar: Translations = {
     approvalsSublabel: 'مركز الموافقات',
   },
   chat: {
+    noActiveProject: 'لا يوجد مشروع نشط: كل المشاريع مكتملة أو معطّلة. أنشئ مشروعاً جديداً أو فعّل مشروعاً من شاشة المشاريع.',
     inactiveProject: 'المشروع «{name}» مكتمل أو معطّل ولا يستقبل طلبات جديدة. اختر مشروعًا نشطًا من القائمة أعلاه.',
     title: 'محادثة المدير الهندسي للذكاء الاصطناعي',
     placeholder: 'أصدر أمراً تنفيذياً (مثل: "create task..." أو "orchestrate" أو "merge main")...',

@@ -273,6 +273,8 @@ export function ManagerChatView({
   const chatProjects = (projects || []).filter((p: any) => (p.status ?? 'active') === 'active' || p.id === projectId)
   const selected = (projects || []).find((p: any) => p.id === projectId)
   const inactive = selected && (selected.status ?? 'active') !== 'active' ? selected : null
+  // Projects exist but none takes requests (all completed or disabled): say so instead of failing on send.
+  const noActive = (projects || []).length > 0 && !(projects || []).some((p: any) => (p.status ?? 'active') === 'active')
 
   const clearChat = async () => {
     if (!window.confirm(t.bridge.clearChatConfirm)) return
@@ -298,7 +300,7 @@ export function ManagerChatView({
 
   const sendDirective = async (msgText: string) => {
     if (!msgText.trim()) return
-    if (inactive) return  // a completed or disabled project refuses new requests; the banner says so
+    if (inactive || noActive) return  // a completed or disabled project refuses new requests; the banner says so
     if (!projectId && (projects?.length ?? 0) > 1) {
       setSendError(t.chat.projectRequired)
       return
@@ -386,7 +388,10 @@ export function ManagerChatView({
           ))}
         </div>
 
-        {inactive && <p data-testid="chat-inactive-project" role="alert"
+        {noActive && <p data-testid="chat-no-active-project" role="alert"
+          className="mt-4 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-start text-sm text-amber-100">
+          {t.chat.noActiveProject}</p>}
+        {!noActive && inactive && <p data-testid="chat-inactive-project" role="alert"
           className="mt-4 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-start text-sm text-amber-100">
           {t.chat.inactiveProject.replace('{name}', inactive.name)}</p>}
         <form
@@ -402,7 +407,7 @@ export function ManagerChatView({
             placeholder={t.chat.placeholder}
             disabled={sending}
           />
-          <Button type="submit" disabled={sending || !text.trim() || !!inactive}>
+          <Button type="submit" disabled={sending || !text.trim() || !!inactive || noActive}>
             {t.chat.send}
           </Button>
         </form>

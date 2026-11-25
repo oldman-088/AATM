@@ -44,3 +44,15 @@ describe('Manager chat on an inactive project', () => {
     expect(screen.queryByTestId('chat-inactive-project')).toBeNull()
   })
 })
+
+describe('Manager chat with no active project at all', () => {
+  it('says to create or enable a project and does not send', () => {
+    localStorage.setItem('aatm_language', 'en')
+    render(<I18nProvider><ManagerChatView messages={[]} projectId="old" projects={[projects[0]]} onSelectProject={() => {}}
+      onReload={() => {}} /></I18nProvider>)
+    expect(screen.getByTestId('chat-no-active-project').textContent).toContain('No project is active')
+    expect(screen.queryByTestId('chat-inactive-project')).toBeNull()
+    fireEvent.change(screen.getByPlaceholderText(/./), { target: { value: 'build it' } })
+    expect((screen.getByRole('button', { name: 'Send Directive' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+})
