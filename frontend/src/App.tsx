@@ -159,8 +159,10 @@ function AATMWorkspace() {
     setAgentMessages(am)
     setProjects(pr)
     if (pr.length > 0) {
+      // A completed or disabled project refuses new requests, so the default is the first active one.
+      const usable = pr.filter((p: any) => (p.status ?? 'active') === 'active')
       const stillThere = activeProjectId ? pr.some((p: any) => p.id === activeProjectId) : false
-      if (!stillThere || !projectPickedByUser.current) setActiveProjectId(pr[0].id)
+      if (!stillThere || !projectPickedByUser.current) setActiveProjectId((usable[0] ?? pr[0]).id)
     }
     setChatMessages(ch)
     setBrowsers(br)

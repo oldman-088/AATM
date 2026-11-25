@@ -269,6 +269,8 @@ export function ManagerChatView({
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  // Only an active project takes new requests; completed and disabled ones stay on the Projects screen.
+  const chatProjects = (projects || []).filter((p: any) => (p.status ?? 'active') === 'active' || p.id === projectId)
 
   const clearChat = async () => {
     if (!window.confirm(t.bridge.clearChatConfirm)) return
@@ -322,7 +324,7 @@ export function ManagerChatView({
           {t.chat.title}
         </h2>
         <div className="flex flex-wrap items-center gap-2">
-          {projects && projects.length > 1 && onSelectProject && (
+          {chatProjects.length > 1 && onSelectProject && (
             <label className="flex items-center gap-2 text-sm text-slate-300">
               <span>{t.chat.projectLabel}</span>
               <select
@@ -331,7 +333,7 @@ export function ManagerChatView({
                 value={projectId ?? ''}
                 onChange={(event) => onSelectProject(event.target.value)}
               >
-                {projects.map((project: any) => (
+                {chatProjects.map((project: any) => (
                   <option key={project.id} value={project.id}>
                     {project.name}
                   </option>
