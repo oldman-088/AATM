@@ -1,6 +1,8 @@
+import { nexusFa } from './nexus'
 import type { Translations } from './types'
 
 export const fa: Translations = {
+  nexus: nexusFa,
   appName: 'AATM',
   appSubtitle: 'مدیر تیم عامل‌های هوش مصنوعی',
   nav: {

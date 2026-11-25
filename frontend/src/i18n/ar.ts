@@ -1,6 +1,8 @@
+import { nexusAr } from './nexus'
 import type { Translations } from './types'
 
 export const ar: Translations = {
+  nexus: nexusAr,
   appName: 'AATM',
   appSubtitle: 'مدير فريق وكلاء الذكاء الاصطناعي',
   nav: {

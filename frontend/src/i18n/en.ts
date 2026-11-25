@@ -1,6 +1,8 @@
+import { nexusEn } from './nexus'
 import type { Translations } from './types'
 
 export const en: Translations = {
+  nexus: nexusEn,
   appName: 'AATM',
   appSubtitle: 'AI Agent Team Manager',
   nav: {

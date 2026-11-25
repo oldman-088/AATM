@@ -1,6 +1,9 @@
+import type { NexusStrings } from './nexus'
+
 export type Language = 'en' | 'ar' | 'fa'
 
 export interface Translations {
+  nexus: NexusStrings
   appName: string
   appSubtitle: string
   nav: {
