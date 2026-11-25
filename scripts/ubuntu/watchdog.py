@@ -60,6 +60,7 @@ SERVICE_GRACE_SECONDS = 90.0   # a normal restart finishes within this time
 PROFILE_GRACE_SECONDS = 180.0  # Arena windows reconnect by themselves within this time
 REOPEN_COOLDOWN_SECONDS = 600.0  # time between two reloads of the same window (E56)
 REOPEN_MAX_TRIES = 3             # after this many reloads the owner is asked to look at the window
+BLANK_GRACE_SECONDS = 120.0      # a connected window may show no composer this long (page load) (E59)
 HUMAN_RECHECK_SECONDS = 120.0    # how often a window marked "needs a human" is looked at again (E57)
 HUMAN_RELOAD_SECONDS = 900.0     # time between two reloads of a window that still shows a human check
 HUMAN_RELOAD_MAX = 3             # reloads before the watchdog only waits for the owner
@@ -377,6 +378,9 @@ class Watchdog:
         self.human_checked: dict[str, float] = {}
         self.human_reloads: dict[str, int] = {}
         self.human_last_reload: dict[str, float] = {}
+        self.blank_since: dict[str, float] = {}
+        self.blank_reopens: dict[str, int] = {}
+        self.blank_last: dict[str, float] = {}
         self._stack = None
 
     def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
@@ -542,6 +546,7 @@ class Watchdog:
         except (ValueError, AttributeError):
             return
         now = self.alerter.clock()
+        self._reopen_blank_windows(profiles, now)
         stuck = {str(p.get("profile_id")): p for p in profiles if p.get("status") == "needs_human"}
         for pid in [p for p in self.human_checked if p not in stuck]:
             self.human_checked.pop(pid, None)
@@ -578,6 +583,35 @@ class Watchdog:
             self.human_last_reload[pid] = now
             write_log(f"[watchdog] {pid}: الفحص البشري ما زال ظاهرًا؛ أعيد تحميل الصفحة "
                       f"(المحاولة {reloads + 1}/{HUMAN_RELOAD_MAX})")
+
+    def _reopen_blank_windows(self, profiles: list[dict], now: float) -> None:
+        """E59: a connected window that stays "offline" draws no composer (often hidden or minimised).
+
+        Opening its Arena URL again from the same profile brings it to the front, as a person would.
+        """
+        blank = {str(p.get("profile_id")) for p in profiles
+                 if p.get("connected") and p.get("status") != "needs_human" and p.get("agent_state") == "offline"}
+        for pid in [p for p in self.blank_since if p not in blank]:
+            self.blank_since.pop(pid, None)
+            self.blank_reopens.pop(pid, None)
+            self.blank_last.pop(pid, None)
+        for pid in blank:
+            since = self.blank_since.setdefault(pid, now)
+            tries = self.blank_reopens.get(pid, 0)
+            if now - since < BLANK_GRACE_SECONDS or tries >= REOPEN_MAX_TRIES:
+                continue
+            if now - self.blank_last.get(pid, -REOPEN_COOLDOWN_SECONDS) < REOPEN_COOLDOWN_SECONDS:
+                continue
+            stack = self.stack()
+            chrome = stack._chrome_binary()
+            window = next((w for w in stack.enabled_windows() if w.profile_id == pid), None)
+            if not chrome or window is None:
+                continue
+            stack._launch(chrome, window, window.url)
+            self.blank_reopens[pid] = tries + 1
+            self.blank_last[pid] = now
+            write_log(f"[watchdog] {pid}: متصل لكن الصفحة لا تعرض مربع الكتابة (مخفية؟)؛ أعيد فتحها "
+                      f"(المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
 
     def cycle(self) -> None:
         for check in (self.check_services, self.check_profiles, self.check_windows, self.check_human_windows,

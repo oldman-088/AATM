@@ -106,3 +106,24 @@ def test_a_ready_window_is_left_alone(watchdog, monkeypatch):
     dog, _ = make(watchdog, monkeypatch, bridge)
     dog.check_human_windows()
     assert bridge.posts == []
+
+
+class BlankBridge(FakeBridge):
+    def get(self, url, token=None, timeout=4.0):
+        return 200, json.dumps({"profiles": [{"profile_id": "profile-manager", "status": "ready",
+                                              "connected": True, "agent_state": "offline"}]}).encode()
+
+
+def test_e59_a_connected_window_without_a_composer_is_opened_again_after_the_grace_time(watchdog, monkeypatch):
+    bridge = BlankBridge(check_found=False, status="ready")
+    dog, clock = make(watchdog, monkeypatch, bridge)
+    dog.check_human_windows()
+    assert dog._stack.launched == []
+    clock.now += watchdog.BLANK_GRACE_SECONDS
+    dog.check_human_windows()
+    assert dog._stack.launched == ["profile-manager"]
+    for _ in range(20):
+        clock.now += watchdog.REOPEN_COOLDOWN_SECONDS
+        dog.check_human_windows()
+    assert len(dog._stack.launched) == watchdog.REOPEN_MAX_TRIES
+    assert bridge.posts == [], "a blank page is never resumed or tested, only opened again"
