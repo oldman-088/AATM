@@ -50,24 +50,28 @@ async def test_api_still_creates_a_task_for_an_active_project(chat_app) -> None:
     assert response.status_code == 201
 
 
-async def test_scheduler_skips_tasks_of_missing_or_inactive_projects(env):
+async def test_scheduler_skips_tasks_of_missing_or_switched_off_projects(env):
     async with env() as db:
         live = Project(name="Live", slug="live", status="active")
         paused = Project(name="Paused", slug="paused", status="disabled")
-        db.add_all([live, paused])
+        finished = Project(name="Finished", slug="finished", status="completed")
+        db.add_all([live, paused, finished])
         await db.flush()
         for w in (await db.execute(select(Agent).where(Agent.role == "worker"))).scalars().all():
             w.status, w.current_task_id = "idle", None
         ok = Task(project_id=live.id, title="Live work", description="Create backend/app/api/live.py", status="queued")
         off = Task(project_id=paused.id, title="Paused work", description="Create backend/app/api/paused.py", status="queued")
         gone = Task(project_id="no-such-project", title="Orphan", description="Create backend/app/api/orphan.py", status="queued")
-        db.add_all([ok, off, gone])
+        # A follow-up the system adds after completion (for example a repair task) must still run.
+        follow_up = Task(project_id=finished.id, title="Repair", description="Fix backend/app/api/repair.py", status="queued")
+        db.add_all([ok, off, gone, follow_up])
         await db.commit()
-        ids = {ok.id, off.id, gone.id}
-        ok_id, off_id, gone_id = ok.id, off.id, gone.id
+        ids = {ok.id, off.id, gone.id, follow_up.id}
+        ok_id, off_id, gone_id, follow_id = ok.id, off.id, gone.id, follow_up.id
     async with env() as db:
         await TaskScheduler().run_orchestration_cycle(db, only_task_ids=ids)
     async with env() as db:
         assert (await db.get(Task, ok_id)).status != "queued"
         assert (await db.get(Task, off_id)).status == "queued"
         assert (await db.get(Task, gone_id)).status == "queued"
+        assert (await db.get(Task, follow_id)).status != "queued"

@@ -69,7 +69,11 @@ def task_footprint(task: Any) -> tuple[frozenset[str], bool]:
     return paths, migration
 
 
+# The owner cannot add work to these projects through the API (POST /tasks answers 409).
 INACTIVE_PROJECT_STATUSES = frozenset({"completed", "disabled", "archived"})
+# The scheduler hands out no task of a project the owner switched off. A completed project still runs the
+# follow-ups the system itself creates after completion (repair task after a red base, conflict follow-up).
+PAUSED_PROJECT_STATUSES = frozenset({"disabled", "archived"})
 
 
 def footprint_conflict(task: Any, others: list[Any]) -> str | None:
@@ -401,9 +405,9 @@ class TaskScheduler:
             if not await self.dependencies_satisfied(db, task):
                 continue
             if task.project_id and task.project_id not in project_open:
-                # A task whose project is gone, or completed, disabled or archived, is never handed to a worker.
+                # A task whose project is gone, disabled or archived is never handed to a worker.
                 owner = await db.get(Project, task.project_id)
-                project_open[task.project_id] = owner is not None and (owner.status or "active") not in INACTIVE_PROJECT_STATUSES
+                project_open[task.project_id] = owner is not None and (owner.status or "active") not in PAUSED_PROJECT_STATUSES
             if task.project_id and not project_open[task.project_id]:
                 continue
             if task.project_id not in project_limit:
