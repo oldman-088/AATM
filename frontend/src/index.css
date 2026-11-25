@@ -42,6 +42,9 @@ html.light {
   --nx-cyan-strong: 2 120 155;
   --nx-cyan-deep: 1 95 125;
   --nx-violet: 109 62 216;
+  --nx-success: 4 120 87;
+  --nx-warning: 180 83 9;
+  --nx-error: 200 30 30;
   --nx-on-accent: 255 255 255;
 }
 
@@ -68,6 +71,12 @@ html.light .text-slate-300,
 html.light .text-slate-400 {
   color: #475569 !important;
 }
+
+/* Pale status text from older screens is made for dark cards; on light surfaces use the tone tokens. */
+html.light :is(.text-amber-100, .text-amber-200, .text-amber-300) { color: rgb(var(--nx-warning)) !important; }
+html.light :is(.text-rose-100, .text-rose-200, .text-rose-300) { color: rgb(var(--nx-error)) !important; }
+html.light :is(.text-emerald-100, .text-emerald-200, .text-emerald-300) { color: rgb(var(--nx-success)) !important; }
+html.light :is(.text-indigo-100, .text-indigo-200, .text-indigo-300) { color: rgb(var(--nx-violet)) !important; }
 
 /* Ensure crisp scrollbar and RTL-friendly logical layout */
 * {
