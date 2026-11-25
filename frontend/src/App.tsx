@@ -117,72 +117,54 @@ function AATMWorkspace() {
     // others. Per-dataset errors are tracked so each page can render a clear
     // Arabic error state instead of a silent loading placeholder.
     const nextErrors: Record<string, string | null> = {}
-    const track = async <T,>(key: string, run: () => Promise<T>, fallback: T): Promise<T> => {
+    // Each dataset is shown as soon as its own request answers: a slow endpoint (for example
+    // /qa/summary, which runs checks) must not keep every other screen empty.
+    const track = async <T,>(key: string, run: () => Promise<T>, fallback: T, apply: (value: T) => void) => {
+      let value = fallback
       try {
-        const value = await run()
+        value = await run()
         nextErrors[key] = null
-        return value
       } catch (err: any) {
         nextErrors[key] = err?.message || t.common.loadFailed
-        return fallback
+      }
+      apply(value)
+    }
+    const applyProjects = (pr: any[]) => {
+      setProjects(pr)
+      if (pr.length > 0) {
+        // A completed or disabled project refuses new requests, so the default is the first active one.
+        const usable = pr.filter((p: any) => (p.status ?? 'active') === 'active')
+        const stillThere = activeProjectId ? pr.some((p: any) => p.id === activeProjectId) : false
+        if (!stillThere || !projectPickedByUser.current) setActiveProjectId((usable[0] ?? pr[0]).id)
       }
     }
 
-    const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, sp, ap, au, nf, mm] = await Promise.all([
-      track('overview', () => apiFetch<any>('/dashboard/overview'), null),
-      track('agents', () => apiFetch<any[]>('/agents'), []),
-      track('templates', () => apiFetch<any[]>('/employees/templates'), []),
-      track('tasks', () => apiFetch<any[]>('/tasks'), []),
-      track('messages', () => apiFetch<any[]>('/messages'), []),
-      track('projects', () => apiFetch<any[]>('/projects'), []),
-      track('chat', () => apiFetch<any[]>('/chat'), []),
-      track('browsers', () => apiFetch<any[]>('/browsers'), []),
-      track('browserCaps', () => apiFetch<any>('/browsers/capabilities'), null),
-      track('browserEngines', () => apiFetch<any[]>('/browsers/engines'), []),
-      track('userscripts', () => apiFetch<any[]>('/userscripts'), []),
-      track('providers', () => apiFetch<any[]>('/providers'), []),
-      track('providerUsage', () => apiFetch<any>('/providers/usage'), null),
-      track('accounts', () => apiFetch<any[]>('/accounts'), []),
-      track('sessions', () => apiFetch<any[]>('/sessions'), []),
-      track('devices', () => apiFetch<any[]>('/devices'), []),
-      track('git', () => apiFetch<any>('/git/status'), null),
-      track('qa', () => apiFetch<any>('/qa/summary'), null),
-      track('securityPosture', () => apiFetch<any>('/governance/security-posture'), null),
-      track('approvals', () => apiFetch<any[]>('/approvals'), []),
-      track('audit', () => apiFetch<any[]>('/audit'), []),
-      track('notifications', () => apiFetch<any[]>('/notifications'), []),
-      track('memory', () => apiFetch<any[]>(`/memory?q=${encodeURIComponent(memQuery)}`), []),
+    await Promise.all([
+      track('overview', () => apiFetch<any>('/dashboard/overview'), null, setOverview),
+      track('agents', () => apiFetch<any[]>('/agents'), [], setAgents),
+      track('templates', () => apiFetch<any[]>('/employees/templates'), [], setTemplates),
+      track('tasks', () => apiFetch<any[]>('/tasks'), [], setTasks),
+      track('messages', () => apiFetch<any[]>('/messages'), [], setAgentMessages),
+      track('projects', () => apiFetch<any[]>('/projects'), [], applyProjects),
+      track('chat', () => apiFetch<any[]>('/chat'), [], setChatMessages),
+      track('browsers', () => apiFetch<any[]>('/browsers'), [], setBrowsers),
+      track('browserCaps', () => apiFetch<any>('/browsers/capabilities'), null, setBrowserCaps),
+      track('browserEngines', () => apiFetch<any[]>('/browsers/engines'), [], setBrowserEngines),
+      track('userscripts', () => apiFetch<any[]>('/userscripts'), [], setUserscripts),
+      track('providers', () => apiFetch<any[]>('/providers'), [], setProviders),
+      track('providerUsage', () => apiFetch<any>('/providers/usage'), null, setProviderUsage),
+      track('accounts', () => apiFetch<any[]>('/accounts'), [], setAccounts),
+      track('sessions', () => apiFetch<any[]>('/sessions'), [], setSessions),
+      track('devices', () => apiFetch<any[]>('/devices'), [], setDevices),
+      track('git', () => apiFetch<any>('/git/status'), null, setGitData),
+      track('qa', () => apiFetch<any>('/qa/summary'), null, setQaData),
+      track('securityPosture', () => apiFetch<any>('/governance/security-posture'), null, setSecurityPosture),
+      track('approvals', () => apiFetch<any[]>('/approvals'), [], setApprovals),
+      track('audit', () => apiFetch<any[]>('/audit'), [], setAuditLogs),
+      track('notifications', () => apiFetch<any[]>('/notifications'), [], setNotifications),
+      track('memory', () => apiFetch<any[]>(`/memory?q=${encodeURIComponent(memQuery)}`), [], setMemories),
     ])
     setErrors(nextErrors)
-    setOverview(ov)
-    setAgents(ag)
-    setTemplates(tpl)
-    setTasks(tk)
-    setAgentMessages(am)
-    setProjects(pr)
-    if (pr.length > 0) {
-      // A completed or disabled project refuses new requests, so the default is the first active one.
-      const usable = pr.filter((p: any) => (p.status ?? 'active') === 'active')
-      const stillThere = activeProjectId ? pr.some((p: any) => p.id === activeProjectId) : false
-      if (!stillThere || !projectPickedByUser.current) setActiveProjectId((usable[0] ?? pr[0]).id)
-    }
-    setChatMessages(ch)
-    setBrowsers(br)
-    setBrowserCaps(bc)
-    setBrowserEngines(be)
-    setUserscripts(us)
-    setProviders(pv)
-    setProviderUsage(pu)
-    setAccounts(ac)
-    setSessions(ss)
-    setDevices(dv)
-    setGitData(gt)
-    setQaData(qa)
-    setSecurityPosture(sp)
-    setApprovals(ap)
-    setAuditLogs(au)
-    setNotifications(nf)
-    setMemories(mm)
     const failed = Object.entries(nextErrors).filter(([, v]) => v).map(([k]) => k)
     setErrorBanner(failed.length ? t.common.loadFailed : null)
   }, [activeProjectId, t.common.loadFailed])

@@ -16,7 +16,7 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-xl border border-nexus-border/80 bg-nexus-card p-5 shadow-card',
+        'rounded-xl border border-nexus-border/80 bg-nexus-card p-4 shadow-card sm:p-5',
         className
       )}
     >

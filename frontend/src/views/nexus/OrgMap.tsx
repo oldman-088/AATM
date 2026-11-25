@@ -128,7 +128,7 @@ export function OrgMap({ agents, tasks, templates, onOpenAgent, onOpenTask }: {
       )}
       <div className="mx-auto h-6 w-px bg-nexus-border" aria-hidden />
 
-      <section aria-label={o.departments} className="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+      <section aria-label={o.departments} className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2 2xl:grid-cols-3">
         {departments.map(([name, trees]) => {
           const open = deptOpen(name)
           return (

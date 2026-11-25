@@ -334,7 +334,7 @@ function GlobalSearch({ agents, tasks, projects, onNavigate, onOpenAgent, onOpen
             if (e.key === 'Enter' && hits[index]) { e.preventDefault(); choose(hits[index]) }
           }}
           className="h-9 w-full rounded-lg border border-nexus-border bg-nexus-bg/70 pe-14 ps-9 text-sm text-nexus-text placeholder:text-nexus-dim focus:border-nexus-cyan focus:outline-none focus:ring-1 focus:ring-nexus-cyan/40" />
-        <kbd className="pointer-events-none absolute end-2 top-1/2 hidden -translate-y-1/2 rounded border border-nexus-border px-1.5 text-[10px] text-nexus-dim md:block" dir="ltr">Ctrl K</kbd>
+        <kbd className="pointer-events-none absolute end-2 top-1/2 hidden -translate-y-1/2 rounded border border-nexus-border px-1.5 text-[10px] text-nexus-dim md:block"><span dir="ltr">Ctrl K</span></kbd>
       </label>
       {pop.open && q.trim() && (
         <div id="global-search-results" role="listbox" data-testid="global-search-results" className={cn(menuPanel, 'start-0 end-auto w-full max-w-[min(32rem,calc(100vw-2rem))]')}>

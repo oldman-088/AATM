@@ -323,7 +323,7 @@ const nexusEnDict = {
     subtitle: 'Reporting lines from the executive director down to each task.',
     director: 'Executive Director',
     departments: 'Departments',
-    agentsCount: '{n} agents',
+    agentsCount: 'Agents: {n}',
     workload: '{n} tasks',
     expandAll: 'Expand all',
     collapseAll: 'Collapse all',

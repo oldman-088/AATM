@@ -80,7 +80,8 @@ function LiveFeed({ agents }: { agents: any[] }) {
 
   useEffect(() => {
     let cancelled = false
-    apiFetch<any>('/traces?limit=40').then((data) => {
+    // The audit log is dominated by periodic self-healing entries, so read a wider window.
+    apiFetch<any>('/traces?limit=200').then((data) => {
       if (cancelled) return
       const rows: FeedEvent[] = []
       for (const trace of data?.traces ?? []) {

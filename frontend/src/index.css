@@ -74,3 +74,7 @@ html.light .text-slate-400 {
   scrollbar-width: thin;
   scrollbar-color: rgb(var(--nx-border-strong)) transparent;
 }
+
+/* Grid and flex children may shrink below their content width, so one long label or button row
+   cannot push a card (and the whole page) wider than a phone screen. */
+.grid > * { min-width: 0; }
