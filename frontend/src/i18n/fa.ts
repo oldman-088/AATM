@@ -113,6 +113,7 @@ export const fa: Translations = {
     approvalsSublabel: 'مرکز تائیدها',
   },
   chat: {
+    inactiveProject: 'پروژهٔ «{name}» تکمیل یا غیرفعال شده و درخواست جدید نمی‌پذیرد. یک پروژهٔ فعال را از فهرست بالا انتخاب کنید.',
     title: 'گفتگو با مدیر ارشد مهندسی هوش مصنوعی',
     placeholder: 'دستور اجرایی صادر کنید (مانند "create task..."، "orchestrate" یا "merge main")...',
     send: 'ارسال دستور',

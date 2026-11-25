@@ -271,6 +271,8 @@ export function ManagerChatView({
   const [sendError, setSendError] = useState<string | null>(null)
   // Only an active project takes new requests; completed and disabled ones stay on the Projects screen.
   const chatProjects = (projects || []).filter((p: any) => (p.status ?? 'active') === 'active' || p.id === projectId)
+  const selected = (projects || []).find((p: any) => p.id === projectId)
+  const inactive = selected && (selected.status ?? 'active') !== 'active' ? selected : null
 
   const clearChat = async () => {
     if (!window.confirm(t.bridge.clearChatConfirm)) return
@@ -296,6 +298,7 @@ export function ManagerChatView({
 
   const sendDirective = async (msgText: string) => {
     if (!msgText.trim()) return
+    if (inactive) return  // a completed or disabled project refuses new requests; the banner says so
     if (!projectId && (projects?.length ?? 0) > 1) {
       setSendError(t.chat.projectRequired)
       return
@@ -383,6 +386,9 @@ export function ManagerChatView({
           ))}
         </div>
 
+        {inactive && <p data-testid="chat-inactive-project" role="alert"
+          className="mt-4 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-start text-sm text-amber-100">
+          {t.chat.inactiveProject.replace('{name}', inactive.name)}</p>}
         <form
           className="mt-4 flex gap-2 border-t border-slate-800 pt-3"
           onSubmit={(e) => {
@@ -396,7 +402,7 @@ export function ManagerChatView({
             placeholder={t.chat.placeholder}
             disabled={sending}
           />
-          <Button type="submit" disabled={sending || !text.trim()}>
+          <Button type="submit" disabled={sending || !text.trim() || !!inactive}>
             {t.chat.send}
           </Button>
         </form>
