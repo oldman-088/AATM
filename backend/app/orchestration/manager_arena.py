@@ -735,7 +735,41 @@ class ManagerArenaRuntime:
             self.kick()
         return {"reviews_enqueued": created, "released": released, "queued": queued}
 
+    async def _settle_stale_reviews(self, db: AsyncSession) -> int:
+        """E55: a review whose pull request is already merged (or whose task was cancelled) is obsolete.
+
+        It is cancelled together with any manager job still waiting for it, so it no longer shows as stuck work or
+        as something that needs the owner. A queued review whose only jobs failed is shown as blocked, not hidden."""
+        open_reviews = list((await db.execute(select(Task).where(
+            Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID,
+            Task.status.in_(["queued", "in_progress", "blocked"])))).scalars())
+        settled = 0
+        for review in open_reviews:
+            parent = await db.get(Task, review.parent_task_id) if review.parent_task_id else None
+            jobs = list((await db.execute(select(ManagerJob).where(ManagerJob.review_task_id == review.id))).scalars())
+            if parent is not None and parent.status in {"merged", "done", "completed", "cancelled"}:
+                review.status = "cancelled"
+                review.error_message = f"Obsolete: the pull request's task is already {parent.status}."
+                review.checkpoints = list(review.checkpoints or []) + [{"ts": _now().isoformat(), "event": "obsolete_review"}]
+                for job in jobs:
+                    if job.status in {"queued", "waiting_connection", "needs_human"}:
+                        job.status = "failed"
+                        job.error = f"obsolete: the pull request's task is already {parent.status}"
+                        job.finished_at = _now()
+                db.add(AuditLog(actor=MANAGER_AGENT_ID, action="manager.review_obsolete", resource_type="task", resource_id=review.id,
+                                details={"parent_task_id": parent.id, "parent_status": parent.status, "pr_number": parent.pr_number}))
+                settled += 1
+            elif review.status == "queued" and jobs and all(j.status in {"failed", "done"} for j in jobs):
+                last = max(jobs, key=lambda j: j.created_at or _now())
+                review.status = "blocked"
+                review.error_message = f"Manager review ended without a verdict: {last.error or last.status}"[:500]
+                settled += 1
+        if settled:
+            await db.commit()
+        return settled
+
     async def _enqueue_reviews(self, db: AsyncSession) -> int:
+        await self._settle_stale_reviews(db)
         reviews = list((await db.execute(select(Task).where(
             Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID, Task.status == "queued",
         ))).scalars())
