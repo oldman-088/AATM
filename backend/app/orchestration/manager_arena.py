@@ -126,6 +126,7 @@ QUIET_STATES = {"idle", "ready", "pr_ready"}
 BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
 HUMAN_CHECK_WAIT_AR = ("صفحة المدير في Arena تعرض فحصًا بشريًا، ولا يحلّه AATM بنفسه. الطلب محفوظ وسيكمله المدير "
                        "تلقائيًا بمجرد زوال الفحص، دون إعادة إرسال.")
+EMPTY_REPLY_POLLS = 90  # E58: polls a quiet page may show no reply (or our own prompt) before it counts as done
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000
@@ -224,6 +225,16 @@ _NEGATION = re.compile(
     re.I,
 )
 _NEGATION_WINDOW = 25
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[\s`*#>_-]+", "", text or "").lower()
+
+
+def _is_own_prompt(reply: str, prompt: str) -> bool:
+    """E58: the reply reader can land on our own message; that is never the manager's answer."""
+    core, sent = _squash(reply), _squash(prompt)
+    return bool(core) and (core == sent or (len(core) >= 20 and core in sent))
 
 
 def _negated(text: str, start: int, end: int) -> bool:
@@ -1190,6 +1201,8 @@ class ManagerArenaRuntime:
 
         started = time.monotonic()
         last_change = time.monotonic()
+        quiet_since: float | None = None
+        empty_noted = False
         last_seen = (str(before.get("agent_state") or ""), before_since)
         seen_busy = resume
         while True:
@@ -1249,7 +1262,26 @@ class ManagerArenaRuntime:
                 await db.commit()
             elif current in QUIET_STATES and (seen_busy or (since and since != before_since)
                                               or time.monotonic() - started > self.start_grace_seconds):
-                break
+                # E58: a page that reconnects says "ready" for a moment while Arena is still writing. Quiet is
+                # only the end when there is a reply on the page that is not our own prompt; otherwise wait a bit.
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                if time.monotonic() - quiet_since >= self.poll_seconds * EMPTY_REPLY_POLLS:
+                    break
+                try:
+                    latest_quiet = str((await self.adapter.read_last_reply(session.profile_id)).get("text") or "")
+                except ArenaAgentError:
+                    latest_quiet = ""
+                if latest_quiet.strip() and not _is_own_prompt(latest_quiet, text):
+                    break
+                if not empty_noted:
+                    empty_noted = True
+                    append_event(session, "quiet_without_reply", f"{current}: waiting for the reply", job_id=job.id)
+                    await db.commit()
+                await asyncio.sleep(self.poll_seconds)
+                continue
+            else:
+                quiet_since = None
             if time.monotonic() - last_change > self.stall_minutes * 60:
                 reason = f"stalled: no Arena activity for {self.stall_minutes:g} minutes"
                 await self._session_needs_human(db, session, reason)
