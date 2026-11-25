@@ -237,6 +237,12 @@ def _is_own_prompt(reply: str, prompt: str) -> bool:
     return bool(core) and (core == sent or (len(core) >= 20 and core in sent))
 
 
+def _looks_cut(text: str) -> bool:
+    """E61: a JSON answer that is only a few words with no brace is a fragment the live page kept, not a reply."""
+    core = (text or "").strip()
+    return len(core) < 40 and "{" not in core
+
+
 def _negated(text: str, start: int, end: int) -> bool:
     before = text[max(0, start - _NEGATION_WINDOW):start]
     return bool(_NEGATION.search(before))
@@ -1291,6 +1297,8 @@ class ManagerArenaRuntime:
             await asyncio.sleep(self.poll_seconds)
 
         reply = await self.adapter.read_last_reply(session.profile_id)
+        if expects_json and _looks_cut(str(reply.get("text") or "")):
+            reply = await self._reread_after_reload(db, session, job, reply)
         text_out = redact_secrets(str(reply.get("text") or ""))[:MAX_RAW_REPLY_CHARS]
         session.phase = "manager_ready"
         session.last_state_change_at = _now()
@@ -1298,6 +1306,35 @@ class ManagerArenaRuntime:
         await db.commit()
         await self._stream(job, text_out)
         return text_out
+
+    async def _reread_after_reload(self, db: AsyncSession, session: ArenaSession, job: ManagerJob,
+                                   reply: dict[str, Any]) -> dict[str, Any]:
+        """E61: after a long agent run the live page can keep only a fragment ("Let") of the answer.
+
+        Loading the same chat again draws the whole transcript; the reply is then read once more.
+        """
+        from app.providers.adapters.arena_agent import ArenaAgentError
+
+        try:
+            page = (await self.adapter.selector_test(session.profile_id)).get("page") or {}
+            origin, path = str(page.get("origin") or ""), str(page.get("path") or "")
+            if not origin or not path.startswith("/agent/"):
+                return reply  # not a saved chat: reloading would open a new, empty one
+            append_event(session, "reply_cut_reload", f"{len(str(reply.get('text') or ''))} chars", job_id=job.id)
+            await db.commit()
+            before = (await self.adapter.state(session.profile_id)).get("connections_total")
+            await self.adapter.open_chat(session.profile_id, origin + path)
+            if isinstance(before, int):
+                await self.adapter._wait_for_new_page(session.profile_id, before)
+            await self.adapter.wait_for_state(session.profile_id, {"ready", "idle"}, timeout=90.0)
+            again = await self.adapter.read_last_reply(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "reply_cut_reload_failed", f"{exc.code}: {exc.message}", job_id=job.id)
+            await db.commit()
+            return reply
+        if len(str(again.get("text") or "")) > len(str(reply.get("text") or "")):
+            return again
+        return reply
 
     async def _session_needs_human(self, db: AsyncSession, session: ArenaSession, reason: str) -> None:
         session.phase = "needs_human"
