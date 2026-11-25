@@ -137,6 +137,11 @@ export const en: Translations = {
     modelSaved: 'Model updated',
   },
   tasks: {
+    createNeedsProject: 'Choose or create an active project first: a task belongs to a project.',
+    createProjectInactive: 'Project “{name}” is completed or disabled, so it takes no new tasks. Turn it on in Projects or pick an active one.',
+    createNeedsTitle: 'Write a task title first.',
+    createDone: 'Task created and queued.',
+    createFailed: 'Could not create the task: {reason}',
     title: 'Dependency-Aware Task Orchestration',
     newTask: 'New Task',
     taskTitle: 'Task Title',

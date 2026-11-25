@@ -139,6 +139,11 @@ export interface Translations {
     modelSaved: string
   }
   tasks: {
+    createNeedsProject: string
+    createProjectInactive: string
+    createNeedsTitle: string
+    createDone: string
+    createFailed: string
     title: string
     newTask: string
     taskTitle: string

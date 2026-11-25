@@ -69,6 +69,9 @@ def task_footprint(task: Any) -> tuple[frozenset[str], bool]:
     return paths, migration
 
 
+INACTIVE_PROJECT_STATUSES = frozenset({"completed", "disabled", "archived"})
+
+
 def footprint_conflict(task: Any, others: list[Any]) -> str | None:
     """Why ``task`` must wait for one of ``others`` (same project, running or with an unmerged migration PR)."""
     paths, migration = task_footprint(task)
@@ -383,6 +386,7 @@ class TaskScheduler:
         project_limit: dict[str | None, int | None] = {}
         project_in_flight: dict[str | None, int] = {}
         repo_blocked: dict[str | None, set[str]] = {}
+        project_open: dict[str, bool] = {}
         for t in tasks:
             if t.status in {"assigned", "in_progress"}:
                 project_in_flight[t.project_id] = project_in_flight.get(t.project_id, 0) + 1
@@ -395,6 +399,12 @@ class TaskScheduler:
             if task.device_id and task.device_id != LOCAL_DEVICE_ID:
                 continue
             if not await self.dependencies_satisfied(db, task):
+                continue
+            if task.project_id and task.project_id not in project_open:
+                # A task whose project is gone, or completed, disabled or archived, is never handed to a worker.
+                owner = await db.get(Project, task.project_id)
+                project_open[task.project_id] = owner is not None and (owner.status or "active") not in INACTIVE_PROJECT_STATUSES
+            if task.project_id and not project_open[task.project_id]:
                 continue
             if task.project_id not in project_limit:
                 project = await db.get(Project, task.project_id) if task.project_id else None

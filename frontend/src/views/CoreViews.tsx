@@ -590,11 +590,13 @@ function taskTone(status: string): 'success' | 'danger' | 'warning' | 'info' | '
 export function TasksView({
   tasks,
   projectId,
+  projects,
   error,
   onReload,
 }: {
   tasks: any[]
   projectId: string | null
+  projects?: any[]
   error?: string | null
   onReload: () => void
 }) {
@@ -617,21 +619,42 @@ export function TasksView({
   const statusOptions = Array.from(new Set(tasks.map((task) => String(task.status)))).sort()
   const visibleTasks = statusFilter === 'all' ? tasks : tasks.filter((task) => task.status === statusFilter)
 
+  // Why a new task cannot be created right now; shown next to the form instead of failing silently.
+  const [createNotice, setCreateNotice] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null)
+  const currentProject = (projects || []).find((p: any) => p.id === projectId)
+  const projectBlocked = !projectId
+    ? t.tasks.createNeedsProject
+    : currentProject && (currentProject.status ?? 'active') !== 'active'
+      ? t.tasks.createProjectInactive.replace('{name}', currentProject.name)
+      : null
+
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!projectId || !title.trim()) return
-    await apiFetch('/tasks', {
-      method: 'POST',
-      body: JSON.stringify({
-        project_id: projectId,
-        division_code: division,
-        title,
-        priority,
-        execution_mode: executionMode,
-      }),
-    })
-    setTitle('')
-    onReload()
+    if (projectBlocked) {
+      setCreateNotice({ kind: 'error', text: projectBlocked })
+      return
+    }
+    if (!title.trim()) {
+      setCreateNotice({ kind: 'error', text: t.tasks.createNeedsTitle })
+      return
+    }
+    try {
+      await apiFetch('/tasks', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: projectId,
+          division_code: division,
+          title,
+          priority,
+          execution_mode: executionMode,
+        }),
+      })
+      setTitle('')
+      setCreateNotice({ kind: 'ok', text: t.tasks.createDone })
+      onReload()
+    } catch (err) {
+      setCreateNotice({ kind: 'error', text: t.tasks.createFailed.replace('{reason}', err instanceof Error ? err.message : String(err)) })
+    }
   }
 
   const updateTaskStatus = async (taskId: string, status: string) => {
@@ -679,9 +702,17 @@ export function TasksView({
               <option value="medium">{t.tasks.priorityMedium}</option>
               <option value="low">{t.tasks.priorityLow}</option>
             </Select>
-            <Button type="submit">{t.common.create}</Button>
+            <Button type="submit" data-testid="task-create-submit">{t.common.create}</Button>
           </div>
         </form>
+        {(projectBlocked || createNotice) && (
+          <p data-testid="task-create-notice" role={(createNotice?.kind ?? 'error') === 'error' ? 'alert' : 'status'}
+            className={`mt-3 rounded-md border px-3 py-2 text-start text-sm ${(createNotice?.kind ?? 'error') === 'ok'
+              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
+              : 'border-amber-500/50 bg-amber-500/10 text-amber-100'}`}>
+            {createNotice?.text ?? projectBlocked}
+          </p>
+        )}
       </Card>
 
       {error ? (

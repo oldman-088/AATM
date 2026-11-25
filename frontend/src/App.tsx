@@ -627,7 +627,7 @@ function AATMWorkspace() {
           {tab === 'tasks' && (
             <div className="space-y-6">
               <AgentMessagingPanel agents={agents} messages={agentMessages} projectId={activeProjectId} onReload={() => loadAll()} />
-              <TasksView tasks={tasks} projectId={activeProjectId} error={errors.tasks} onReload={() => loadAll()} />
+              <TasksView tasks={tasks} projectId={activeProjectId} projects={projects} error={errors.tasks} onReload={() => loadAll()} />
             </div>
           )}
           {tab === 'workspaces' && <WorkspacesView agents={agents} />}

@@ -137,6 +137,11 @@ export const ar: Translations = {
     modelSaved: 'تم تحديث النموذج',
   },
   tasks: {
+    createNeedsProject: 'اختر أو أنشئ مشروعاً نشطاً أولاً: كل مهمة تتبع مشروعاً.',
+    createProjectInactive: 'المشروع «{name}» مكتمل أو معطّل، فلا يستقبل مهام جديدة. فعّله من شاشة المشاريع أو اختر مشروعاً نشطاً.',
+    createNeedsTitle: 'اكتب عنوان المهمة أولاً.',
+    createDone: 'أُنشئت المهمة ودخلت الطابور.',
+    createFailed: 'تعذّر إنشاء المهمة: {reason}',
     title: 'جدولة المهام وإدارة التبعيات',
     newTask: 'مهمة جديدة',
     taskTitle: 'عنوان المهمة',
