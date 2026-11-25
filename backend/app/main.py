@@ -29,6 +29,7 @@ from app.api.routes import (
     projects,
     reviews,
     scaling,
+    users,
 )
 from app.browser.manager import browser_manager
 from app.core.config import get_settings, validate_runtime_security
@@ -196,6 +197,7 @@ async def health(db: AsyncSession = Depends(get_db)):
 
 API_PREFIX = "/api/v1"
 app.include_router(auth.router, prefix=API_PREFIX)
+app.include_router(users.router, prefix=API_PREFIX)
 app.include_router(projects.router, prefix=API_PREFIX)
 app.include_router(orchestration.router, prefix=API_PREFIX)
 app.include_router(infra.router, prefix=API_PREFIX)

@@ -194,9 +194,25 @@ describe('System administration', () => {
     expect(screen.getByText('setting.update')).toBeInTheDocument()
   })
 
-  it('says plainly that user management needs a backend API', () => {
-    wrap(<UsersPermissions user={{ email: 'owner@example.test', role: 'admin' }} />)
-    expect(screen.getByTestId('users-api-missing')).toBeInTheDocument()
+  it('lets an admin change another user\'s role after confirming, never their own', async () => {
+    const calls = mockApi({ '/users': [
+      { id: 'u1', email: 'owner@example.test', full_name: 'Owner', role: 'admin', is_active: true },
+      { id: 'u2', email: 'ops@example.test', full_name: 'Ops', role: 'viewer', is_active: true },
+    ] })
+    wrap(<UsersPermissions user={{ id: 'u1', email: 'owner@example.test', role: 'admin' }} />)
+    await screen.findByTestId('user-u2')
+    expect(screen.queryByTestId('user-role-u1')).toBeNull()
+    fireEvent.change(screen.getByTestId('user-role-u2'), { target: { value: 'operator' } })
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+    fireEvent.click(await screen.findByTestId('confirm-ok'))
+    await waitFor(() => expect(calls).toContainEqual({ path: '/users/u2', method: 'PATCH', body: { role: 'operator' } }))
+  })
+
+  it('does not load the user list for a non-admin', () => {
+    const calls = mockApi()
+    wrap(<UsersPermissions user={{ email: 'viewer@example.test', role: 'viewer' }} />)
+    expect(screen.getByTestId('users-admin-only')).toBeInTheDocument()
+    expect(calls.some((c) => c.path === '/users')).toBe(false)
   })
 })
 

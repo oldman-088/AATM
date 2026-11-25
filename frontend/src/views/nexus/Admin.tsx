@@ -216,6 +216,53 @@ export function SecurityOverview({ posture, children }: { posture: any; children
   )
 }
 
+/** Admin-only user list from GET /users; role and access changes go through PATCH /users/{id} (audited, signs the user out). */
+function UserDirectory({ me }: { me: any }) {
+  const { t } = useI18n()
+  const ad = t.nexus.admin
+  const { run, isBusy } = useAction()
+  const [users, setUsers] = useState<any[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const load = useCallback(() => {
+    apiFetch<any[]>('/users').then((u) => { setUsers(u); setError(null) }).catch((e) => setError(e?.message ?? 'error'))
+  }, [])
+  useEffect(() => { load() }, [load])
+  const change = (u: any, body: Record<string, unknown>, message: string) =>
+    run(`user:${u.id}`, () => apiFetch(`/users/${u.id}`, { method: 'PATCH', body: JSON.stringify(body) }), {
+      confirm: { message, danger: body.is_active === false }, success: fill(ad.userSaved, { email: u.email }), onDone: load,
+    })
+
+  if (error) return <p className="mt-4 text-sm text-nexus-error" role="alert">{fill(t.nexus.common.failed, { reason: error })}</p>
+  if (users === null) return <p className="mt-4 text-sm text-nexus-muted">{t.nexus.common.loading}</p>
+  return (
+    <ul className="mt-4 divide-y divide-nexus-border/60 rounded-lg border border-nexus-border/60" data-testid="user-list">
+      {users.map((u) => {
+        const self = u.id === me?.id || u.email === me?.email
+        return (
+          <li key={u.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm" data-testid={`user-${u.id}`}>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-nexus-text" dir="ltr">{u.email}</span>
+              <span className="text-[11px] text-nexus-dim">{u.full_name}{u.is_active ? '' : ` · ${ad.userInactive}`}</span>
+            </span>
+            {self ? <Badge variant="info">{u.role} · {ad.you}</Badge> : (
+              <>
+                <Select value={u.role} disabled={isBusy(`user:${u.id}`)} aria-label={fill(ad.userRole, { email: u.email })} data-testid={`user-role-${u.id}`}
+                  onChange={(e) => change(u, { role: e.target.value }, fill(ad.userRoleConfirm, { email: u.email, role: e.target.value }))}>
+                  {['admin', 'operator', 'viewer'].map((r) => <option key={r} value={r}>{r}</option>)}
+                </Select>
+                <Button size="sm" variant={u.is_active ? 'ghost' : 'secondary'} disabled={isBusy(`user:${u.id}`)} data-testid={`user-active-${u.id}`}
+                  onClick={() => change(u, { is_active: !u.is_active }, fill(u.is_active ? ad.userDeactivateConfirm : ad.userActivateConfirm, { email: u.email }))}>
+                  {u.is_active ? ad.userDeactivate : ad.userActivate}
+                </Button>
+              </>
+            )}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 export function UsersPermissions({ user }: { user: any }) {
   const { t } = useI18n()
   const ad = t.nexus.admin
@@ -231,7 +278,8 @@ export function UsersPermissions({ user }: { user: any }) {
           <Field label={ad.you}><span dir="ltr">{user?.email}</span></Field>
           <Field label={t.nexus.shell.role}><Badge variant="info">{user?.role}</Badge></Field>
         </dl>
-        <p className="mt-4 rounded-lg border border-nexus-warning/30 bg-nexus-warning/5 p-3 text-xs text-nexus-warning" role="note" data-testid="users-api-missing">{ad.usersApiMissing}</p>
+        {user?.role === 'admin' ? <UserDirectory me={user} /> : <p className="mt-4 text-xs text-nexus-muted" role="note" data-testid="users-admin-only">{ad.usersAdminOnly}</p>}
+        <p className="mt-4 text-xs text-nexus-dim">{ad.usersCreateNote}</p>
       </SectionCard>
       <SectionCard title={ad.permissions}>
         <ul className="space-y-2">
