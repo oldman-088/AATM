@@ -458,6 +458,7 @@ export const fa: Translations = {
     coordination: 'هماهنگی',
   },
   arena: {
+    resumeConfirm: 'فقط بعد از رفع مشکل در پنجره ادامه دهید. کاری که این پنجره انجام می\u200cداد به صف برمی\u200cگردد و در همان جلسهٔ Arena ادامه می\u200cیابد؛ کارهای مسدود دیگر دست نمی\u200cخورند. ادامه می\u200cدهید؟',
     title: 'اتصال‌دهنده مرورگر Arena',
     waiting: 'اتصال‌دهنده Arena خاموش است — ARENA_CONNECTOR_ENABLED=true (و مبداها در ARENA_ALLOWED_ORIGINS) را برای سرور و پل تنظیم کنید.',
     mockMode: 'حالت آزمایشی: فقط به صفحه آزمایشی محلی Arena متصل است.',
@@ -604,6 +605,10 @@ export const fa: Translations = {
     },
   },
   home: {
+    resolveConflict: 'حل تعارض',
+    resolveConflictConfirm: 'کارگر آخرین نسخهٔ شاخهٔ اصلی را در این شاخه ادغام می\u200cکند، تعارض را حل می\u200cکند، تست\u200cها را اجرا می\u200cکند و به همان درخواست ادغام می\u200cفرستد. ادامه می\u200cدهید؟',
+    resolveConflictSent: 'برای کارگر فرستاده شد',
+    resolveConflictAlready: 'برای این commit قبلاً فرستاده شده',
     progressDone: 'انجام‌شده',
     etaLeft: 'باقی‌مانده حدود',
     etaUnknown: 'زمان باقی‌مانده: هنوز معلوم نیست',

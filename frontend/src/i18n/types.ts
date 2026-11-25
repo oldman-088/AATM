@@ -461,6 +461,7 @@ export interface Translations {
     coordination: string
   }
   arena: {
+    resumeConfirm: string
     title: string
     waiting: string
     mockMode: string
@@ -585,6 +586,10 @@ export interface Translations {
     phases: Record<string, string>
   }
   home: {
+    resolveConflict: string
+    resolveConflictConfirm: string
+    resolveConflictSent: string
+    resolveConflictAlready: string
     progressDone: string
     etaLeft: string
     etaUnknown: string

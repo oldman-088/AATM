@@ -108,7 +108,7 @@ class MergeQueue:
             return {"status": "wrong_base", "task_id": task.id, "base": pr["base"]}
         head = pr.get("head_sha") or ""
         if pr.get("conflicting"):
-            created = await self._conflict_follow_up(db, task, base, head)
+            created = await self.conflict_follow_up(db, task, base, head)
             return {"status": "conflict", "task_id": task.id, "follow_up_created": created}
         if pr.get("merge_state") == "BEHIND":
             # E41 (a): bring the PR up to date with the base first, so CI tests what will really be merged.
@@ -197,8 +197,10 @@ class MergeQueue:
         self._audit(db, project, "merge_queue.paused", {"base_sha": sha, "failing": failing, "last_merge": last})
         await db.commit()
 
-    async def _conflict_follow_up(self, db: AsyncSession, task: Task, base: str, head: str) -> bool:
-        """M4: the worker updates its branch from the base and resolves the conflict, once per PR head."""
+    async def conflict_follow_up(self, db: AsyncSession, task: Task, base: str, head: str, *, actor: str = ACTOR) -> bool:
+        """M4: the worker updates its branch from the base and resolves the conflict, once per PR head.
+
+        Used by the queue and by the PR card's "Resolve conflict" button (``actor`` is then the owner)."""
         key = f"conflict:{task.id}:{head[:40]}"[:128]
         if (await db.execute(select(Task).where(Task.idempotency_key == key))).scalars().first() is not None:
             return False
@@ -212,8 +214,8 @@ class MergeQueue:
             parent_task_id=task.id, review_round=task.review_round, idempotency_key=key, worktree_path=task.worktree_path,
             branch_name=task.branch_name, pr_number=task.pr_number, pr_url=task.pr_url,
         ))
-        self._audit(db, None, "merge_queue.conflict_follow_up", {"task_id": task.id, "pr_number": task.pr_number, "head_sha": head},
-                    project_id=task.project_id)
+        db.add(AuditLog(actor=actor, action="merge_queue.conflict_follow_up", resource_type="project", resource_id=task.project_id,
+                        details={"task_id": task.id, "pr_number": task.pr_number, "head_sha": head}))
         await db.commit()
         return True
 

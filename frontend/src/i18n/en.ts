@@ -458,6 +458,7 @@ export const en: Translations = {
     coordination: 'Coordination',
   },
   arena: {
+    resumeConfirm: 'Resume only after you fixed the problem in the window. The task this window was working on goes back to the queue and continues in the same Arena session; other blocked tasks are not touched. Continue?',
     title: 'Arena browser connector',
     waiting: 'Arena connector is off — set ARENA_CONNECTOR_ENABLED=true (origins in ARENA_ALLOWED_ORIGINS) for both the backend and the bridge.',
     mockMode: 'Test mode: connected to the local mock Arena page only.',
@@ -604,6 +605,10 @@ export const en: Translations = {
     },
   },
   home: {
+    resolveConflict: 'Resolve conflict',
+    resolveConflictConfirm: 'The worker will merge the latest base into this branch, resolve the conflict, run the tests and push to the same pull request. Continue?',
+    resolveConflictSent: 'Sent to the worker',
+    resolveConflictAlready: 'Already sent for this commit',
     progressDone: 'Done',
     etaLeft: 'About',
     etaUnknown: 'Time left: not known yet',

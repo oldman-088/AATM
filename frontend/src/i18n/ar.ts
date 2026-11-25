@@ -458,6 +458,7 @@ export const ar: Translations = {
     coordination: 'التنسيق',
   },
   arena: {
+    resumeConfirm: 'استأنف فقط بعد ما تحل المشكلة في النافذة. المهمة التي كانت تعمل عليها هذه النافذة ترجع للطابور وتكمل في نفس جلسة Arena، ولا تُلمس المهام المعلّقة الأخرى. هل تريد المتابعة؟',
     title: 'موصّل Arena عبر المتصفح',
     waiting: 'موصل Arena متوقف — فعّل ARENA_CONNECTOR_ENABLED=true (والأصول في ARENA_ALLOWED_ORIGINS) للخادم والجسر معاً.',
     mockMode: 'وضع الاختبار: متصل بصفحة Arena التجريبية المحلية فقط.',
@@ -604,6 +605,10 @@ export const ar: Translations = {
     },
   },
   home: {
+    resolveConflict: 'حل التعارض',
+    resolveConflictConfirm: 'سيدمج العامل آخر نسخة من الفرع الأساسي في هذا الفرع، ويحل التعارض، ويشغّل الاختبارات، ثم يرفع إلى نفس طلب الدمج. هل تريد المتابعة؟',
+    resolveConflictSent: 'أُرسل إلى العامل',
+    resolveConflictAlready: 'أُرسل سابقاً لهذا الـ commit',
     progressDone: 'المنجز',
     etaLeft: 'المتبقي تقريبًا',
     etaUnknown: 'الوقت المتبقي: غير معروف بعد',
