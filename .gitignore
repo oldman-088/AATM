@@ -1,5 +1,5 @@
 # Python
-.venv/
+.venv
 __pycache__/
 *.py[cod]
 *.pyo
@@ -9,7 +9,7 @@ __pycache__/
 *.egg-info/
 
 # Node / Frontend
-node_modules/
+node_modules
 frontend/dist/
 frontend/.vite/
 frontend/tsconfig.tsbuildinfo
