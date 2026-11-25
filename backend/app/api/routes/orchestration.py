@@ -99,6 +99,11 @@ def _serialize_task(t: Task) -> dict:
         "pr_url": t.pr_url,
         "pr_status": t.pr_status,
         "estimated_minutes": t.estimated_minutes,
+        "task_type": t.task_type,
+        "parent_task_id": t.parent_task_id,
+        "deadline": t.deadline,
+        "started_at": t.started_at,
+        "completed_at": t.completed_at,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
     }
