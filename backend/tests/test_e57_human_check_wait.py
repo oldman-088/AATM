@@ -98,3 +98,15 @@ async def test_e61_a_cut_reply_is_read_again_after_the_same_chat_is_loaded(env, 
         again = await runtime._reread_after_reload(db, session, job, {"text": "Let"})
     assert opened == ["https://arena.ai/agent/abc"]
     assert again["text"].startswith('{"summary_ar"')
+
+
+def test_e63_a_plan_longer_than_the_stored_copy_is_still_parsed_whole():
+    import json as _json
+
+    from app.orchestration.manager_arena import MAX_RAW_REPLY_CHARS, MAX_REPLY_PARSE_CHARS, extract_manager_json
+
+    tasks = [{"title": f"Task {i}", "description": "x" * 2_000, "assignee": "worker-1",
+              "acceptance_criteria": ["works"], "depends_on": []} for i in range(12)]
+    reply = "JSON\n" + _json.dumps({"summary_ar": "خطة", "tasks": tasks}, ensure_ascii=False)
+    assert MAX_RAW_REPLY_CHARS < len(reply) < MAX_REPLY_PARSE_CHARS
+    assert extract_manager_json(reply[:MAX_REPLY_PARSE_CHARS])["tasks"][11]["title"] == "Task 11"

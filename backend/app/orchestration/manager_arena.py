@@ -129,7 +129,8 @@ HUMAN_CHECK_WAIT_AR = ("صفحة المدير في Arena تعرض فحصًا ب�
 EMPTY_REPLY_POLLS = 90  # E58: polls a quiet page may show no reply (or our own prompt) before it counts as done
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
-MAX_RAW_REPLY_CHARS = 20_000
+MAX_RAW_REPLY_CHARS = 20_000      # stored copy of a reply
+MAX_REPLY_PARSE_CHARS = 200_000   # E63: a 12-task plan is over 20,000 characters; cutting it broke the JSON
 # A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
 MAX_JOB_ATTEMPTS = 3
 # E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
@@ -1299,7 +1300,7 @@ class ManagerArenaRuntime:
         reply = await self.adapter.read_last_reply(session.profile_id)
         if expects_json and _looks_cut(str(reply.get("text") or "")):
             reply = await self._reread_after_reload(db, session, job, reply)
-        text_out = redact_secrets(str(reply.get("text") or ""))[:MAX_RAW_REPLY_CHARS]
+        text_out = redact_secrets(str(reply.get("text") or ""))[:MAX_REPLY_PARSE_CHARS]  # E63: parse it all
         session.phase = "manager_ready"
         session.last_state_change_at = _now()
         append_event(session, "reply", f"{len(text_out)} chars", job_id=job.id)
