@@ -962,6 +962,12 @@ async def test_real_failure_still_stops_after_three_attempts(env, scripted):
             await runtime._run_job(db, job)
         job = await db.get(ManagerJob, job_id)
         assert job.attempts == 3 and job.status == "waiting_connection"
+        # 2026-11-26: three failed sends first get one fresh Arena chat, then three more attempts.
+        result = await runtime._run_job(db, job)
+        assert result.get("fresh_session_retry") is True and job.attempts == 0 and job.status == "queued"
+        assert job.context["fresh_session_retry"] is True
+        for _ in range(3):
+            await runtime._run_job(db, job)
         result = await runtime._run_job(db, job)
     assert result["status"] == "failed" and "stopped after 3 attempts" in job.error
 

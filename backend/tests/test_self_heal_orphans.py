@@ -121,3 +121,19 @@ async def test_failing_the_running_task_frees_its_worker(db_session):
     await db_session.refresh(worker)
     assert worker.status == "idle"
     assert worker.current_task_id is None
+
+
+async def test_heal_frees_a_worker_whose_task_went_back_to_the_queue(db_session):
+    """2026-11-26: after a backend restart worker-3 stayed "working" on a task that was queued again."""
+    worker, task = await _busy_worker_with_task(db_session, "queued")
+    result = await heal_orphaned_state(db_session)
+    assert worker.id in result["released_workers"]
+    await db_session.refresh(worker)
+    assert worker.status == "idle" and worker.current_task_id is None
+
+
+async def test_heal_leaves_a_worker_whose_queued_task_is_being_dispatched(db_session):
+    worker, task = await _busy_worker_with_task(db_session, "queued")
+    task.lock_owner = worker.id
+    await db_session.commit()
+    assert worker.id not in (await heal_orphaned_state(db_session))["released_workers"]

@@ -46,6 +46,7 @@ from app.orchestration.arena_prompts import (
     build_manager_status_prompt,
     chained_dependencies,
     extract_manager_json,
+    is_prompt_echo,
     validate_manager_plan,
     validate_manager_review,
 )
@@ -189,6 +190,10 @@ PLANNING_RULES = (
     "- Plan independent tasks together. Leave depends_on empty unless a task needs another task's output.",
     "- Add a dependency only when a task needs another task's output. Never chain tasks just to order them.",
     "- Prefer few, larger tasks over many small ones.",
+    # Owner 2026-11-26: 6 of 8 workers sat idle for hours behind one task.
+    "- Keep the whole team busy from the start: every worker you assign must have at least one task it can start "
+    "at once (empty depends_on). Instead of making a worker wait for another task, give it work that can be done "
+    "now against the agreed contract file, and leave later work for a later plan.",
     "- A one-line request gets 1 to 3 tasks at most.",
     "- If the goal is unclear, set \"ambiguous\": true and ask the owner your question in summary_ar.",
     "- Refuse goals about unauthorized scraping, surveillance or profiling of private people, or CAPTCHA / anti-bot bypass: return an empty tasks list and say why in summary_ar.",
@@ -869,6 +874,19 @@ class ManagerArenaRuntime:
                               readiness=ready["code"])
             await self._notify_waiting(db, job, ready)
             return {"job_id": job.id, "status": job.status}
+        if job.attempts >= MAX_JOB_ATTEMPTS and not (job.context or {}).get("fresh_session_retry"):
+            # 2026-11-26: the manager page kept the text but never sent it ("Reconnect" shown, no send button);
+            # the review of PR #6 failed and its review task stayed open. A new chat fixed it, so do that once here.
+            session = await self._open_session(db)
+            if session is not None:
+                await close_session(db, session, phase="closed", reason="sending failed 3 times; starting a new chat")
+            job.context = {**(job.context or {}), "fresh_session_retry": True}
+            job.attempts = 0
+            job.status = "queued"
+            db.add(AuditLog(actor="self-heal", action="manager.fresh_session_retry", resource_type="manager_job",
+                            resource_id=job.id, details={"kind": job.kind, "error": (job.error or "")[:300]}))
+            await db.commit()
+            return {"job_id": job.id, "status": job.status, "fresh_session_retry": True}
         if job.attempts >= MAX_JOB_ATTEMPTS:
             await self._finish(db, job, status="failed",
                                error=f"stopped after {job.attempts} attempts to avoid an endless loop")
@@ -1430,6 +1448,9 @@ class ManagerArenaRuntime:
         return True
 
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
+        if is_prompt_echo(reply, job.kind):
+            # E66: the page gave back AATM's own prompt; its example JSON must never become a plan.
+            return None, "The text read back is the prompt, not the manager's answer."
         data = extract_manager_json(reply)
         if job.kind == "plan":
             known = {m["id"] for m in await self._team(db, job.project_id)}

@@ -454,10 +454,35 @@ async def test_keep_working_continues_when_github_is_not_reported_blocked(env, a
         assert (await runner.tick(db))[session_id]["keep_working"] == 1
 
 
+async def _stop_without_pr(db, page, runner) -> None:
+    page.page_state = "idle"
+    page.reply = "All done!"
+    for _ in range(12):
+        await runner.tick(db)
+        page.page_state = "idle"
+
+
+async def test_a_first_stop_without_pr_is_retried_once_in_a_new_session(env, arena_settings, monkeypatch, tmp_path):
+    """Owner 2026-11-26: worker-4's docs task stopped without a PR and had to be re-queued by hand."""
+    page, runner, _gh, (task_id, session_id, agent_id), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
+    async with env() as db:
+        await _stop_without_pr(db, page, runner)
+    async with env() as db:
+        session, task, agent = await db.get(ArenaSession, session_id), await db.get(Task, task_id), await db.get(Agent, agent_id)
+        assert task.status == "queued" and task.error_message is None
+        assert not session.is_open and agent.status == "idle" and agent.current_task_id is None
+        assert [cp for cp in task.checkpoints if cp.get("event") == "no_pr_retry"]
+        assert (await db.execute(select(AuditLog).where(AuditLog.action == "arena.no_pr_retry"))).scalars().first()
+
+
 async def test_unlimited_keep_working_then_no_pr_is_escalated_instead_of_completed(env, arena_settings, monkeypatch, tmp_path):
     monkeypatch.setattr(arena_settings, "ARENA_AGENT_MAX_KEEP_WORKING", 0)
     page, runner, _gh, (task_id, session_id, _agent), _ = await _runner_fixture(env, arena_settings, monkeypatch, tmp_path)
     page.reply = "Still implementing."
+    async with env() as db:
+        task = await db.get(Task, task_id)  # the one automatic retry was already used: this stop goes to the owner
+        task.checkpoints = list(task.checkpoints or []) + [{"event": "no_pr_retry"}]
+        await db.commit()
     async with env() as db:
         for _ in range(7):  # Keep working shown again and again: AATM continues every time
             page.page_state = "keep_working_visible"

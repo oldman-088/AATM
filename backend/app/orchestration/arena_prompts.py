@@ -768,8 +768,20 @@ def extract_manager_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+# E66: the reply format in the prompt uses "..." for every field. When the page handed back the prompt
+# instead of the answer, that example parsed as a valid plan and became a task titled "...".
+_PLACEHOLDER_RE = re.compile(r"[\s.\u2026<>\-_]*")
+
+
 def _nonempty_str(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
+    """A string with real content: blank text and placeholders such as "...", "…" or "<...>" do not count."""
+    return isinstance(value, str) and bool(value.strip()) and not _PLACEHOLDER_RE.fullmatch(value)
+
+
+def is_prompt_echo(reply: str, kind: str) -> bool:
+    """E66: the text read back starts with the manager prompt's own marker, so it is the prompt, not an answer."""
+    head = (reply or "").lstrip()[:200].replace("\\", "")
+    return head.lstrip("[").startswith(manager_marker(kind).lstrip("["))
 
 
 CHAIN_SHARE = 0.5  # more than this share of a plan's tasks depending on one task is a chain, not parallel work

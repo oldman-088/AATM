@@ -73,7 +73,9 @@ def test_unit_waits_for_the_network_and_survives_its_own_failures(env):
     assert "StartLimitIntervalSec=0" in text
     assert "TimeoutStartSec=infinity" in text
     assert "Environment=AATM_AUTOSTART=1" in text
-    assert f'WorkingDirectory="{ROOT}"' in text  # the repo, not the fake HOME
+    assert f"WorkingDirectory={ROOT}\n" in text  # the repo, not the fake HOME
+    # systemd does not strip quotes here: a quoted path reads "not absolute" and the unit never loads (E65)
+    assert 'WorkingDirectory="' not in text
 
 
 def test_unit_path_survives_spaces_and_percent_signs(tmp_path):
@@ -95,7 +97,7 @@ def test_unit_path_survives_spaces_and_percent_signs(tmp_path):
     text = (tmp_path / "config/systemd/user/aatm.service").read_text()
     escaped = str(repo).replace("%", "%%")
     assert f'ExecStart="{escaped}/scripts/ubuntu/autostart.sh"' in text  # %x must not read as a specifier
-    assert f'WorkingDirectory="{escaped}"' in text
+    assert f"WorkingDirectory={escaped}\n" in text
 
 
 def test_install_enables_the_unit_and_turns_linger_on_when_needed(env):

@@ -308,7 +308,7 @@ class GitHubClient:
             return {"available": False, "error": repo_or_err}
         rc, out = await self._run_gh([
             "pr", "view", str(int(number)), "--repo", repo_or_err, "--json",
-            "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url,statusCheckRollup",
+            "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,url,statusCheckRollup,files",
         ])
         if rc != 0:
             return {"available": False, "error": out}
@@ -322,6 +322,7 @@ class GitHubClient:
             "mergeable": data.get("mergeable"), "merge_state": data.get("mergeStateStatus"),
             "conflicting": data.get("mergeable") == "CONFLICTING", "head_sha": data.get("headRefOid"),
             "base": data.get("baseRefName"), "url": data.get("url"), "ci": ci, "checks": checks,
+            "files": [str(f.get("path") or "") for f in data.get("files") or [] if isinstance(f, dict)],
         }
 
     async def update_pull_request_branch(self, repo: str, number: int, expected_head_sha: str) -> dict[str, Any]:

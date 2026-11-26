@@ -77,8 +77,8 @@ fi
 
 mkdir -p "$UNIT_DIR"
 # systemd expands percent specifiers even in quoted arguments.
-escaped=${ROOT_DIR//%/%%}
-escaped=${escaped//\\/\\\\}
+wd_escaped=${ROOT_DIR//%/%%}
+escaped=${wd_escaped//\\/\\\\}
 escaped=${escaped//\"/\\\"}
 cat > "$UNIT_DIR/$UNIT_NAME" <<UNIT
 [Unit]
@@ -93,7 +93,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory="$escaped"
+# WorkingDirectory= takes the path as is: quotes are not stripped, and a quoted value is
+# "not absolute", which makes the whole unit fail to load (E65). Spaces are fine unquoted.
+WorkingDirectory=$wd_escaped
 Environment=AATM_AUTOSTART=1
 # Waits for a default route, then runs start-all.sh, which ends with one doctor pass (report only).
 ExecStart="$escaped/scripts/ubuntu/autostart.sh"

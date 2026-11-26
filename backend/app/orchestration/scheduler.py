@@ -324,9 +324,10 @@ class TaskScheduler:
         from app.orchestration.review import review_service
 
         try:
-            from app.browser.arena_sessions import sync_profiles_with_bridge
+            from app.browser.arena_sessions import resume_cleared_profiles, sync_profiles_with_bridge
 
             await sync_profiles_with_bridge(db)
+            await resume_cleared_profiles(db)  # E68
         except Exception as exc:  # noqa: BLE001 - a bridge problem must never break dispatch
             logger.warning("Arena bridge profile sync failed: %s", type(exc).__name__)
             await db.rollback()

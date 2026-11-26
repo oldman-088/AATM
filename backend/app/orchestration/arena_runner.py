@@ -291,6 +291,29 @@ class ArenaAgentRunner:
         await event_bus.emit("arena.needs_human", {"agent_id": session.agent_id, "profile_id": session.profile_id,
                                                    "task_id": task.id, "reason": reason})
 
+    async def _retry_without_pr(self, db: AsyncSession, session: ArenaSession, task: Task, nudges: int) -> bool:
+        """The agent stopped without a PR after the nudges: run the task once more in a new Arena session.
+
+        On 2026-11-26 a documentation task (worker-4) stopped like this and the owner re-queued it by hand.
+        Only the first time is automatic; a second stop without a PR still goes to the owner.
+        """
+        if any(cp.get("event") == "no_pr_retry" for cp in (task.checkpoints or []) if isinstance(cp, dict)):
+            return False
+        reason = f"stopped without a pull request after {nudges} follow-ups; retrying once in a new session"
+        await close_session(db, session, phase="closed", reason=reason)
+        task.status = "queued"
+        task.lock_owner = None
+        task.locked_at = None
+        task.error_message = None
+        task.checkpoints = list(task.checkpoints or []) + [{"ts": _now().isoformat(), "event": "no_pr_retry", "reason": reason}]
+        agent = await db.get(Agent, session.agent_id)
+        if agent is not None and agent.current_task_id == task.id:
+            agent.current_task_id = None
+            agent.status = "idle"
+        self._audit(db, "self-heal", "arena.no_pr_retry", task, {"session_id": session.id, "nudges": nudges})
+        await db.commit()
+        return True
+
     async def _escalate(self, db: AsyncSession, session: ArenaSession, task: Task, reason: str) -> None:
         session.phase = "escalated"
         session.error_message = reason
@@ -1016,6 +1039,8 @@ class ArenaAgentRunner:
                 return {"phase": session.phase, "waiting": "pr"}
             nudges = sum(1 for e in session.events or [] if e.get("kind") == "pr_nudge")
             if nudges >= NO_PR_NUDGES:
+                if await self._retry_without_pr(db, session, active, nudges):
+                    return {"phase": session.phase, "retried": True}
                 await self._escalate(db, session, active, f"Arena Agent stopped without a pull request titled {pr_title_prefix(parent.id)} "
                                                           f"after {nudges} follow-ups.")
                 return {"phase": session.phase}

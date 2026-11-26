@@ -51,6 +51,12 @@ async def heal_orphaned_state(db: AsyncSession) -> dict[str, Any]:
             if worker.status == "working":
                 worker.status = "idle"
             released.append(worker.id)
+        elif task is not None and task.status == "queued" and not task.lock_owner and worker.status == "working":
+            # 2026-11-26: a backend restart put the running task back in the queue but left its worker "working",
+            # so the worker never got it again (doctor: worker_working_without_task). Free it; dispatch follows.
+            worker.current_task_id = None
+            worker.status = "idle"
+            released.append(worker.id)
 
     sessions = (await db.execute(select(ArenaSession).where(ArenaSession.is_open.is_(True)))).scalars().all()
     for session in sessions:
