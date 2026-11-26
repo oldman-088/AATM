@@ -37,6 +37,9 @@ class FakeStack:
     def _launch(self, chrome, window, target):
         self.launched.append((window.directory, target))
 
+    def restart_window(self, chrome, window):
+        self.launched.append((window.directory, "restart"))
+
 
 class Clock:
     def __init__(self) -> None:
@@ -133,3 +136,15 @@ def test_the_real_stack_script_is_found(watchdog):
     stack = watchdog.load_stack()
     for name in ("readiness", "_launch", "_chrome_binary", "chrome_main_processes"):
         assert callable(getattr(stack, name))
+
+
+def test_a_reload_that_did_not_reconnect_is_followed_by_a_full_window_restart(watchdog):
+    """2026-11-26: Worker 4 stayed disconnected after a reload; restarting its Chrome brought it back."""
+    stack = FakeStack(missing=[MANAGER])
+    dog, clock, _ = make(watchdog, stack)
+    dog.check_windows()
+    clock.now += watchdog.PROFILE_GRACE_SECONDS
+    dog.check_windows()
+    clock.now += watchdog.REOPEN_COOLDOWN_SECONDS
+    dog.check_windows()
+    assert stack.launched == [("manager", "https://arena.ai/agent"), ("manager", "restart")]

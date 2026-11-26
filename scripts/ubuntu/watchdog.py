@@ -510,10 +510,15 @@ class Watchdog:
             if now - self.last_reopen.get(pid, -REOPEN_COOLDOWN_SECONDS) < REOPEN_COOLDOWN_SECONDS:
                 continue
             running = bool(stack.chrome_main_processes(window.directory))
-            stack._launch(chrome, window, window.url)
+            if running and tries >= 1:
+                # The reload did not reconnect it: restart the whole window (2026-11-26, Worker 4).
+                stack.restart_window(chrome, window)
+                how = "أعيد تشغيل النافذة بالكامل"
+            else:
+                stack._launch(chrome, window, window.url)
+                how = "أعيد تحميل صفحة Arena" if running else "أعيد فتح النافذة"
             self.reopen_tries[pid] = tries + 1
             self.last_reopen[pid] = now
-            how = "أعيد تحميل صفحة Arena" if running else "أعيد فتح النافذة"
             write_log(f"[watchdog] {window.title} ({pid}) غير متصل: {how} (المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
         self.alerter.set_problems("window", problems)
 
