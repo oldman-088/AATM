@@ -194,7 +194,23 @@ def check_queued_tasks_stuck(conn, now: datetime) -> list[Finding]:
     cutoff = now - timedelta(minutes=QUEUED_STUCK_MINUTES)
     statuses = {r["id"]: r["status"] for r in _rows(conn, "SELECT id, status FROM tasks")}
     findings: list[Finding] = []
-    for row in _rows(conn, "SELECT id, title, dependencies, updated_at FROM tasks WHERE status = 'queued'"):
+    # 2026-11-26: a task whose worker is busy, or whose worker still owns an open PR (it takes only that PR's
+    # follow-ups), is waiting for a known reason; reporting it as "needs a human" sent the owner after nothing.
+    # Older or partial databases may lack some columns: use only what is there.
+    task_cols = {r["name"] for r in _rows(conn, "PRAGMA table_info(tasks)")}
+    has_agents = bool(_rows(conn, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agents'"))
+    busy = {r["id"] for r in _rows(conn, "SELECT id FROM agents WHERE status = 'working'")} if has_agents else set()
+    reserved: set[str] = set()
+    if {"assigned_agent_id", "pr_number"} <= task_cols:
+        reserved = {r["assigned_agent_id"] for r in _rows(
+            conn, "SELECT assigned_agent_id FROM tasks WHERE status IN ('in_review', 'changes_requested', 'pr_open') "
+                  "AND pr_number IS NOT NULL")}
+    running: set[str] = set()
+    if "project_id" in task_cols:
+        running = {r["project_id"] for r in _rows(conn, "SELECT project_id FROM tasks WHERE status IN ('assigned', 'in_progress')")}
+    extra = ", ".join(c for c in ("assigned_agent_id", "project_id") if c in task_cols)
+    for row in _rows(conn, f"SELECT id, title, dependencies, updated_at{', ' + extra if extra else ''} FROM tasks "
+                           "WHERE status = 'queued'"):
         queued_since = parse_ts(row["updated_at"])
         if queued_since is None or queued_since > cutoff:
             continue
@@ -204,9 +220,14 @@ def check_queued_tasks_stuck(conn, now: datetime) -> list[Finding]:
             deps = []
         if not all(statuses.get(dep) in DONE_TASK_STATUSES for dep in deps):
             continue  # waiting on a prerequisite is normal
+        if row.get("assigned_agent_id") in busy or row.get("assigned_agent_id") in reserved:
+            continue  # its worker is on another task, or on its own open PR: normal
+        hint = (" Another task of this project is running; it may be waiting for that task's files (T16)."
+                if row.get("project_id") in running else "")
         findings.append(Finding(
             "queued_task_stuck", row["id"],
-            f"Task '{row['title']}' has all its dependencies done but has been queued since {queued_since:%Y-%m-%d %H:%M} UTC.",
+            f"Task '{row['title']}' has all its dependencies done but has been queued since {queued_since:%Y-%m-%d %H:%M} UTC."
+            + hint,
         ))
     return findings
 
