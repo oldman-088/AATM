@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, update
@@ -134,6 +134,7 @@ TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
 MAX_RAW_REPLY_CHARS = 20_000      # stored copy of a reply
 MAX_REPLY_PARSE_CHARS = 200_000   # E63: a 12-task plan is over 20,000 characters; cutting it broke the JSON
 # A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
+UNREADABLE_RETRY_WAIT_SECONDS = 300
 MAX_JOB_ATTEMPTS = 3
 # Review jobs being run right now, by the manager or by a peer reviewer (peer_review.py): one runner each.
 CLAIMED_JOBS: set[str] = set()
@@ -805,8 +806,37 @@ class ManagerArenaRuntime:
             await db.commit()
         return settled
 
+    async def _retry_unreadable_reviews(self, db: AsyncSession) -> int:
+        """A review blocked only because no valid verdict could be READ gets one new job after a pause.
+
+        Live 2026-11-26 (PR #6): the reader took our own JSON retry for the reply, so the review was blocked and
+        the owner was asked, although the manager never failed to judge the PR. Other reasons stay blocked."""
+        retried = 0
+        blocked = list((await db.execute(select(Task).where(
+            Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID, Task.status == "blocked"))).scalars())
+        for review in blocked:
+            if not (review.error_message or "").startswith("Manager review needs a human: invalid JSON"):
+                continue
+            jobs = list((await db.execute(select(ManagerJob).where(ManagerJob.review_task_id == review.id))).scalars())
+            if any((j.context or {}).get("unreadable_retry") for j in jobs) or any(
+                    j.status in {"queued", "running", "waiting_connection"} for j in jobs):
+                continue
+            last = max((j.finished_at or j.updated_at for j in jobs if (j.finished_at or j.updated_at)), default=None)
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if last is not None and _now() - last < timedelta(seconds=UNREADABLE_RETRY_WAIT_SECONDS):
+                continue
+            parent = await db.get(Task, review.parent_task_id) if review.parent_task_id else None
+            review.status, review.error_message = "in_progress", None
+            await self.enqueue(db, "review", project_id=review.project_id, review_task_id=review.id,
+                               context={"unreadable_retry": True, "pr_number": getattr(parent, "pr_number", None),
+                                        "parent_task_id": review.parent_task_id})
+            retried += 1
+        return retried
+
     async def _enqueue_reviews(self, db: AsyncSession) -> int:
         await self._settle_stale_reviews(db)
+        await self._retry_unreadable_reviews(db)
         reviews = list((await db.execute(select(Task).where(
             Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID, Task.status == "queued",
         ))).scalars())
