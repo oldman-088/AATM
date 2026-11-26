@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from sqlalchemy import select
@@ -31,6 +32,11 @@ from app.orchestration.manager_arena import CLAIMED_JOBS, ManagerArenaRuntime
 logger = logging.getLogger(__name__)
 
 PEER_SESSION_KIND = "peer_review"
+# A worker whose peer review failed (its window could not send or read a long prompt, 2026-11-26) gets
+# no other peer review for a while, so it does not fail one job after another.
+PEER_COOLDOWN_SECONDS = 1800
+PEER_COOLDOWN: dict[str, float] = {}  # worker id -> monotonic time until which it gets no peer review
+FAILED_STATUSES = {"requeued", "requeued_for_manager", "fallback_for_manager"}
 
 
 class PeerReviewer(ManagerArenaRuntime):
@@ -96,6 +102,12 @@ class PeerReviewer(ManagerArenaRuntime):
 
     async def run(self, job_id: str) -> dict[str, Any]:
         """Run one claimed review job, then free the worker and close the review chat."""
+        result = await self._run_claimed(job_id)
+        if result.get("status") in FAILED_STATUSES:
+            PEER_COOLDOWN[self.agent_id] = time.monotonic() + PEER_COOLDOWN_SECONDS
+        return result
+
+    async def _run_claimed(self, job_id: str) -> dict[str, Any]:
         try:
             async with self.session_factory() as db:
                 job = await db.get(ManagerJob, job_id)
@@ -105,10 +117,21 @@ class PeerReviewer(ManagerArenaRuntime):
                 await db.commit()
                 result = await self._run_job(db, job)
                 job = await db.get(ManagerJob, job_id, populate_existing=True)
-                if job is not None and job.status in {"failed", "needs_human", "waiting_connection"}:
+                if job is not None and (job.result or {}).get("fallback_review_queued"):
+                    # The review flow already queued a short fallback review job: leave it to the manager
+                    # (requeueing this job too would review the PR twice).
+                    for retry in (await db.execute(select(ManagerJob).where(
+                            ManagerJob.review_task_id == job.review_task_id, ManagerJob.status == "queued"))).scalars():
+                        retry.context = {**(retry.context or {}), "peer_failed": self.agent_id}
+                    await db.commit()
+                    result = {**result, "status": "fallback_for_manager"}
+                elif job is not None and job.status in {"failed", "needs_human", "waiting_connection"}:
                     # No verdict from the peer: the manager reviews it instead of the owner being asked.
                     job.status, job.attempts, job.error = "queued", 0, None
                     job.context = {**(job.context or {}), "peer_failed": self.agent_id}
+                    review = await db.get(Task, job.review_task_id) if job.review_task_id else None
+                    if review is not None and review.status == "blocked":
+                        review.status, review.error_message = "in_progress", None
                     await db.commit()
                     result = {**result, "status": "requeued_for_manager"}
                 return result
@@ -200,7 +223,9 @@ class PeerReviewPool:
         ).order_by(Agent.id))).scalars())
         # A worker with queued work of its own keeps its window for that work (it may be waiting a moment
         # for a file-overlap guard), unless every candidate has some: then reviewing beats idling.
-        free = [w for w in candidates if w.id not in reserved and w.id not in self.running]
+        now = time.monotonic()
+        free = [w for w in candidates if w.id not in reserved and w.id not in self.running
+                and PEER_COOLDOWN.get(w.id, 0) <= now]
         without_work = [w for w in free if w.id not in queued_for]
         return without_work or free
 

@@ -171,3 +171,48 @@ async def test_a_peer_review_without_a_verdict_goes_back_to_the_manager(env, scr
     async with env() as db:
         await PeerReviewPool().tick(db)
     assert started == [], "a job a peer could not finish is left to the manager"
+
+
+async def test_a_failed_peer_review_with_a_fallback_job_is_not_reviewed_twice(env, scripted, monkeypatch):
+    """Live 2026-11-26: the peer's failure queued the short fallback review AND the original was requeued."""
+    make, project_id = scripted
+    page, runtime = make()
+    job_id, _ = await _review_job(env, runtime, project_id)
+
+    async def fails_with_fallback(self, db, job):
+        assert await self._fallback_review(db, job, "invalid JSON", raw="x")
+        return {"job_id": job.id, "status": job.status}
+
+    monkeypatch.setattr(PeerReviewer, "_run_job", fails_with_fallback)
+    async with env() as db:
+        profile_id = (await db.get(Agent, "worker-4")).browser_profile_id
+    await PeerReviewer("worker-4", profile_id, adapter=page, session_factory=env).run(job_id)
+    async with env() as db:
+        jobs = list((await db.execute(select(ManagerJob).where(ManagerJob.kind == "review"))).scalars())
+        queued = [j for j in jobs if j.status == "queued"]
+        assert (await db.get(ManagerJob, job_id)).status == "failed"
+        assert len(queued) == 1 and queued[0].context["fallback_review"] and queued[0].context["peer_failed"] == "worker-4"
+
+
+async def test_a_worker_whose_peer_review_failed_rests_before_the_next_one(env, scripted, monkeypatch):
+    """Live 2026-11-26: worker-4's window could not send long prompts and failed three reviews in a row."""
+    make, project_id = scripted
+    page, runtime = make()
+    job_id, _ = await _review_job(env, runtime, project_id)
+    peer_module.PEER_COOLDOWN.clear()
+
+    async def broken(self, db, job):
+        job.status, job.error = "needs_human", "send_failed"
+        await db.commit()
+        return {"job_id": job.id, "status": job.status}
+
+    monkeypatch.setattr(PeerReviewer, "_run_job", broken)
+    async with env() as db:
+        profile_id = (await db.get(Agent, "worker-4")).browser_profile_id
+    await PeerReviewer("worker-4", profile_id, adapter=page, session_factory=env).run(job_id)
+    try:
+        assert "worker-4" in peer_module.PEER_COOLDOWN
+        async with env() as db:
+            assert "worker-4" not in {w.id for w in await PeerReviewPool()._free_workers(db)}
+    finally:
+        peer_module.PEER_COOLDOWN.clear()
