@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.arena_connector import (
@@ -142,7 +142,7 @@ async def open_session_for(db: AsyncSession, profile_id: str) -> ArenaSession | 
         await db.execute(
             select(ArenaSession)
             .where(ArenaSession.profile_id == profile_id, ArenaSession.is_open.is_(True),
-                   ArenaSession.phase != PARKED_PHASE)
+                   or_(ArenaSession.phase.is_(None), ArenaSession.phase != PARKED_PHASE))  # SQL: NULL != x is not true
             .order_by(ArenaSession.created_at.desc())
         )
     ).scalars().first()

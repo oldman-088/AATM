@@ -135,3 +135,13 @@ async def test_the_window_that_does_not_return_to_the_chat_stops_the_correction(
         with pytest.raises(ArenaRunnerError, match="did not return"):
             await ArenaAgentRunner(page)._unpark(db, await db.get(ArenaSession, session_id))
         assert (await db.get(ArenaSession, session_id)).phase == PARKED_PHASE
+
+
+async def test_a_session_without_a_phase_still_drives_its_window(env):
+    """SQL: "phase != 'parked'" is not true for a NULL phase; such a session must still be found."""
+    async with env() as db:
+        agent = await db.get(Agent, "worker-1")
+        session = ArenaSession(agent_id=agent.id, profile_id=agent.browser_profile_id, phase=None, is_open=True, events=[])
+        db.add(session)
+        await db.commit()
+        assert (await open_session_for(db, agent.browser_profile_id)).id == session.id
