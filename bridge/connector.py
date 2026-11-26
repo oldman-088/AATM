@@ -190,6 +190,15 @@ class ProfileState:
     selector_report: dict[str, Any] | None = None
     connections_total: int = 0
     events: deque = field(default_factory=lambda: deque(maxlen=MAX_EVENTS))
+    # E78: the page told us it is hidden (tab_hidden event, or a command refused with page_hidden).
+    # A hidden page draws no composer; the watchdog brings the window back while this is set.
+    hidden_since: float | None = None  # wall clock (time.time)
+
+    def set_hidden(self, hidden: bool) -> None:
+        if hidden and self.hidden_since is None:
+            self.hidden_since = time.time()
+        elif not hidden:
+            self.hidden_since = None
 
     def health(self) -> str:
         if self.status == "needs_human":
@@ -233,6 +242,8 @@ class ProfileState:
             "keep_working_visible": self.keep_working_visible,
             "keep_working_clicks": self.keep_working_clicks,
             "last_error": self.last_error,
+            "page_hidden": self.hidden_since is not None,
+            "page_hidden_seconds": round(time.time() - self.hidden_since, 1) if self.hidden_since else None,
         }
         if events:
             data["recent_events"] = list(self.events)[-events:]
@@ -403,6 +414,7 @@ class ConnectorHub:
             if state.ws is not None:
                 await self._close(state, 4409, "replaced by a newer connection")
             state.ws, state.connection_id = websocket, connection_id
+            state.set_hidden(False)  # a new page starts drawn; it reports tab_hidden if it is not
             state.origin = _origin_of(str(hello.get("page_origin") or ""))
             state.script_version = str(hello.get("script_version") or "")[:32] or None
             state.last_seen = time.monotonic()
@@ -489,6 +501,8 @@ class ConnectorHub:
             event_kind = str(message.get("kind") or "event")
             if event_kind == "keep_working_clicked":
                 state.keep_working_clicks += 1
+            if event_kind in ("tab_hidden", "tab_visible"):
+                state.set_hidden(event_kind == "tab_hidden")
             if event_kind in ("error", "send_failed"):
                 state.last_error = str(message.get("detail") or event_kind)[:200]
             state.record(event_kind, str(message.get("detail") or "") or None)
@@ -502,6 +516,8 @@ class ConnectorHub:
                     code = str(message.get("code") or "command_failed")[:48]
                     detail = str(message.get("message") or "The page could not run the command.")[:300]
                     state.last_error = f"{code}: {detail}"[:200]
+                    if code == "page_hidden":
+                        state.set_hidden(True)
                     future.set_exception(ConnectorError(code, detail, 502))
         elif kind == "answer":
             future = state.pending.get(str(message.get("request_id") or ""))

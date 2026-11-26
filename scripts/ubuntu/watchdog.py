@@ -61,6 +61,8 @@ PROFILE_GRACE_SECONDS = 180.0  # Arena windows reconnect by themselves within th
 REOPEN_COOLDOWN_SECONDS = 600.0  # time between two reloads of the same window (E56)
 REOPEN_MAX_TRIES = 3             # after this many reloads the owner is asked to look at the window
 BLANK_GRACE_SECONDS = 120.0      # a connected window may show no composer this long (page load) (E59)
+HIDDEN_GRACE_SECONDS = 90.0      # a page may be hidden this long (a minimise for a moment) (E78)
+HIDDEN_COOLDOWN_SECONDS = 300.0  # time between two restarts of the same hidden window (E78)
 HUMAN_RECHECK_SECONDS = 120.0    # how often a window marked "needs a human" is looked at again (E57)
 HUMAN_RELOAD_SECONDS = 900.0     # time between two reloads of a window that still shows a human check
 HUMAN_RELOAD_MAX = 3             # reloads before the watchdog only waits for the owner
@@ -381,6 +383,8 @@ class Watchdog:
         self.blank_since: dict[str, float] = {}
         self.blank_reopens: dict[str, int] = {}
         self.blank_last: dict[str, float] = {}
+        self.hidden_restarts: dict[str, int] = {}
+        self.hidden_last: dict[str, float] = {}
         self._stack = None
 
     def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
@@ -552,6 +556,7 @@ class Watchdog:
             return
         now = self.alerter.clock()
         self._reopen_blank_windows(profiles, now)
+        self._restore_hidden_windows(profiles, now)
         stuck = {str(p.get("profile_id")): p for p in profiles if p.get("status") == "needs_human"}
         for pid in [p for p in self.human_checked if p not in stuck]:
             self.human_checked.pop(pid, None)
@@ -617,6 +622,44 @@ class Watchdog:
             self.blank_last[pid] = now
             write_log(f"[watchdog] {pid}: متصل لكن الصفحة لا تعرض مربع الكتابة (مخفية؟)؛ أعيد فتحها "
                       f"(المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
+
+    def _restore_hidden_windows(self, profiles: list[dict], now: float) -> None:
+        """E78: a window that stays minimised or hidden draws no page, so its tasks fail with page_hidden.
+
+        On 2026-11-26 seven of nine windows were hidden and follow-ups failed until somebody showed them.
+        The bridge knows the page is hidden (its tab_hidden event, or a command refused with page_hidden).
+        A window that stays hidden and runs no command is restarted: Chrome opens it again on screen.
+        After a few tries the owner is asked to show it. A human check is never touched here.
+        """
+        hidden = {str(p.get("profile_id")): p for p in profiles
+                  if p.get("connected") and p.get("page_hidden") and p.get("status") != "needs_human"}
+        for pid in [p for p in self.hidden_restarts if p not in hidden]:  # shown again: start over
+            self.hidden_restarts.pop(pid, None)
+            self.hidden_last.pop(pid, None)
+        problems: dict[str, str] = {}
+        for pid, profile in hidden.items():
+            if float(profile.get("page_hidden_seconds") or 0) < HIDDEN_GRACE_SECONDS:
+                continue
+            tries = self.hidden_restarts.get(pid, 0)
+            if tries >= REOPEN_MAX_TRIES:
+                problems[pid] = (f"{pid}: نافذة Arena ما زالت مصغّرة أو مخفية بعد {tries} محاولات إعادة فتح؛ "
+                                 "أظهرها على الشاشة (لا تصغّرها) حتى تعمل")
+                continue
+            if profile.get("in_flight"):
+                continue  # never cut a running command; try again on a later cycle
+            if now - self.hidden_last.get(pid, -HIDDEN_COOLDOWN_SECONDS) < HIDDEN_COOLDOWN_SECONDS:
+                continue
+            stack = self.stack()
+            chrome = stack._chrome_binary()
+            window = next((w for w in stack.enabled_windows() if w.profile_id == pid), None)
+            if not chrome or window is None:
+                continue
+            stack.restart_window(chrome, window)
+            self.hidden_restarts[pid] = tries + 1
+            self.hidden_last[pid] = now
+            write_log(f"[watchdog] {pid}: الصفحة مخفية منذ {float(profile.get('page_hidden_seconds') or 0):.0f} ث؛ "
+                      f"أعيد فتح النافذة على الشاشة (المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
+        self.alerter.set_problems("hidden", problems)
 
     def cycle(self) -> None:
         for check in (self.check_services, self.check_profiles, self.check_windows, self.check_human_windows,
