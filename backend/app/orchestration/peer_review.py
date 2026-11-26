@@ -28,6 +28,7 @@ from app.core.events import event_bus
 from app.db.base import utcnow
 from app.models import Agent, ArenaSession, AuditLog, ChatMessage, ManagerJob, Notification, Task
 from app.orchestration.manager_arena import CLAIMED_JOBS, ManagerArenaRuntime
+from app.orchestration.restart_guard import restart_pending
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,8 @@ class PeerReviewPool:
         if not settings.PEER_REVIEW_ENABLED:
             return {"enabled": False}
         healed = await self.heal_orphans(db)
+        if restart_pending():
+            return {"restart_pending": True, "running": sorted(self.running), "healed": healed}
         if POOL_HEALTH["paused_until"] > time.monotonic():
             return {"paused": True, "running": sorted(self.running), "healed": healed}
         free = max(0, settings.PEER_REVIEW_MAX - len(self.running))

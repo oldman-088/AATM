@@ -50,6 +50,7 @@ from app.orchestration.arena_prompts import (
     validate_manager_plan,
     validate_manager_review,
 )
+from app.orchestration.restart_guard import restart_pending
 from app.runtime.agent_protocol import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -826,6 +827,8 @@ class ManagerArenaRuntime:
         results: list[dict[str, Any]] = []
         async with self._in_flight_lock():
             while True:
+                if restart_pending():
+                    break  # a safe restart waits for the running job; no new one starts (restart_guard)
                 async with self.session_factory() as db:
                     job = next((j for j in (await db.execute(
                         select(ManagerJob).where(ManagerJob.status == "queued").order_by(ManagerJob.created_at.asc())

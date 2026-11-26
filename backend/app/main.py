@@ -64,6 +64,9 @@ async def recover_interrupted_work() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_security(get_settings())
+    from app.orchestration.restart_guard import clear_restart_flag
+
+    clear_restart_flag()  # a safe restart is done once this backend starts: reviews may run again
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
 
