@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -27,7 +28,7 @@ from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.models import Agent, ArenaSession, AuditLog, ChatMessage, ManagerJob, Notification, Task
-from app.orchestration.manager_arena import CLAIMED_JOBS, ManagerArenaRuntime
+from app.orchestration.manager_arena import CLAIMED_JOBS, ManagerArenaRuntime, extract_manager_json
 from app.orchestration.restart_guard import restart_pending
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,9 @@ PEER_POOL_PAUSE_SECONDS = 3600
 POOL_HEALTH: dict[str, float] = {"failures_in_a_row": 0, "paused_until": 0.0}
 
 
+VERDICT_HINT_RE = re.compile(r"approv|change|reject|merge|lgtm|موافق|تعديل|رفض", re.IGNORECASE)
+
+
 class PeerReviewer(ManagerArenaRuntime):
     """The manager's review flow, run in one worker's Arena window."""
 
@@ -56,6 +60,21 @@ class PeerReviewer(ManagerArenaRuntime):
 
     async def _profile_id(self, db: AsyncSession) -> str:
         return self.profile_id
+
+    def _cannot_review(self, reply: str) -> str | None:
+        """E80: a worker window that answers in JSON that it cannot review (no verdict, no PR found) hands the
+        review straight back to the manager, instead of spending a JSON retry on the same window.
+
+        2026-11-26, PR #13: worker-7 replied {"pr_number": 0, "verdict": "غير متاح", ...} twice before the
+        manager got the review. A reply that is not JSON at all still gets its retry.
+        """
+        data = extract_manager_json(reply)
+        if not isinstance(data, dict) or "verdict" not in data:
+            return None
+        verdict = str(data.get("verdict") or "").strip().lower()
+        if VERDICT_HINT_RE.search(verdict):
+            return None  # a verdict in other words ("CHANGES REQUESTED") is still a verdict: the retry fixes it
+        return f"verdict {str(data.get('verdict'))[:40]!r}: {str(data.get('summary_ar') or '')[:160]}"
 
     async def _set_manager_status(self, db: AsyncSession, status: str) -> None:
         return None  # the worker's own status is set by the pool, not by each step of the job

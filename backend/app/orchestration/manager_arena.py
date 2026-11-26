@@ -972,6 +972,10 @@ class ManagerArenaRuntime:
                 parsed, error = await self._parse(db, job, reply)
                 if parsed is None and await self._answer_empty_tasks(db, job, reply):
                     return {"job_id": job.id, "status": job.status, "empty_tasks": True}
+                if parsed is None and job.kind == "review" and (why := self._cannot_review(reply)):
+                    # E80: the reviewer said in JSON that it cannot review this PR; asking again only repeats it.
+                    await self._needs_human(db, job, f"the reviewer could not review the PR: {why}", raw=reply)
+                    return {"job_id": job.id, "status": job.status, "error": "cannot_review"}
                 if parsed is None:
                     job.json_retries += 1
                     await db.commit()
@@ -1499,6 +1503,10 @@ class ManagerArenaRuntime:
         await self._finish(db, job, result={"empty_tasks": True, "clarification": ambiguous}, raw=reply)
         await self._reply(db, job, summary.strip(), clarification=ambiguous, empty_tasks=True)
         return True
+
+    def _cannot_review(self, reply: str) -> str | None:
+        """The manager always gets its JSON retry; a peer reviewer overrides this (E80)."""
+        return None
 
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
         if is_prompt_echo(reply, job.kind):

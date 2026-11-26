@@ -268,3 +268,41 @@ async def test_a_peer_review_killed_by_a_restart_frees_its_worker(env, scripted,
         assert (await db.get(Agent, "worker-5")).status == "idle"
         sessions = (await db.execute(select(ArenaSession).where(ArenaSession.kind == PEER_SESSION_KIND))).scalars()
         assert not any(s.is_open for s in sessions)
+
+
+def test_a_peer_that_says_it_cannot_review_hands_back_at_once():
+    reviewer = PeerReviewer("worker-7", "profile-worker-7")
+    unavailable = json.dumps({"pr_number": 0, "verdict": "غير متاح",
+                              "summary_ar": "لم يتم العثور على طلب سحب مرتبط بالفرع الحالي", "comments": []})
+    assert "غير متاح" in (reviewer._cannot_review(unavailable) or "")
+    # A verdict in other words, prose without JSON, and a real verdict all keep the usual retry.
+    assert reviewer._cannot_review(json.dumps({"pr_number": 13, "verdict": "CHANGES REQUESTED"})) is None
+    assert reviewer._cannot_review("I reviewed it and it looks fine.") is None
+    assert reviewer._cannot_review(VERDICT) is None
+
+
+async def test_the_unavailable_reply_goes_to_the_manager_without_a_json_retry(env, scripted, monkeypatch):
+    make, project_id = scripted
+    unavailable = json.dumps({"pr_number": 0, "verdict": "غير متاح", "summary_ar": "لا يوجد طلب سحب", "comments": []})
+    page, runtime = make({"REVIEW": [unavailable]})
+    job_id, _ = await _review_job(env, runtime, project_id)
+    async with env() as db:
+        profile_id = (await db.get(Agent, "worker-3")).browser_profile_id
+    reviewer = PeerReviewer("worker-3", profile_id, adapter=page, session_factory=env)
+    reviewer.poll_seconds = reviewer.start_grace_seconds = reviewer.retry_backoff_seconds = 0
+    reviewer.busy_poll_seconds = 0.01
+    await reviewer.run(job_id)
+    async with env() as db:
+        job = await db.get(ManagerJob, job_id)
+        assert job.json_retries == 0, "no JSON retry is spent on a window that cannot review"
+        assert "could not review" in (job.error or "")
+        queued = list((await db.execute(select(ManagerJob).where(ManagerJob.kind == "review",
+                                                                 ManagerJob.status == "queued"))).scalars())
+        assert job.status == "queued" or queued, "the review goes back to the manager"
+        assert all((j.context or {}).get("peer_failed") == "worker-3" for j in queued + ([job] if job.status == "queued" else []))
+
+
+def test_the_manager_itself_always_keeps_its_json_retry():
+    from app.orchestration.manager_arena import ManagerArenaRuntime
+
+    assert ManagerArenaRuntime()._cannot_review(json.dumps({"verdict": "غير متاح"})) is None
