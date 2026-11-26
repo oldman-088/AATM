@@ -2,6 +2,41 @@
 
 All notable changes to AATM are documented in this file.
 
+## [3.7.0] — 2026-11-26 — self-healing team
+
+AATM runs a manager and eight Arena workers in parallel and repairs most interruptions by itself. Every manual
+rescue of the 2026-11-22..26 live runs was turned into an automatic step (see `MAINTENANCE_LOG.md`, items 1-82).
+Userscript 2.3.1 (unchanged since the last live run).
+
+### Added
+- **NEXUS COMMAND UI**: eight sections in EN/AR/FA, light theme, "Needs you" panel and header count, host CPU,
+  memory and disk, users admin API.
+- **Parallel work**: a worker whose PR waits for review is parked and starts its next task; idle workers review
+  PRs in parallel with the manager (peer review) with a cooldown, a pool breaker and orphan healing.
+- **Safe auto-merge queue**: approve + green CI on the head commit + no conflict, one at a time; a PR that is behind
+  its base is updated first. The manager merges approved, green PRs into the project's main by itself.
+- **Self-healing**: the watchdog reloads a disconnected window, restarts it when a reload does not help, reopens a
+  window that draws no composer, and restarts a window that stays hidden (then asks the owner). Self-heal resumes
+  the manager after a human check clears (the check itself is never touched), retries follow-ups and reviews that
+  failed only on the Arena page, and never auto-resumes a failure escalation in a loop.
+- **Safe restart**: `scripts/ubuntu/safe_restart.py` restarts the backend only when no review is running.
+- **aatm doctor** (report-only; `--fix` repairs safe cases after a backup), boot autostart, SQLite online backups.
+- **GitHub page API**: repositories of any account signed in to the GitHub CLI, each run as its account (no tokens
+  returned or stored), audited.
+- Project progress, time left and a 24-hour summary; one integration check before a project is closed.
+
+### Changed
+- The manager plans the owner's goal instead of obeying it literally, re-reads cut replies, and never parses its
+  own prompt read back as the answer. Prompts require every CI job green and exact file paths.
+- Tasks of missing or inactive projects are refused and never dispatched; two tasks that change the same files, or
+  two migrations, never run at once.
+- No fake data on fresh installs; one-time install links; the default team is one manager and eight workers.
+
+### Fixed
+- A message that did go out is never sent twice after "send_failed"; the error now records what the page showed.
+- A review verdict never names another pull request; reviews of merged PRs are closed.
+- False stalls, false "stuck" doctor alarms, and duplicate reviews after a fallback.
+
 ## [3.6.0] — 2026-11-19 — stable
 
 Stabilization release from the `r8-aatm` development branch: AATM starts with one command, reconnects and
