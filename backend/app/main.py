@@ -21,6 +21,7 @@ from app.api.routes import (
     dashboard,
     demo,
     devices,
+    github_repos,
     governance,
     infra,
     lookups,
@@ -69,6 +70,8 @@ async def lifespan(app: FastAPI):
     clear_restart_flag()  # a safe restart is done once this backend starts: reviews may run again
     async with AsyncSessionLocal() as db:
         await seed_initial_data(db)
+        # Repositories the owner added on the GitHub page join the allowlist and keep their account.
+        await github_repos.load_registry_into_memory(db)
 
     await recover_interrupted_work()
 
@@ -201,6 +204,7 @@ async def health(db: AsyncSession = Depends(get_db)):
 API_PREFIX = "/api/v1"
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(users.router, prefix=API_PREFIX)
+app.include_router(github_repos.router, prefix=API_PREFIX)
 app.include_router(projects.router, prefix=API_PREFIX)
 app.include_router(orchestration.router, prefix=API_PREFIX)
 app.include_router(infra.router, prefix=API_PREFIX)

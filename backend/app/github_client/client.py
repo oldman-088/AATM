@@ -7,8 +7,10 @@ from typing import Any
 
 from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
+from app.github_client import accounts as gh_accounts
 
 PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "production", "prod"})
+
 
 DEFAULT_ALLOWED_REPOS: frozenset[str] = frozenset(
     {
@@ -226,8 +228,11 @@ class GitHubClient:
             return set(self._allowed_repos)
         env_repos = os.environ.get("AATM_ALLOWED_GITHUB_REPOS", "")
         if env_repos.strip():
-            return {r.strip().lower() for r in env_repos.split(",") if r.strip()}
-        return set(DEFAULT_ALLOWED_REPOS)
+            base = {r.strip().lower() for r in env_repos.split(",") if r.strip()}
+        else:
+            base = set(DEFAULT_ALLOWED_REPOS)
+        # Repositories the owner added on the GitHub page (audited) are allowed too.
+        return base | gh_accounts.registered_repos()
 
     @allowed_repos.setter
     def allowed_repos(self, repos: Iterable[str] | None) -> None:
@@ -268,7 +273,9 @@ class GitHubClient:
     @staticmethod
     async def _run_gh(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
         root = cwd or get_settings().REPO_ROOT
-        result = await run_exec(["gh", *args], cwd=root, timeout=15)
+        # A registered repository runs as the account the owner chose for it.
+        env = await gh_accounts.env_for_gh_args(args)
+        result = await run_exec(["gh", *args], cwd=root, timeout=15, env=env)
         return result.returncode, sanitize_cli_output(result.output)
 
     async def get_auth_status(self) -> dict[str, Any]:
