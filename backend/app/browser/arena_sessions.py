@@ -31,6 +31,24 @@ from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfi
 
 MAX_SESSION_EVENTS = 100
 TERMINAL_PHASES = {"merged", "closed", "failed", "escalated"}
+# 2026-11-26 (owner): a worker whose PR waits for the manager's review starts its next task in a new chat.
+# The PR's session is parked: still open, its chat URL kept, not monitored; a correction brings it back.
+PARKED_PHASE = "parked"
+PARKABLE_PHASES = {"reviewing"}
+CHAT_EVENT_KINDS = {"chat_path", "chat_url"}
+
+
+def recorded_chat_path(session: ArenaSession) -> str | None:
+    """The chat URL path stored after AATM sent the task prompt (needed to come back to a parked session)."""
+    for event in reversed(session.events or []):
+        if event.get("kind") in CHAT_EVENT_KINDS and str(event.get("detail") or "").startswith("/"):
+            return str(event.get("detail"))
+    return None
+
+
+def can_park(session: ArenaSession) -> bool:
+    """Only a session that waits for review, and whose chat can be found again, may be parked."""
+    return session.phase in PARKABLE_PHASES and recorded_chat_path(session) is not None
 
 
 class ArenaSessionConflict(Exception):
@@ -119,13 +137,20 @@ async def sync_profiles_with_bridge(db: AsyncSession) -> list[str]:
 
 
 async def open_session_for(db: AsyncSession, profile_id: str) -> ArenaSession | None:
+    """The session that drives this window now; parked sessions (PRs waiting for review) are not it."""
     return (
         await db.execute(
             select(ArenaSession)
-            .where(ArenaSession.profile_id == profile_id, ArenaSession.is_open.is_(True))
+            .where(ArenaSession.profile_id == profile_id, ArenaSession.is_open.is_(True),
+                   ArenaSession.phase != PARKED_PHASE)
             .order_by(ArenaSession.created_at.desc())
         )
     ).scalars().first()
+
+
+def park_session(session: ArenaSession, reason: str) -> None:
+    session.phase = PARKED_PHASE
+    append_event(session, "parked", reason)
 
 
 async def session_for_task(db: AsyncSession, task_id: str) -> ArenaSession | None:
@@ -158,9 +183,14 @@ async def claim_session(db: AsyncSession, agent: Agent, task: Task) -> tuple[Are
         return current, current.submitted_at is None
     if current is not None:
         other = await db.get(Task, current.task_id) if current.task_id else None
-        if other is not None and other.status in {"in_progress", "pr_open", "in_review", "changes_requested"} and current.phase not in TERMINAL_PHASES:
-            raise ArenaSessionConflict(f"Profile {agent.browser_profile_id} is still driving task {other.id}.")
-        await close_session(db, current, reason="next task starts a new session")
+        active = other is not None and other.status in {"in_progress", "pr_open", "in_review", "changes_requested"}
+        if active and current.phase not in TERMINAL_PHASES:
+            if not can_park(current):
+                raise ArenaSessionConflict(f"Profile {agent.browser_profile_id} is still driving task {other.id}.")
+            # Its PR waits for review: keep that chat for the corrections and start this task in a new one.
+            park_session(current, f"task {task.id} starts while PR of task {other.id} waits for review")
+        else:
+            await close_session(db, current, reason="next task starts a new session")
     session = ArenaSession(agent_id=agent.id, profile_id=agent.browser_profile_id, task_id=task.id, phase="new",
                            page_state="offline", events=[])
     append_event(session, "created", f"task {task.id}")

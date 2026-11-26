@@ -28,11 +28,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.arena_sessions import (
+    PARKED_PHASE,
     ArenaSessionConflict,
     append_event,
     apply_bridge_state,
+    can_park,
     claim_session,
     close_session,
+    open_session_for,
+    park_session,
     session_for_task,
 )
 from app.core.config import get_settings
@@ -79,7 +83,9 @@ MONITORED_PHASES = {"working", "correcting", "reporting"}
 RESERVING_PHASES = MONITORED_PHASES | {"reviewing", "awaiting_approval", "starting", "submitting", "needs_human"}
 # Sessions that wait for a human decision: they are not monitored any more, but their pull request
 # can still be merged or closed outside AATM, so its state is polled separately.
-PR_STATE_PHASES = ("reviewing", "awaiting_approval")
+PR_STATE_PHASES = ("reviewing", "awaiting_approval", PARKED_PHASE)
+UNPARK_CHECKS = 10        # page checks while a window goes back to a parked PR's chat
+UNPARK_WAIT_SECONDS = 2.0
 PR_STATE_POLL_SECONDS = 300.0  # poll the PR state of those sessions every 5 minutes
 STALL_MINUTES = 20
 STALL_CONTINUES = 2       # E39: "continue" messages sent to a quiet, unfinished agent before it is handed to a human
@@ -133,10 +139,12 @@ async def arena_reservations(db: AsyncSession) -> dict[str, str]:
         .outerjoin(Task, Task.id == ArenaSession.task_id)
         .where(ArenaSession.is_open.is_(True), ArenaSession.phase.in_(RESERVING_PHASES))
     )).all()
+    # 2026-11-26: a session that only waits for the manager's review (and whose chat is recorded, so the
+    # corrections can find it again) no longer holds its worker: it is parked when the next task starts.
     return {
         s.agent_id: s.task_id
         for s, task_status in rows
-        if s.task_id and task_status not in RELEASING_TASK_STATES
+        if s.task_id and task_status not in RELEASING_TASK_STATES and not can_park(s)
     }
 
 
@@ -523,6 +531,39 @@ class ArenaAgentRunner:
         await db.commit()
         return {"monitored": monitored, "requeued": requeued}
 
+    async def _unpark(self, db: AsyncSession, session: ArenaSession) -> None:
+        """Bring a parked PR session back into its window before its corrections are sent.
+
+        The window's current session must be one that may be parked too (its own PR waits for review);
+        a window that is still working on another task is never taken away from it.
+        """
+        current = await open_session_for(db, session.profile_id)
+        if current is not None and current.id != session.id:
+            if not can_park(current):
+                raise ArenaRunnerError(f"The window is still working on task {current.task_id}; the correction waits.")
+            park_session(current, f"corrections for task {session.task_id} come first")
+        path = task_chat_path(session)
+        if not path:
+            raise ArenaRunnerError("The parked session has no recorded chat; the correction cannot reach the agent.")
+        try:
+            page = await self.adapter.selector_test(session.profile_id)
+            origin = str((page.get("page") or {}).get("origin") or "https://arena.ai")
+            if str((page.get("page") or {}).get("path") or "").rstrip("/") != path.rstrip("/"):
+                await self.adapter.open_chat(session.profile_id, f"{origin}{path}")
+                for _ in range(UNPARK_CHECKS):
+                    await asyncio.sleep(UNPARK_WAIT_SECONDS)
+                    page = await self.adapter.selector_test(session.profile_id)
+                    if str((page.get("page") or {}).get("path") or "").rstrip("/") == path.rstrip("/"):
+                        break
+                else:
+                    raise ArenaRunnerError(f"The window did not return to the PR's chat {path}.")
+        except ArenaAgentError as exc:
+            raise ArenaRunnerError(f"Arena Agent {exc.code}: could not return to the PR's chat ({exc.message})") from exc
+        session.phase = "reviewing"
+        append_event(session, "unparked", path)
+        self._chat_state()["checked"].pop(session.id, None)
+        await db.commit()
+
     async def _start_correction(self, db: AsyncSession, message: AgentMessage, follow_up: Task, agent: Agent) -> None:
         from app.runtime.loop.common import NeedsHumanError
 
@@ -530,6 +571,8 @@ class ArenaAgentRunner:
         session = await session_for_task(db, parent.id) if parent else None
         if parent is None or session is None or not session.is_open or session.agent_id != agent.id:
             raise ArenaRunnerError("No open Arena session for this pull request; the correction cannot reach the agent.")
+        if session.phase == PARKED_PHASE:
+            await self._unpark(db, session)
         if session.active_task_id == follow_up.id:
             # Already submitted (resume after a human check or a restart): keep monitoring.
             session.phase = "correcting"
