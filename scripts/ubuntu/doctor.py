@@ -116,6 +116,10 @@ def _rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> l
     return [dict(zip(names, row, strict=False)) for row in cur.fetchall()]
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in _rows(conn, f"PRAGMA table_info({table})")}
+
+
 def _marks(values: tuple[str, ...]) -> str:
     return ",".join("?" for _ in values)
 
@@ -133,6 +137,11 @@ def check_workers_working_without_task(conn, now: datetime) -> list[Finding]:
         running = _rows(conn, "SELECT id FROM tasks WHERE status = 'in_progress' AND "
                               "(assigned_agent_id = ? OR id = ?)", (agent["id"], agent["current_task_id"]))
         if running:
+            continue
+        # 2026-11-26: a peer reviewer works on a review task assigned to the manager, in a peer_review chat.
+        peer = _rows(conn, "SELECT id FROM arena_sessions WHERE agent_id = ? AND is_open = 1 AND kind = 'peer_review'",
+                     (agent["id"],)) if "kind" in _columns(conn, "arena_sessions") else []
+        if peer:
             continue
         open_sessions = _rows(conn, "SELECT id FROM arena_sessions WHERE agent_id = ? AND is_open = 1", (agent["id"],))
         fixable = not open_sessions
@@ -197,7 +206,7 @@ def check_queued_tasks_stuck(conn, now: datetime) -> list[Finding]:
     # 2026-11-26: a task whose worker is busy, or whose worker still owns an open PR (it takes only that PR's
     # follow-ups), is waiting for a known reason; reporting it as "needs a human" sent the owner after nothing.
     # Older or partial databases may lack some columns: use only what is there.
-    task_cols = {r["name"] for r in _rows(conn, "PRAGMA table_info(tasks)")}
+    task_cols = _columns(conn, "tasks")
     has_agents = bool(_rows(conn, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agents'"))
     busy = {r["id"] for r in _rows(conn, "SELECT id FROM agents WHERE status = 'working'")} if has_agents else set()
     reserved: set[str] = set()
@@ -208,7 +217,7 @@ def check_queued_tasks_stuck(conn, now: datetime) -> list[Finding]:
     running: set[str] = set()
     if "project_id" in task_cols:
         running = {r["project_id"] for r in _rows(conn, "SELECT project_id FROM tasks WHERE status IN ('assigned', 'in_progress')")}
-    extra = ", ".join(c for c in ("assigned_agent_id", "project_id") if c in task_cols)
+    extra = ", ".join(c for c in ("assigned_agent_id", "project_id", "task_type") if c in task_cols)
     for row in _rows(conn, f"SELECT id, title, dependencies, updated_at{', ' + extra if extra else ''} FROM tasks "
                            "WHERE status = 'queued'"):
         queued_since = parse_ts(row["updated_at"])
@@ -220,6 +229,8 @@ def check_queued_tasks_stuck(conn, now: datetime) -> list[Finding]:
             deps = []
         if not all(statuses.get(dep) in DONE_TASK_STATUSES for dep in deps):
             continue  # waiting on a prerequisite is normal
+        if row.get("task_type") == "review":
+            continue  # reviews run from the manager's job queue (manager_job_stuck_needs_human covers them)
         if row.get("assigned_agent_id") in busy or row.get("assigned_agent_id") in reserved:
             continue  # its worker is on another task, or on its own open PR: normal
         hint = (" Another task of this project is running; it may be waiting for that task's files (T16)."
