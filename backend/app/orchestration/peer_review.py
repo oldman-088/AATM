@@ -26,7 +26,7 @@ from app.browser.arena_sessions import append_event, can_park, close_session, op
 from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.models import Agent, ArenaSession, AuditLog, ChatMessage, ManagerJob, Task
+from app.models import Agent, ArenaSession, AuditLog, ChatMessage, ManagerJob, Notification, Task
 from app.orchestration.manager_arena import CLAIMED_JOBS, ManagerArenaRuntime
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,12 @@ PEER_SESSION_KIND = "peer_review"
 PEER_COOLDOWN_SECONDS = 1800
 PEER_COOLDOWN: dict[str, float] = {}  # worker id -> monotonic time until which it gets no peer review
 FAILED_STATUSES = {"requeued", "requeued_for_manager", "fallback_for_manager"}
+# Live 2026-11-26: worker windows (Arena agent mode) failed 8 of 9 reviews (empty reply, own prompt read
+# back, or not sent). After this many failures in a row the pool pauses, so the jobs go straight to the
+# manager instead of waiting on peers that fail; the owner is told once.
+PEER_POOL_FAILURES_TO_PAUSE = 3
+PEER_POOL_PAUSE_SECONDS = 3600
+POOL_HEALTH: dict[str, float] = {"failures_in_a_row": 0, "paused_until": 0.0}
 
 
 class PeerReviewer(ManagerArenaRuntime):
@@ -105,7 +111,25 @@ class PeerReviewer(ManagerArenaRuntime):
         result = await self._run_claimed(job_id)
         if result.get("status") in FAILED_STATUSES:
             PEER_COOLDOWN[self.agent_id] = time.monotonic() + PEER_COOLDOWN_SECONDS
+            POOL_HEALTH["failures_in_a_row"] += 1
+            if POOL_HEALTH["failures_in_a_row"] >= PEER_POOL_FAILURES_TO_PAUSE and POOL_HEALTH["paused_until"] <= time.monotonic():
+                POOL_HEALTH["paused_until"] = time.monotonic() + PEER_POOL_PAUSE_SECONDS
+                await self._notify_pause()
+        elif result.get("status") == "done":
+            POOL_HEALTH["failures_in_a_row"] = 0
         return result
+
+    async def _notify_pause(self) -> None:
+        try:
+            async with self.session_factory() as db:
+                db.add(Notification(category="manager", severity="warning", title="المراجعة الموازية متوقفة مؤقتًا",
+                                    message=f"{PEER_POOL_FAILURES_TO_PAUSE} مراجعات من العمال فشلت متتالية؛ "
+                                            "المدير يراجع وحده لمدة ساعة.", link="/approvals"))
+                db.add(AuditLog(actor="system", action="peer_review.paused", resource_type="peer_review_pool",
+                                details={"failures_in_a_row": POOL_HEALTH["failures_in_a_row"], "at": utcnow().isoformat()}))
+                await db.commit()
+        except Exception:  # noqa: BLE001 - the pause itself must not fail
+            logger.warning("peer review pause notification failed", exc_info=True)
 
     async def _run_claimed(self, job_id: str) -> dict[str, Any]:
         try:
@@ -171,6 +195,8 @@ class PeerReviewPool:
         self.running = {w: t for w, t in self.running.items() if not t.done()}
         if not settings.PEER_REVIEW_ENABLED:
             return {"enabled": False}
+        if POOL_HEALTH["paused_until"] > time.monotonic():
+            return {"paused": True, "running": sorted(self.running)}
         free = max(0, settings.PEER_REVIEW_MAX - len(self.running))
         if not free:
             return {"running": sorted(self.running)}

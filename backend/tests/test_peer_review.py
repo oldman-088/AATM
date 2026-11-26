@@ -216,3 +216,34 @@ async def test_a_worker_whose_peer_review_failed_rests_before_the_next_one(env, 
             assert "worker-4" not in {w.id for w in await PeerReviewPool()._free_workers(db)}
     finally:
         peer_module.PEER_COOLDOWN.clear()
+
+
+async def test_the_pool_pauses_after_failures_in_a_row_and_tells_the_owner(env, scripted, monkeypatch):
+    from app.models import Notification
+
+    make, project_id = scripted
+    page, runtime = make()
+    peer_module.PEER_COOLDOWN.clear()
+    monkeypatch.setitem(peer_module.POOL_HEALTH, "failures_in_a_row", 0)
+    monkeypatch.setitem(peer_module.POOL_HEALTH, "paused_until", 0.0)
+
+    async def broken(self, db, job):
+        job.status = "failed"
+        await db.commit()
+        return {"job_id": job.id, "status": job.status}
+
+    monkeypatch.setattr(PeerReviewer, "_run_job", broken)
+    try:
+        for worker_id in ("worker-2", "worker-3", "worker-4"):
+            job_id, _ = await _review_job(env, runtime, project_id)
+            async with env() as db:
+                profile_id = (await db.get(Agent, worker_id)).browser_profile_id
+            await PeerReviewer(worker_id, profile_id, adapter=page, session_factory=env).run(job_id)
+        started = _no_run(monkeypatch)
+        await _review_job(env, runtime, project_id)
+        async with env() as db:
+            assert (await PeerReviewPool().tick(db)).get("paused") is True
+            notes = list((await db.execute(select(Notification).where(Notification.title.contains("الموازية")))).scalars())
+        assert started == [] and len(notes) == 1
+    finally:
+        peer_module.PEER_COOLDOWN.clear()
