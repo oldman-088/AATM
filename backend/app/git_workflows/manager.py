@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.async_subprocess import run_exec
 from app.core.config import get_settings
+from app.github_client import accounts as gh_accounts
 from app.github_client.client import (
     GitHubClient,
     github_client,
@@ -579,7 +580,8 @@ class GitWorkflowManager:
     @staticmethod
     async def _exec(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
         """Run an argv-only command asynchronously without shell expansion, scrubbing credentials from output."""
-        result = await run_exec(cmd, cwd=cwd, timeout=timeout)
+        env = await gh_accounts.env_for_gh_args(cmd[1:]) if cmd and cmd[0] == "gh" else None
+        result = await run_exec(cmd, cwd=cwd, timeout=timeout, env=env)
         return (
             result.returncode,
             sanitize_cli_output(result.stdout.strip()),
