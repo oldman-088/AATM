@@ -1224,3 +1224,32 @@ async def test_a_review_blocked_only_on_an_unreadable_reply_is_retried_once(env,
             job.status = "needs_human"
         await db.commit()
         assert await runtime._retry_unreadable_reviews(db) == 0, "only one automatic retry"
+
+
+async def test_a_needs_human_review_job_is_closed_once_a_newer_job_finished(env, scripted):
+    """Live 2026-11-26 (PR #6): job 2bc8e558 stayed needs_human after retry f9329064 gave the verdict."""
+    from datetime import timedelta
+
+    from app.db.base import utcnow
+
+    make, project_id = scripted
+    _page, runtime = make()
+    async with env() as db:
+        review = Task(project_id=project_id, title="Review PR #6", status="done", task_type="review",
+                      assigned_agent_id="manager-0")
+        lonely = Task(project_id=project_id, title="Review PR #7", status="blocked", task_type="review",
+                      assigned_agent_id="manager-0")
+        db.add_all([review, lonely])
+        await db.flush()
+        start = utcnow() - timedelta(hours=1)
+        old = ManagerJob(kind="review", status="needs_human", project_id=project_id, review_task_id=review.id,
+                         error="invalid JSON after one retry", created_at=start)
+        new = ManagerJob(kind="review", status="done", project_id=project_id, review_task_id=review.id,
+                         created_at=start + timedelta(minutes=30))
+        alone = ManagerJob(kind="review", status="needs_human", project_id=project_id, review_task_id=lonely.id,
+                           created_at=start)
+        db.add_all([old, new, alone])
+        await db.commit()
+        assert await runtime._close_superseded_review_jobs(db) == 1
+        assert old.status == "cancelled" and "superseded" in old.error
+        assert alone.status == "needs_human", "a job with no finished successor still waits for the owner"

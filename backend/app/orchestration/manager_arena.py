@@ -834,8 +834,32 @@ class ManagerArenaRuntime:
             retried += 1
         return retried
 
+    async def _close_superseded_review_jobs(self, db: AsyncSession) -> int:
+        """A review job left at needs_human is closed once a newer job for the same review has finished.
+
+        Live 2026-11-26 (PR #6): job 2bc8e558 stayed needs_human after the unreadable-review retry f9329064
+        gave the verdict, so the doctor kept asking the owner about a review that was already done."""
+        closed = 0
+        stuck = list((await db.execute(select(ManagerJob).where(
+            ManagerJob.kind == "review", ManagerJob.status == "needs_human",
+            ManagerJob.review_task_id.is_not(None)))).scalars())
+        for job in stuck:
+            newer_done = (await db.execute(select(ManagerJob.id).where(
+                ManagerJob.review_task_id == job.review_task_id, ManagerJob.id != job.id,
+                ManagerJob.status == "done", ManagerJob.created_at > job.created_at))).first()
+            if newer_done is None:
+                continue
+            job.status = "cancelled"
+            job.error = f"{(job.error or '')[:400]} | superseded by {newer_done[0][:8]} (done)"
+            job.finished_at = job.finished_at or _now()
+            closed += 1
+        if closed:
+            await db.commit()
+        return closed
+
     async def _enqueue_reviews(self, db: AsyncSession) -> int:
         await self._settle_stale_reviews(db)
+        await self._close_superseded_review_jobs(db)
         await self._retry_unreadable_reviews(db)
         reviews = list((await db.execute(select(Task).where(
             Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID, Task.status == "queued",
