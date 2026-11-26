@@ -344,6 +344,9 @@ class TaskScheduler:
 
             if await manager_provider_mode(db) == "arena_agent":
                 manager = await manager_arena_runtime.tick(db)
+                from app.orchestration.peer_review import peer_review_pool
+
+                manager["peer_review"] = await peer_review_pool.tick(db)
         except Exception as exc:  # noqa: BLE001 - the manager runtime must never break dispatch
             logger.warning("Manager Arena tick failed: %s", type(exc).__name__)
             await db.rollback()

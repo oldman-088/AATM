@@ -134,6 +134,8 @@ MAX_RAW_REPLY_CHARS = 20_000      # stored copy of a reply
 MAX_REPLY_PARSE_CHARS = 200_000   # E63: a 12-task plan is over 20,000 characters; cutting it broke the JSON
 # A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
 MAX_JOB_ATTEMPTS = 3
+# Review jobs being run right now, by the manager or by a peer reviewer (peer_review.py): one runner each.
+CLAIMED_JOBS: set[str] = set()
 # E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
 MAX_ATTEMPT_REFUNDS = 12
 # E52: after this many identical connection errors in a row the owner sees the cause and gets one alert.
@@ -825,11 +827,12 @@ class ManagerArenaRuntime:
         async with self._in_flight_lock():
             while True:
                 async with self.session_factory() as db:
-                    job = (await db.execute(
+                    job = next((j for j in (await db.execute(
                         select(ManagerJob).where(ManagerJob.status == "queued").order_by(ManagerJob.created_at.asc())
-                    )).scalars().first()
+                    )).scalars() if j.id not in CLAIMED_JOBS), None)
                     if job is None:
                         break
+                    CLAIMED_JOBS.add(job.id)  # no await since the check: a peer reviewer cannot take it in between
                     try:
                         results.append(await self._run_job(db, job))
                     except Exception as exc:  # noqa: BLE001 - one broken job must not stop the queue
@@ -843,6 +846,8 @@ class ManagerArenaRuntime:
                             await db.commit()
                             await self._reply(db, job, f"تعذّر تنفيذ طلب المدير ({type(exc).__name__}).", failed=True)
                         results.append({"job_id": getattr(job, "id", None), "status": "failed"})
+                    finally:
+                        CLAIMED_JOBS.discard(job.id)
         return results
 
     async def _set_manager_status(self, db: AsyncSession, status: str) -> None:
