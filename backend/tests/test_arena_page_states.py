@@ -41,6 +41,11 @@ window.WebSocket = class {
 """
 
 
+# Loading jsdom takes about 2 s alone but more than 15 s while verify.sh runs the whole suite in parallel
+# (2026-11-26, the only red gate on a quiet machine). The probe stops by itself as soon as it is done.
+STOP_PROBE_TIMEOUT_SECONDS = 120
+
+
 @pytest.mark.skipif(
     not shutil.which("node") or not (Path(__file__).resolve().parents[2] / "frontend" / "node_modules" / "jsdom").is_dir(),
     reason="Node.js and frontend jsdom are required for the mock DOM probe",
@@ -92,7 +97,7 @@ const dom = new JSDOM(html, {
 dom.window.eval(connector);
 async function command(command, request_id, args = {}) {
   socket.onmessage({ data: JSON.stringify({ type: 'command', request_id, command, args }) });
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 300; i++) {
     const result = sent.find(msg => msg.type === 'result' && msg.request_id === request_id);
     if (result) return result;
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -122,7 +127,7 @@ async function command(command, request_id, args = {}) {
 """
     result = subprocess.run(["node", "-e", probe, str(root), str(userscript_path)], cwd=root,
                             env={**os.environ, "AATM_PROBE_CONFIG": json.dumps(config)},
-                            capture_output=True, text=True, timeout=15, check=True)
+                            capture_output=True, text=True, timeout=STOP_PROBE_TIMEOUT_SECONDS, check=True)
     assert json.loads(result.stdout) == {"stopped": True, "state": "ready"}
 
 

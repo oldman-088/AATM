@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.git_workflows.manager import git_workflow_manager
 from app.models import Agent, AuditLog, BrowserProfile, ChatMessage, GitWorkflowRecord, Project, Task, User
 from app.models.project import project_base_branch
-from app.orchestration.scheduler import task_scheduler
+from app.orchestration.scheduler import INACTIVE_PROJECT_STATUSES, task_scheduler
 from app.orchestration.self_heal import release_worker_for_task
 from app.schemas.common import AgentUpdate, ChatSendRequest, TaskCreate, TaskUpdate
 
@@ -99,6 +99,11 @@ def _serialize_task(t: Task) -> dict:
         "pr_url": t.pr_url,
         "pr_status": t.pr_status,
         "estimated_minutes": t.estimated_minutes,
+        "task_type": t.task_type,
+        "parent_task_id": t.parent_task_id,
+        "deadline": t.deadline,
+        "started_at": t.started_at,
+        "completed_at": t.completed_at,
         "created_at": t.created_at,
         "updated_at": t.updated_at,
     }
@@ -201,6 +206,13 @@ async def create_task(
         existing = dup.scalar_one_or_none()
         if existing:
             return _serialize_task(existing)
+
+    if body.project_id:
+        project = await db.get(Project, body.project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if (project.status or "active") in INACTIVE_PROJECT_STATUSES:
+            raise HTTPException(status_code=409, detail=f"project is {project.status}; activate it before adding tasks")
 
     try:
         await task_scheduler.validate_dependencies(db, None, body.dependencies)

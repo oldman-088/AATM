@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# AATM watchdog — read-only monitoring. It never restarts, changes or fixes anything; it only
-# reports problems as desktop notifications (notify-send) and lines in logs/watchdog.log.
+# AATM watchdog — monitoring. It never restarts a service or writes to the database; the one repair it
+# makes is loading Arena again in a window that stays disconnected (E56). It reports problems as
+# desktop notifications (notify-send) and lines in logs/watchdog.log.
 #
 #   scripts/ubuntu/watchdog.sh                 # run in the foreground (Ctrl+C to stop)
 #   scripts/ubuntu/watchdog.sh --once          # one check cycle, then exit

@@ -12,10 +12,11 @@ survives bridge and backend restarts.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.arena_connector import (
@@ -27,10 +28,28 @@ from app.browser.arena_connector import (
 )
 from app.core.events import event_bus
 from app.db.base import utcnow
-from app.models import Agent, ArenaSession, AuditLog, BrowserProfile, Task
+from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, Task
 
 MAX_SESSION_EVENTS = 100
 TERMINAL_PHASES = {"merged", "closed", "failed", "escalated"}
+# 2026-11-26 (owner): a worker whose PR waits for the manager's review starts its next task in a new chat.
+# The PR's session is parked: still open, its chat URL kept, not monitored; a correction brings it back.
+PARKED_PHASE = "parked"
+PARKABLE_PHASES = {"reviewing"}
+CHAT_EVENT_KINDS = {"chat_path", "chat_url"}
+
+
+def recorded_chat_path(session: ArenaSession) -> str | None:
+    """The chat URL path stored after AATM sent the task prompt (needed to come back to a parked session)."""
+    for event in reversed(session.events or []):
+        if event.get("kind") in CHAT_EVENT_KINDS and str(event.get("detail") or "").startswith("/"):
+            return str(event.get("detail"))
+    return None
+
+
+def can_park(session: ArenaSession) -> bool:
+    """Only a session that waits for review, and whose chat can be found again, may be parked."""
+    return session.phase in PARKABLE_PHASES and recorded_chat_path(session) is not None
 
 
 class ArenaSessionConflict(Exception):
@@ -119,13 +138,20 @@ async def sync_profiles_with_bridge(db: AsyncSession) -> list[str]:
 
 
 async def open_session_for(db: AsyncSession, profile_id: str) -> ArenaSession | None:
+    """The session that drives this window now; parked sessions (PRs waiting for review) are not it."""
     return (
         await db.execute(
             select(ArenaSession)
-            .where(ArenaSession.profile_id == profile_id, ArenaSession.is_open.is_(True))
+            .where(ArenaSession.profile_id == profile_id, ArenaSession.is_open.is_(True),
+                   or_(ArenaSession.phase.is_(None), ArenaSession.phase != PARKED_PHASE))  # SQL: NULL != x is not true
             .order_by(ArenaSession.created_at.desc())
         )
     ).scalars().first()
+
+
+def park_session(session: ArenaSession, reason: str) -> None:
+    session.phase = PARKED_PHASE
+    append_event(session, "parked", reason)
 
 
 async def session_for_task(db: AsyncSession, task_id: str) -> ArenaSession | None:
@@ -158,9 +184,14 @@ async def claim_session(db: AsyncSession, agent: Agent, task: Task) -> tuple[Are
         return current, current.submitted_at is None
     if current is not None:
         other = await db.get(Task, current.task_id) if current.task_id else None
-        if other is not None and other.status in {"in_progress", "pr_open", "in_review", "changes_requested"} and current.phase not in TERMINAL_PHASES:
-            raise ArenaSessionConflict(f"Profile {agent.browser_profile_id} is still driving task {other.id}.")
-        await close_session(db, current, reason="next task starts a new session")
+        active = other is not None and other.status in {"in_progress", "pr_open", "in_review", "changes_requested"}
+        if active and current.phase not in TERMINAL_PHASES:
+            if not can_park(current):
+                raise ArenaSessionConflict(f"Profile {agent.browser_profile_id} is still driving task {other.id}.")
+            # Its PR waits for review: keep that chat for the corrections and start this task in a new one.
+            park_session(current, f"task {task.id} starts while PR of task {other.id} waits for review")
+        else:
+            await close_session(db, current, reason="next task starts a new session")
     session = ArenaSession(agent_id=agent.id, profile_id=agent.browser_profile_id, task_id=task.id, phase="new",
                            page_state="offline", events=[])
     append_event(session, "created", f"task {task.id}")
@@ -330,3 +361,107 @@ async def arena_agent_overview(db: AsyncSession) -> dict[str, Any]:
         "manager": manager,
         "employees": rows,
     }
+
+
+def requeue_after_human(blocked: list[Task], current_ids: set[str], stamp: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Re-queue the tasks a human check blocked on one window; return ``(requeued, skipped)`` task ids.
+
+    E32: only the work this window was doing is re-queued, not every blocked task the worker owns
+    (another project's task, or one whose pull request already exists, must not be re-run).
+    """
+    requeued: list[str] = []
+    skipped: list[str] = []
+    for task in blocked:
+        if not any(cp.get("event") == "needs_human" for cp in (task.checkpoints or []) if isinstance(cp, dict)):
+            continue
+        if current_ids and task.id not in current_ids:
+            skipped.append(task.id)
+            continue
+        task.status = "queued"
+        task.lock_owner = None
+        task.checkpoints = list(task.checkpoints or []) + [{"ts": utcnow().isoformat(), "event": "human_resolved", **stamp}]
+        requeued.append(task.id)
+    return requeued, skipped
+
+
+async def resume_profile_after_human(db: AsyncSession, profile: BrowserProfile, *, actor: str,
+                                     connected: bool) -> tuple[list[str], list[str]]:
+    """Clear a profile's needs_human state, free its worker and re-queue the task the check blocked.
+
+    Shared by the owner's Resume button and the self-heal sweep (E68). The caller commits.
+    """
+    profile.connector_status = "ready" if connected else "offline"
+    profile.needs_human_reason = None
+    agent = await db.get(Agent, profile.agent_id) if profile.agent_id else None
+    if agent is None:
+        return [], []
+    if agent.status == "needs_human":
+        agent.status = "idle"
+    blocked = list((await db.execute(select(Task).where(Task.status == "blocked", Task.assigned_agent_id == agent.id))).scalars())
+    open_sessions = (await db.execute(select(ArenaSession).where(
+        ArenaSession.profile_id == profile.id, ArenaSession.is_open.is_(True)))).scalars()
+    current_ids = {tid for sess in open_sessions for tid in (sess.task_id, sess.active_task_id) if tid}
+    if agent.current_task_id:
+        current_ids.add(agent.current_task_id)
+    requeued, skipped = requeue_after_human(blocked, current_ids, {"by": actor})
+    for task_id in requeued:
+        paused = (await db.execute(select(AgentMessage).where(AgentMessage.task_id == task_id,
+                                                              AgentMessage.execution_status == "paused"))).scalars()
+        for message in paused:
+            message.execution_status = "cancelled"
+    return requeued, skipped
+
+
+# Live 2026-11-26: worker-1's follow-up failed to send 3 times, was escalated as needs_human, and E68 "resumed"
+# it within seconds because the window was ready - 65 times in a row. Only a human check on the page clears by
+# itself; an escalation after repeated failures does not, and no window is resumed in a tight loop.
+FAILURE_ESCALATION_RE = re.compile(r"failed \d+ times in a row|follow-up failed|no pull request", re.IGNORECASE)
+AUTO_RESUME_MAX = 3
+AUTO_RESUME_WINDOW_MINUTES = 30
+
+
+def is_page_human_check(reason: str | None) -> bool:
+    """True unless the reason is AATM's own escalation after repeated failures."""
+    return not FAILURE_ESCALATION_RE.search(reason or "")
+
+
+async def resume_cleared_profiles(db: AsyncSession) -> list[str]:
+    """E68: a worker window marked needs_human is resumed once the bridge reports it ready again.
+
+    The watchdog resets a window on the bridge only after the page itself reports no human check (E57),
+    so a connected profile the bridge calls "ready" is clean now. Before this, the worker and its task
+    stayed blocked until the owner pressed Resume, and every task that depended on it waited too.
+    Nothing here touches the check itself. Returns the profile ids resumed.
+    """
+    if not arena_gate()["enabled"]:
+        return []
+    stuck = list((await db.execute(select(BrowserProfile).where(BrowserProfile.connector_status == "needs_human"))).scalars())
+    if not stuck:
+        return []
+    listed = await bridge_call("GET", "/v1/connector/profiles")
+    if not listed.get("ok"):
+        return []
+    live = {str(item.get("profile_id")): item for item in listed.get("profiles") or []}
+    resumed: list[str] = []
+    since = utcnow() - timedelta(minutes=AUTO_RESUME_WINDOW_MINUTES)
+    for profile in stuck:
+        item = live.get(profile.id) or {}
+        if not item.get("connected") or item.get("status") != "ready":
+            continue
+        if not is_page_human_check(profile.needs_human_reason):
+            continue  # the work failed on the page (e.g. send_failed); a ready window does not undo that
+        recent = (await db.execute(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "arena.human_resolved", AuditLog.resource_id == profile.id,
+            AuditLog.actor == "self-heal", AuditLog.created_at >= since))).scalar() or 0
+        if recent >= AUTO_RESUME_MAX:
+            continue  # it keeps coming back: wait for the owner instead of retrying the window in a loop
+        requeued, skipped = await resume_profile_after_human(db, profile, actor="self-heal", connected=True)
+        db.add(AuditLog(actor="self-heal", action="arena.human_resolved", resource_type="browser_profile",
+                        resource_id=profile.id, details={"requeued_tasks": requeued, "skipped_tasks": skipped,
+                                                         "reason": "bridge reports the window ready (E68)"}))
+        resumed.append(profile.id)
+    if resumed:
+        await db.commit()
+        for pid in resumed:
+            await event_bus.emit("arena.resumed", {"profile_id": pid, "by": "self-heal"})
+    return resumed

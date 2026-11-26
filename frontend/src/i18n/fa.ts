@@ -1,6 +1,8 @@
+import { nexusFa } from './nexus'
 import type { Translations } from './types'
 
 export const fa: Translations = {
+  nexus: nexusFa,
   appName: 'AATM',
   appSubtitle: 'مدیر تیم عامل‌های هوش مصنوعی',
   nav: {
@@ -113,6 +115,7 @@ export const fa: Translations = {
     approvalsSublabel: 'مرکز تائیدها',
   },
   chat: {
+    noActiveProject: 'هیچ پروژهٔ فعالی وجود ندارد: همهٔ پروژه‌ها تکمیل یا غیرفعال شده‌اند. یک پروژهٔ جدید بسازید یا یکی را در بخش پروژه‌ها فعال کنید.',
     inactiveProject: 'پروژهٔ «{name}» تکمیل یا غیرفعال شده و درخواست جدید نمی‌پذیرد. یک پروژهٔ فعال را از فهرست بالا انتخاب کنید.',
     title: 'گفتگو با مدیر ارشد مهندسی هوش مصنوعی',
     placeholder: 'دستور اجرایی صادر کنید (مانند "create task..."، "orchestrate" یا "merge main")...',
@@ -136,6 +139,11 @@ export const fa: Translations = {
     modelSaved: 'مدل بروزرسانی شد',
   },
   tasks: {
+    createNeedsProject: 'ابتدا یک پروژهٔ فعال انتخاب یا ایجاد کنید: هر وظیفه متعلق به یک پروژه است.',
+    createProjectInactive: 'پروژهٔ «{name}» تکمیل یا غیرفعال شده و وظیفهٔ جدید نمی‌پذیرد. آن را در بخش پروژه‌ها فعال کنید یا یک پروژهٔ فعال انتخاب کنید.',
+    createNeedsTitle: 'ابتدا عنوان وظیفه را بنویسید.',
+    createDone: 'وظیفه ایجاد شد و در صف قرار گرفت.',
+    createFailed: 'ایجاد وظیفه ممکن نشد: {reason}',
     title: 'هماهنگی وظایف و گراف وابستگی',
     newTask: 'وظیفه جدید',
     taskTitle: 'عنوان وظیفه',

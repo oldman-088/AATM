@@ -36,7 +36,7 @@ def make_watchdog(watchdog, monkeypatch, alerts, clock, calls=None):
             calls.append(timeout)
         return alerts
     monkeypatch.setattr(watchdog, "run_doctor", fake_run_doctor)
-    for name in ("check_services", "check_profiles", "check_logs", "check_tasks"):
+    for name in ("check_services", "check_profiles", "check_windows", "check_logs", "check_tasks"):
         monkeypatch.setattr(watchdog.Watchdog, name, lambda self: None)
     dog = watchdog.Watchdog(watchdog.Alerter(send=Sender(), clock=clock), {})
     return dog

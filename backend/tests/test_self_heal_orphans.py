@@ -121,3 +121,45 @@ async def test_failing_the_running_task_frees_its_worker(db_session):
     await db_session.refresh(worker)
     assert worker.status == "idle"
     assert worker.current_task_id is None
+
+
+async def test_heal_frees_a_worker_whose_task_went_back_to_the_queue(db_session):
+    """2026-11-26: after a backend restart worker-3 stayed "working" on a task that was queued again."""
+    worker, task = await _busy_worker_with_task(db_session, "queued")
+    result = await heal_orphaned_state(db_session)
+    assert worker.id in result["released_workers"]
+    await db_session.refresh(worker)
+    assert worker.status == "idle" and worker.current_task_id is None
+
+
+async def test_heal_leaves_a_worker_whose_queued_task_is_being_dispatched(db_session):
+    worker, task = await _busy_worker_with_task(db_session, "queued")
+    task.lock_owner = worker.id
+    await db_session.commit()
+    assert worker.id not in (await heal_orphaned_state(db_session))["released_workers"]
+
+
+async def test_a_follow_up_failed_on_an_arena_send_error_gets_a_new_start_after_a_pause(db_session):
+    """Live 2026-11-26: PR #12's correction failed 3 times in one minute on "send_failed" and was never retried."""
+    from datetime import timedelta
+
+    from app.db.base import utcnow
+    from app.orchestration.self_heal import FOLLOW_UP_HEAL_REQUEUES, requeue_transient_follow_ups
+
+    project = (await db_session.execute(select(Project))).scalars().first()
+    error = "ArenaRunnerError: Arena Agent send_failed: text was typed but the page did not send it"
+    task = Task(project_id=project.id, title="Address review on PR #12", status="failed", task_type="follow_up",
+                error_message=error, retry_count=4, assigned_agent_id="worker-4")
+    other = Task(project_id=project.id, title="Address review on PR #3", status="failed", task_type="follow_up",
+                 error_message="tests failed", assigned_agent_id="worker-4")
+    db_session.add_all([task, other])
+    await db_session.commit()
+    soon = utcnow() + timedelta(minutes=1)
+    assert await requeue_transient_follow_ups(db_session, now=soon) == [], "not at once: the window gets a pause"
+    later = utcnow() + timedelta(minutes=6)
+    for _ in range(FOLLOW_UP_HEAL_REQUEUES):
+        assert await requeue_transient_follow_ups(db_session, now=later) == [task.id]
+        assert task.status == "queued" and task.retry_count == 0
+        task.status = "failed"
+    assert await requeue_transient_follow_ups(db_session, now=later) == [], "a window that keeps failing is not hammered"
+    assert other.status == "failed", "a real failure stays failed"

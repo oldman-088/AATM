@@ -4,34 +4,63 @@
 
 :root {
   color-scheme: dark;
+  /* NEXUS COMMAND palette (owner spec): graphite #0B0F14, slate #111827, cards #151D29, borders #263244,
+     cyan #00D4FF, violet #8B5CF6, emerald #10B981, amber #F59E0B, red #EF4444, text #F8FAFC / #94A3B8. */
+  --nx-bg: 11 15 20;
+  --nx-surface: 17 24 39;
+  --nx-card: 21 29 41;
+  --nx-raised: 28 38 54;
+  --nx-border: 38 50 68;
+  --nx-border-strong: 51 65 85;
+  --nx-text: 248 250 252;
+  --nx-muted: 148 163 184;
+  --nx-dim: 100 116 139;
+  --nx-cyan: 0 212 255;
+  --nx-cyan-soft: 103 232 249;
+  --nx-cyan-strong: 0 168 204;
+  --nx-cyan-deep: 0 128 160;
+  --nx-violet: 139 92 246;
+  --nx-success: 16 185 129;
+  --nx-warning: 245 158 11;
+  --nx-error: 239 68 68;
+  --nx-on-accent: 6 20 28;
 }
 
 html.light {
   color-scheme: light;
+  --nx-bg: 243 245 249;
+  --nx-surface: 255 255 255;
+  --nx-card: 255 255 255;
+  --nx-raised: 241 245 249;
+  --nx-border: 214 222 233;
+  --nx-border-strong: 186 198 214;
+  --nx-text: 15 23 42;
+  --nx-muted: 71 85 105;
+  --nx-dim: 100 116 139;
+  --nx-cyan: 2 132 168;
+  --nx-cyan-soft: 2 110 140;
+  --nx-cyan-strong: 2 120 155;
+  --nx-cyan-deep: 1 95 125;
+  --nx-violet: 109 62 216;
+  --nx-success: 4 120 87;
+  --nx-warning: 180 83 9;
+  --nx-error: 200 30 30;
+  --nx-on-accent: 255 255 255;
 }
 
-/* Crisp light-mode surface palette while preserving semantic status accents */
-html.light body,
-html.light .bg-slate-950,
-html.light .bg-slate-950\/60,
-html.light .bg-slate-950\/50 {
-  background-color: #f8fafc !important;
-  color: #0f172a !important;
+body {
+  background-color: rgb(var(--nx-bg));
+  color: rgb(var(--nx-text));
+  font-family: 'IBM Plex Sans Arabic', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'tnum' 1;
 }
 
-html.light .bg-slate-900,
-html.light .bg-slate-900\/70,
-html.light .bg-slate-900\/60,
-html.light .bg-slate-900\/50 {
-  background-color: #ffffff !important;
-  color: #0f172a !important;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
-html.light .border-slate-800,
-html.light .border-slate-700 {
-  border-color: #cbd5e1 !important;
-}
-
+/* Light theme: surfaces come from the --nx-* variables above; literal white text must turn dark. */
 html.light .text-white,
 html.light .text-slate-100,
 html.light .text-slate-200 {
@@ -43,8 +72,18 @@ html.light .text-slate-400 {
   color: #475569 !important;
 }
 
+/* Pale status text from older screens is made for dark cards; on light surfaces use the tone tokens. */
+html.light :is(.text-amber-100, .text-amber-200, .text-amber-300) { color: rgb(var(--nx-warning)) !important; }
+html.light :is(.text-rose-100, .text-rose-200, .text-rose-300) { color: rgb(var(--nx-error)) !important; }
+html.light :is(.text-emerald-100, .text-emerald-200, .text-emerald-300) { color: rgb(var(--nx-success)) !important; }
+html.light :is(.text-indigo-100, .text-indigo-200, .text-indigo-300) { color: rgb(var(--nx-violet)) !important; }
+
 /* Ensure crisp scrollbar and RTL-friendly logical layout */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #334155 transparent;
+  scrollbar-color: rgb(var(--nx-border-strong)) transparent;
 }
+
+/* Grid and flex children may shrink below their content width, so one long label or button row
+   cannot push a card (and the whole page) wider than a phone screen. */
+.grid > * { min-width: 0; }

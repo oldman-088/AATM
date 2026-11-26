@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """AATM watchdog — read-only monitoring loop (started by scripts/ubuntu/watchdog.sh).
 
-It only *observes*: HTTP GETs, TCP connects, ``docker inspect``, reading log files and opening the
-SQLite database with ``mode=ro``. It never restarts, changes or fixes anything.
+It mostly *observes*: HTTP GETs, TCP connects, ``docker inspect``, reading log files and opening the
+SQLite database with ``mode=ro``. It never restarts a service and never writes to the database.
+
+The one repair it makes (E56) is to load Arena again in a window that has stayed disconnected from the
+bridge for 3 minutes — the same step ``start-all`` takes once. Loading the page only re-runs the
+userscript; nothing is typed or sent to Arena. A window whose Chrome is closed is opened again. Each
+window gets at most 3 tries, 10 minutes apart; after that the owner gets one alert. The counter resets
+when the window connects. ``AATM_WATCHDOG_REOPEN=0`` turns this off.
 
 Every interval it checks the backend health endpoint, the bridge and frontend ports, the Redis and
 RabbitMQ containers, each Arena profile's state (via the bridge admin API, token read from .env and
@@ -52,6 +58,15 @@ ACTIVE_TASK_STATUSES = ("in_progress", "running", "working")
 CONTAINERS = ("aatm-redis", "aatm-rabbitmq")
 SERVICE_GRACE_SECONDS = 90.0   # a normal restart finishes within this time
 PROFILE_GRACE_SECONDS = 180.0  # Arena windows reconnect by themselves within this time
+REOPEN_COOLDOWN_SECONDS = 600.0  # time between two reloads of the same window (E56)
+REOPEN_MAX_TRIES = 3             # after this many reloads the owner is asked to look at the window
+BLANK_GRACE_SECONDS = 120.0      # a connected window may show no composer this long (page load) (E59)
+HIDDEN_GRACE_SECONDS = 90.0      # a page may be hidden this long (a minimise for a moment) (E78)
+HIDDEN_COOLDOWN_SECONDS = 300.0  # time between two restarts of the same hidden window (E78)
+HUMAN_RECHECK_SECONDS = 120.0    # how often a window marked "needs a human" is looked at again (E57)
+HUMAN_RELOAD_SECONDS = 900.0     # time between two reloads of a window that still shows a human check
+HUMAN_RELOAD_MAX = 3             # reloads before the watchdog only waits for the owner
+STACK_SCRIPT = ROOT_DIR / "scripts" / "ubuntu" / "aatm_stack.py"
 LOG_PATTERNS = re.compile(r"(?:^|\s)ERROR[:\s]|(?i:orchestration[^\n]*fail|tick failed|job \S+ failed)")
 ACCESS_LINE = re.compile(r'"[A-Z]+ \S+ HTTP/[\d.]+" (\d{3})')
 SHUTDOWN_ERRORS = re.compile(r"^(?:asyncio\.(?:exceptions\.)?)?CancelledError|^KeyboardInterrupt|^SystemExit|ConnectionClosed")
@@ -133,6 +148,20 @@ def port_open(port: int, host: str = "127.0.0.1") -> bool:
 
 def http_get(url: str, token: str | None = None, timeout: float = 4.0) -> tuple[int, bytes]:
     req = urllib.request.Request(url, method="GET")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return 0, b""
+
+
+def http_post(url: str, token: str | None = None, body: dict | None = None, timeout: float = 40.0) -> tuple[int, bytes]:
+    data = json.dumps(body or {}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -312,6 +341,21 @@ def run_doctor(timeout: float = DOCTOR_TIMEOUT_SECONDS) -> tuple[int, dict[str, 
 
 
 # --------------------------------------------------------------------------------------------- watchdog
+def load_stack():
+    """Import the sibling aatm_stack.py by path (the scripts are not a package)."""
+    import importlib.util
+
+    name = "aatm_stack_for_watchdog"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, STACK_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class Watchdog:
     def __init__(self, alerter: Alerter, env: dict[str, str]) -> None:
         self.alerter = alerter
@@ -329,6 +373,19 @@ class Watchdog:
         self.first_seen: dict[str, float] = {}
         self.doctor_interval = float(os.environ.get("AATM_DOCTOR_INTERVAL", DOCTOR_INTERVAL_SECONDS))
         self.next_doctor = 0.0  # the first cycle runs it right away: this is the after-boot pass
+        self.reopen_enabled = os.environ.get("AATM_WATCHDOG_REOPEN", "1") != "0"
+        self.missing_since: dict[str, float] = {}
+        self.reopen_tries: dict[str, int] = {}
+        self.last_reopen: dict[str, float] = {}
+        self.human_checked: dict[str, float] = {}
+        self.human_reloads: dict[str, int] = {}
+        self.human_last_reload: dict[str, float] = {}
+        self.blank_since: dict[str, float] = {}
+        self.blank_reopens: dict[str, int] = {}
+        self.blank_last: dict[str, float] = {}
+        self.hidden_restarts: dict[str, int] = {}
+        self.hidden_last: dict[str, float] = {}
+        self._stack = None
 
     def _settled(self, group: str, problems: dict[str, str], grace: float) -> dict[str, str]:
         """Only problems that outlasted a normal restart or reconnect are reported."""
@@ -424,9 +481,190 @@ class Watchdog:
         # it did not run at all (no python, no script, a crash, a timeout): say so instead of going quiet
         self.alerter.set_problems("doctor", {"unavailable": "فحص aatm doctor لم يعمل؛ راجع scripts/ubuntu/aatm_doctor.py"})
 
+    def stack(self):
+        """scripts/ubuntu/aatm_stack.py, loaded once: it knows the windows, their folders and URLs."""
+        if self._stack is None:
+            self._stack = load_stack()
+        return self._stack
+
+    def check_windows(self) -> None:
+        """E56: load Arena again in a window that stays disconnected, so nobody has to do it by hand."""
+        if not self.reopen_enabled:
+            return
+        stack = self.stack()
+        _, _, _, missing = stack.readiness()  # `missing` is empty while the bridge is down
+        now = self.alerter.clock()
+        ids = {w.profile_id for w in missing}
+        for pid in [p for p in self.missing_since if p not in ids]:  # connected again: start over
+            self.missing_since.pop(pid, None)
+            self.reopen_tries.pop(pid, None)
+            self.last_reopen.pop(pid, None)
+        problems: dict[str, str] = {}
+        chrome = stack._chrome_binary()
+        for window in missing:
+            pid = window.profile_id
+            since = self.missing_since.setdefault(pid, now)
+            tries = self.reopen_tries.get(pid, 0)
+            if tries >= REOPEN_MAX_TRIES:
+                problems[pid] = (f"{window.title}: لم يتصل بعد {tries} محاولات إعادة تحميل؛ "
+                                 "افتح نافذته وتأكد من تسجيل الدخول إلى Arena وتفعيل السكربت")
+                continue
+            if not chrome or now - since < PROFILE_GRACE_SECONDS:
+                continue
+            if now - self.last_reopen.get(pid, -REOPEN_COOLDOWN_SECONDS) < REOPEN_COOLDOWN_SECONDS:
+                continue
+            running = bool(stack.chrome_main_processes(window.directory))
+            if running and tries >= 1:
+                # The reload did not reconnect it: restart the whole window (2026-11-26, Worker 4).
+                stack.restart_window(chrome, window)
+                how = "أعيد تشغيل النافذة بالكامل"
+            else:
+                stack._launch(chrome, window, window.url)
+                how = "أعيد تحميل صفحة Arena" if running else "أعيد فتح النافذة"
+            self.reopen_tries[pid] = tries + 1
+            self.last_reopen[pid] = now
+            write_log(f"[watchdog] {window.title} ({pid}) غير متصل: {how} (المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
+        self.alerter.set_problems("window", problems)
+
+    def page_report(self, pid: str) -> dict | None:
+        """The page's own read-only selector test: what it shows now, not what it showed when it stopped."""
+        status, body = http_post(f"http://127.0.0.1:{self.bridge_port}/v1/connector/profiles/{pid}/command",
+                                 self._token or None, {"command": "selector_test", "args": {}, "timeout_seconds": 30})
+        if status != 200:
+            return None
+        try:
+            result = json.loads(body).get("result")
+        except (ValueError, AttributeError):
+            return None
+        return result if isinstance(result, dict) else None
+
+    def check_human_windows(self) -> None:
+        """E57: a window stays "needs a human" until somebody presses resume, even after the check is gone.
+
+        The watchdog never touches the check. It asks the page what it shows now: when there is no
+        check any more it resumes the window; when the check is still there it reloads the page a few
+        times (a plain reload, as a person would) and otherwise leaves it to the owner.
+        """
+        if not self.reopen_enabled or not port_open(self.bridge_port):
+            return
+        status, body = http_get(f"http://127.0.0.1:{self.bridge_port}/v1/connector/profiles", self._token or None)
+        if status != 200:
+            return
+        try:
+            profiles = json.loads(body).get("profiles") or []
+        except (ValueError, AttributeError):
+            return
+        now = self.alerter.clock()
+        self._reopen_blank_windows(profiles, now)
+        self._restore_hidden_windows(profiles, now)
+        stuck = {str(p.get("profile_id")): p for p in profiles if p.get("status") == "needs_human"}
+        for pid in [p for p in self.human_checked if p not in stuck]:
+            self.human_checked.pop(pid, None)
+            self.human_reloads.pop(pid, None)
+            self.human_last_reload.pop(pid, None)
+        for pid, profile in stuck.items():
+            if not profile.get("connected"):
+                continue  # check_windows reopens a disconnected window
+            if now - self.human_checked.get(pid, -HUMAN_RECHECK_SECONDS) < HUMAN_RECHECK_SECONDS:
+                continue
+            self.human_checked[pid] = now
+            report = self.page_report(pid)
+            if report is None:
+                continue
+            check = report.get("human_check") or {}
+            if not check.get("found") and report.get("state") != "needs_human":
+                code, _ = http_post(f"http://127.0.0.1:{self.bridge_port}/v1/connector/profiles/{pid}/reset",
+                                    self._token or None, timeout=10)
+                if code == 200:
+                    write_log(f"[watchdog] {pid}: لا يوجد فحص بشري على الصفحة الآن؛ استؤنفت النافذة تلقائيًا")
+                continue
+            reloads = self.human_reloads.get(pid, 0)
+            if reloads >= HUMAN_RELOAD_MAX:
+                continue
+            if now - self.human_last_reload.get(pid, -HUMAN_RELOAD_SECONDS) < HUMAN_RELOAD_SECONDS:
+                continue
+            stack = self.stack()
+            chrome = stack._chrome_binary()
+            window = next((w for w in stack.enabled_windows() if w.profile_id == pid), None)
+            if not chrome or window is None:
+                continue
+            stack._launch(chrome, window, window.url)
+            self.human_reloads[pid] = reloads + 1
+            self.human_last_reload[pid] = now
+            write_log(f"[watchdog] {pid}: الفحص البشري ما زال ظاهرًا؛ أعيد تحميل الصفحة "
+                      f"(المحاولة {reloads + 1}/{HUMAN_RELOAD_MAX})")
+
+    def _reopen_blank_windows(self, profiles: list[dict], now: float) -> None:
+        """E59: a connected window that stays "offline" draws no composer (often hidden or minimised).
+
+        Opening its Arena URL again from the same profile brings it to the front, as a person would.
+        """
+        blank = {str(p.get("profile_id")) for p in profiles
+                 if p.get("connected") and p.get("status") != "needs_human" and p.get("agent_state") == "offline"}
+        for pid in [p for p in self.blank_since if p not in blank]:
+            self.blank_since.pop(pid, None)
+            self.blank_reopens.pop(pid, None)
+            self.blank_last.pop(pid, None)
+        for pid in blank:
+            since = self.blank_since.setdefault(pid, now)
+            tries = self.blank_reopens.get(pid, 0)
+            if now - since < BLANK_GRACE_SECONDS or tries >= REOPEN_MAX_TRIES:
+                continue
+            if now - self.blank_last.get(pid, -REOPEN_COOLDOWN_SECONDS) < REOPEN_COOLDOWN_SECONDS:
+                continue
+            stack = self.stack()
+            chrome = stack._chrome_binary()
+            window = next((w for w in stack.enabled_windows() if w.profile_id == pid), None)
+            if not chrome or window is None:
+                continue
+            stack._launch(chrome, window, window.url)
+            self.blank_reopens[pid] = tries + 1
+            self.blank_last[pid] = now
+            write_log(f"[watchdog] {pid}: متصل لكن الصفحة لا تعرض مربع الكتابة (مخفية؟)؛ أعيد فتحها "
+                      f"(المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
+
+    def _restore_hidden_windows(self, profiles: list[dict], now: float) -> None:
+        """E78: a window that stays minimised or hidden draws no page, so its tasks fail with page_hidden.
+
+        On 2026-11-26 seven of nine windows were hidden and follow-ups failed until somebody showed them.
+        The bridge knows the page is hidden (its tab_hidden event, or a command refused with page_hidden).
+        A window that stays hidden and runs no command is restarted: Chrome opens it again on screen.
+        After a few tries the owner is asked to show it. A human check is never touched here.
+        """
+        hidden = {str(p.get("profile_id")): p for p in profiles
+                  if p.get("connected") and p.get("page_hidden") and p.get("status") != "needs_human"}
+        for pid in [p for p in self.hidden_restarts if p not in hidden]:  # shown again: start over
+            self.hidden_restarts.pop(pid, None)
+            self.hidden_last.pop(pid, None)
+        problems: dict[str, str] = {}
+        for pid, profile in hidden.items():
+            if float(profile.get("page_hidden_seconds") or 0) < HIDDEN_GRACE_SECONDS:
+                continue
+            tries = self.hidden_restarts.get(pid, 0)
+            if tries >= REOPEN_MAX_TRIES:
+                problems[pid] = (f"{pid}: نافذة Arena ما زالت مصغّرة أو مخفية بعد {tries} محاولات إعادة فتح؛ "
+                                 "أظهرها على الشاشة (لا تصغّرها) حتى تعمل")
+                continue
+            if profile.get("in_flight"):
+                continue  # never cut a running command; try again on a later cycle
+            if now - self.hidden_last.get(pid, -HIDDEN_COOLDOWN_SECONDS) < HIDDEN_COOLDOWN_SECONDS:
+                continue
+            stack = self.stack()
+            chrome = stack._chrome_binary()
+            window = next((w for w in stack.enabled_windows() if w.profile_id == pid), None)
+            if not chrome or window is None:
+                continue
+            stack.restart_window(chrome, window)
+            self.hidden_restarts[pid] = tries + 1
+            self.hidden_last[pid] = now
+            write_log(f"[watchdog] {pid}: الصفحة مخفية منذ {float(profile.get('page_hidden_seconds') or 0):.0f} ث؛ "
+                      f"أعيد فتح النافذة على الشاشة (المحاولة {tries + 1}/{REOPEN_MAX_TRIES})")
+        self.alerter.set_problems("hidden", problems)
+
     def cycle(self) -> None:
-        for check in (self.check_services, self.check_profiles, self.check_logs, self.check_tasks,
-                      self.check_doctor):
+        for check in (self.check_services, self.check_profiles, self.check_windows, self.check_human_windows,
+                      self.check_logs,
+                      self.check_tasks, self.check_doctor):
             try:
                 check()
             except Exception as exc:  # a broken probe must never stop the watchdog

@@ -1,6 +1,8 @@
+import { nexusEn } from './nexus'
 import type { Translations } from './types'
 
 export const en: Translations = {
+  nexus: nexusEn,
   appName: 'AATM',
   appSubtitle: 'AI Agent Team Manager',
   nav: {
@@ -113,6 +115,7 @@ export const en: Translations = {
     approvalsSublabel: 'Approval Center',
   },
   chat: {
+    noActiveProject: 'No project is active: every project is completed or disabled. Create a project or turn one back on in Projects.',
     inactiveProject: 'Project “{name}” is completed or disabled and does not take new requests. Choose an active project above.',
     title: 'Chief AI Engineering Manager Chat',
     placeholder: 'Issue an executive directive (e.g., "create task build metrics", "orchestrate", "merge main")...',
@@ -136,6 +139,11 @@ export const en: Translations = {
     modelSaved: 'Model updated',
   },
   tasks: {
+    createNeedsProject: 'Choose or create an active project first: a task belongs to a project.',
+    createProjectInactive: 'Project “{name}” is completed or disabled, so it takes no new tasks. Turn it on in Projects or pick an active one.',
+    createNeedsTitle: 'Write a task title first.',
+    createDone: 'Task created and queued.',
+    createFailed: 'Could not create the task: {reason}',
     title: 'Dependency-Aware Task Orchestration',
     newTask: 'New Task',
     taskTitle: 'Task Title',

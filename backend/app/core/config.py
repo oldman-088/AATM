@@ -213,7 +213,12 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
     MAX_CONCURRENT_BROWSERS: int = 10
     # Phase 4: reviewer change-request rounds before the PR is escalated to a human.
-    MAX_REVIEW_ROUNDS: int = Field(default=2, ge=0)
+    MAX_REVIEW_ROUNDS: int = Field(default=5, ge=0)  # owner 2026-11-26: 5 rounds before a PR goes to the owner
+    # Owner 2026-11-26: the merge queue may merge a manager-approved PR that changes documentation only and has no CI.
+    AUTO_MERGE_DOCS_WITHOUT_CI: bool = True
+    # Owner 2026-11-26: idle workers review PRs in parallel with the manager (peer_review.py).
+    PEER_REVIEW_ENABLED: bool = True
+    PEER_REVIEW_MAX: int = Field(default=3, ge=0)
     STALLED_TASK_MINUTES: int = 15
 
     def worker_ceiling(self) -> int | None:

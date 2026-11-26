@@ -17,16 +17,40 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.events import event_bus
 from app.db.base import utcnow
 from app.git_workflows.manager import git_workflow_manager
 from app.models import ApprovalRequest, AuditLog, Notification, Project, Task
 from app.models.project import project_base_branch
+
+DOC_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc")
+NO_BASE_CI_AFTER_SECONDS = 600.0  # a base with no check run this long after a merge has no CI at all
+
+
+def docs_only(files: list[str] | None) -> bool:
+    """Every changed file is documentation (Markdown, reStructuredText, plain text)."""
+    return bool(files) and all(f.lower().endswith(DOC_SUFFIXES) for f in files)
+
+
+def _base_has_no_ci(state: dict[str, Any]) -> bool:
+    """The base reported no checks at all well after the last merge: the repository has no CI, so do not wait forever."""
+    at = (state.get("last_merge") or {}).get("at")
+    if not at:
+        return True
+    try:
+        merged = datetime.fromisoformat(at)
+    except ValueError:
+        return True
+    if merged.tzinfo is None:
+        merged = merged.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - merged).total_seconds() >= NO_BASE_CI_AFTER_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +110,10 @@ class MergeQueue:
         # M3: after a merge (or while paused for a red base), the base branch must be green before anything else.
         if state.get("awaiting_base") or state.get("paused"):
             base_ci = await self.github.branch_ci(repo, base)
-            if not base_ci.get("available") or base_ci.get("ci") in {"pending", "none"}:
+            if not base_ci.get("available") or base_ci.get("ci") == "pending":
                 return {"status": "waiting_base", "ci": base_ci.get("ci")}
+            if base_ci.get("ci") == "none" and not _base_has_no_ci(state):
+                return {"status": "waiting_base", "ci": "none"}
             if base_ci["ci"] == "failure":
                 if not state.get("paused"):
                     await self._pause(db, project, state, base, repo, base_ci)
@@ -127,6 +153,10 @@ class MergeQueue:
                                     f"CI failed on PR #{task.pr_number}",
                                     f"{task.title}: " + ", ".join(c["name"] for c in pr.get("checks", []) if c.get("result") == "failure"))
             return {"status": "ci_failed", "task_id": task.id}
+        if pr.get("ci") == "none" and docs_only(pr.get("files")) and get_settings().AUTO_MERGE_DOCS_WITHOUT_CI:
+            # Owner 2026-11-26: an approved PR that changes documentation only may merge without CI (the repository
+            # may have no workflows yet). Before this the owner had to merge it by hand and its worker stayed reserved.
+            return await self._merge(db, project, state, task, approval, head, reason="documentation only, no CI checks")
         if pr.get("ci") == "none":
             await self._notify_once(db, project, state, f"ci_none:{task.id}:{head}",
                                     f"PR #{task.pr_number} has no CI checks",
@@ -154,12 +184,13 @@ class MergeQueue:
         return None, None
 
     async def _merge(self, db: AsyncSession, project: Project, state: dict[str, Any], task: Task,
-                     approval: ApprovalRequest, head: str) -> dict[str, Any]:
+                     approval: ApprovalRequest, head: str, *, reason: str = "") -> dict[str, Any]:
         from app.orchestration.review import review_service
 
         approval.status = "approved"
         approval.reviewed_by = ACTOR
-        approval.review_note = f"Auto-merge: manager approved, CI green on {head[:12]}, no conflict."
+        approval.review_note = (f"Auto-merge: manager approved, {reason}, no conflict." if reason
+                                else f"Auto-merge: manager approved, CI green on {head[:12]}, no conflict.")
         approval.decided_at = utcnow()
         self._audit(db, project, "merge_queue.approved", {"task_id": task.id, "pr_number": task.pr_number, "head_sha": head,
                                                           "approval_id": approval.id})

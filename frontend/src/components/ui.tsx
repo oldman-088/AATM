@@ -16,7 +16,7 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-sm shadow-black/20 backdrop-blur-sm light:border-slate-200 light:bg-white',
+        'rounded-xl border border-nexus-border/80 bg-nexus-card p-4 shadow-card sm:p-5',
         className
       )}
     >
@@ -35,11 +35,11 @@ export function Badge({
   children: React.ReactNode
 }) {
   const styles = {
-    success: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-    warning: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-    danger: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
-    info: 'bg-sky-500/15 text-sky-400 border-sky-500/30',
-    neutral: 'bg-slate-700/40 text-slate-300 border-slate-700',
+    success: 'bg-nexus-success/10 text-nexus-success border-nexus-success/35',
+    warning: 'bg-nexus-warning/10 text-nexus-warning border-nexus-warning/35',
+    danger: 'bg-nexus-error/10 text-nexus-error border-nexus-error/35',
+    info: 'bg-nexus-cyan/10 text-nexus-cyan border-nexus-cyan/35',
+    neutral: 'bg-nexus-raised text-nexus-muted border-nexus-border',
   }[variant]
 
   return (
@@ -55,28 +55,28 @@ export function Badge({
   )
 }
 
-export function Button({
-  variant = 'primary',
-  size = 'md',
-  className,
-  children,
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost'
   size?: 'sm' | 'md'
-}) {
+}
+
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'primary', size = 'md', className, children, ...props },
+  ref,
+) {
   const vClass = {
-    primary: 'bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white border-sky-500 shadow-sm shadow-sky-950/30',
-    secondary: 'bg-slate-800/80 hover:bg-slate-700 active:bg-slate-800 text-slate-100 border-slate-700',
-    danger: 'bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white border-rose-500',
-    ghost: 'bg-transparent hover:bg-slate-800/60 text-slate-300 border-transparent',
+    primary: 'bg-nexus-cyan hover:bg-nexus-cyan/85 active:bg-nexus-cyan/75 text-nexus-on-accent border-nexus-cyan shadow-sm shadow-nexus-cyan/20',
+    secondary: 'bg-nexus-raised hover:bg-nexus-border active:bg-nexus-raised text-nexus-text border-nexus-border',
+    danger: 'bg-nexus-error/90 hover:bg-nexus-error active:bg-nexus-error/80 text-white border-nexus-error',
+    ghost: 'bg-transparent hover:bg-nexus-raised text-nexus-muted hover:text-nexus-text border-transparent',
   }[variant]
   const sClass = size === 'sm' ? 'px-2.5 py-1.5 text-xs' : 'px-4 py-2 text-sm'
   return (
     <button
+      ref={ref}
       {...props}
       className={cn(
-        'inline-flex items-center justify-center gap-1.5 rounded-lg border font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex items-center justify-center gap-1.5 rounded-lg border font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-nexus-bg disabled:cursor-not-allowed disabled:opacity-50',
         vClass,
         sClass,
         className
@@ -85,7 +85,7 @@ export function Button({
       {children}
     </button>
   )
-}
+})
 
 export function Input({
   className,
@@ -95,7 +95,7 @@ export function Input({
     <input
       {...props}
       className={cn(
-        'w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none',
+        'w-full rounded-lg border border-nexus-border bg-nexus-bg/70 px-3 py-2 text-sm text-nexus-text placeholder:text-nexus-dim transition-colors focus:border-nexus-cyan focus:outline-none focus:ring-1 focus:ring-nexus-cyan/40',
         className
       )}
     />
@@ -110,7 +110,7 @@ export function Textarea({
     <textarea
       {...props}
       className={cn(
-        'w-full rounded-lg border border-slate-700 bg-slate-950/70 p-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none',
+        'w-full rounded-lg border border-nexus-border bg-nexus-bg/70 p-3 text-xs text-nexus-text placeholder:text-nexus-dim transition-colors focus:border-nexus-cyan focus:outline-none focus:ring-1 focus:ring-nexus-cyan/40',
         className
       )}
     />
@@ -126,7 +126,7 @@ export function Select({
     <select
       {...props}
       className={cn(
-        'rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none',
+        'rounded-lg border border-nexus-border bg-nexus-bg/70 px-3 py-2 text-sm text-nexus-text transition-colors focus:border-nexus-cyan focus:outline-none focus:ring-1 focus:ring-nexus-cyan/40',
         className
       )}
     >
@@ -138,9 +138,9 @@ export function Select({
 export function Progress({ value, className }: { value: number; className?: string }) {
   const pct = Math.max(0, Math.min(100, value))
   return (
-    <div className={cn('h-2 w-full overflow-hidden rounded-full bg-slate-800', className)}>
+    <div className={cn('h-2 w-full overflow-hidden rounded-full bg-nexus-raised', className)}>
       <div
-        className="h-full rounded-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
+        className="h-full rounded-full bg-gradient-to-r from-nexus-cyan to-nexus-violet rtl:bg-gradient-to-l transition-all duration-300"
         style={{ width: `${pct}%` }}
       />
     </div>

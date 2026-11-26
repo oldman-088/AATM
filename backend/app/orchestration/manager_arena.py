@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, update
@@ -46,9 +46,11 @@ from app.orchestration.arena_prompts import (
     build_manager_status_prompt,
     chained_dependencies,
     extract_manager_json,
+    is_prompt_echo,
     validate_manager_plan,
     validate_manager_review,
 )
+from app.orchestration.restart_guard import restart_pending
 from app.runtime.agent_protocol import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -124,11 +126,18 @@ async def manager_readiness(profile_id: str = MANAGER_PROFILE_ID) -> dict[str, A
 STALL_MINUTES = 20
 QUIET_STATES = {"idle", "ready", "pr_ready"}
 BUSY_STATES = {"generating", "keep_working_visible", "tool_call_limit"}
+HUMAN_CHECK_WAIT_AR = ("صفحة المدير في Arena تعرض فحصًا بشريًا، ولا يحلّه AATM بنفسه. الطلب محفوظ وسيكمله المدير "
+                       "تلقائيًا بمجرد زوال الفحص، دون إعادة إرسال.")
+EMPTY_REPLY_POLLS = 90  # E58: polls a quiet page may show no reply (or our own prompt) before it counts as done
 OPEN_JOB_STATES = ("queued", "waiting_connection", "running")
 TERMINAL_TASK_STATES = {"done", "merged", "completed", "cancelled"}
-MAX_RAW_REPLY_CHARS = 20_000
+MAX_RAW_REPLY_CHARS = 20_000      # stored copy of a reply
+MAX_REPLY_PARSE_CHARS = 200_000   # E63: a 12-task plan is over 20,000 characters; cutting it broke the JSON
 # A plan or review job that keeps failing must stop instead of re-running forever (one job reached 74 attempts).
+UNREADABLE_RETRY_WAIT_SECONDS = 300
 MAX_JOB_ATTEMPTS = 3
+# Review jobs being run right now, by the manager or by a peer reviewer (peer_review.py): one runner each.
+CLAIMED_JOBS: set[str] = set()
 # E37: a busy or disconnected manager window is not a failed attempt; refund it, but never forever.
 MAX_ATTEMPT_REFUNDS = 12
 # E52: after this many identical connection errors in a row the owner sees the cause and gets one alert.
@@ -185,6 +194,10 @@ PLANNING_RULES = (
     "- Plan independent tasks together. Leave depends_on empty unless a task needs another task's output.",
     "- Add a dependency only when a task needs another task's output. Never chain tasks just to order them.",
     "- Prefer few, larger tasks over many small ones.",
+    # Owner 2026-11-26: 6 of 8 workers sat idle for hours behind one task.
+    "- Keep the whole team busy from the start: every worker you assign must have at least one task it can start "
+    "at once (empty depends_on). Instead of making a worker wait for another task, give it work that can be done "
+    "now against the agreed contract file, and leave later work for a later plan.",
     "- A one-line request gets 1 to 3 tasks at most.",
     "- If the goal is unclear, set \"ambiguous\": true and ask the owner your question in summary_ar.",
     "- Refuse goals about unauthorized scraping, surveillance or profiling of private people, or CAPTCHA / anti-bot bypass: return an empty tasks list and say why in summary_ar.",
@@ -222,6 +235,28 @@ _NEGATION = re.compile(
     re.I,
 )
 _NEGATION_WINDOW = 25
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[\s`*#>_-]+", "", text or "").lower()
+
+
+def _is_own_prompt(reply: str, prompt: str) -> bool:
+    """E58: the reply reader can land on our own message; that is never the manager's answer."""
+    core, sent = _squash(reply), _squash(prompt)
+    if not core:
+        return False
+    if core == sent or (len(core) >= 20 and core in sent):
+        return True
+    # Live 2026-11-26: the page drew the JSON retry with its code fence ("json", a copy button), so the text
+    # read back was 2 characters longer than the prompt; the same opening still marks it as our own message.
+    return len(sent) >= 40 and core[:40] == sent[:40]
+
+
+def _looks_cut(text: str) -> bool:
+    """E61: a JSON answer that is only a few words with no brace is a fragment the live page kept, not a reply."""
+    core = (text or "").strip()
+    return len(core) < 40 and "{" not in core
 
 
 def _negated(text: str, start: int, end: int) -> bool:
@@ -672,7 +707,8 @@ class ManagerArenaRuntime:
         project = await db.get(Project, project_id) if project_id else None
         if kind == "plan" and project is not None and project.status in {"completed", "disabled"}:
             await self._finish(db, job, status="failed", error=f"project is {project.status}")
-            message = await self._reply(db, job, f"المشروع «{project.name}» مكتمل، ولم يُرسل شيء إلى المدير. اختر مشروعًا نشطًا.",
+            state_ar = "مكتمل" if project.status == "completed" else "معطّل"
+            message = await self._reply(db, job, f"المشروع «{project.name}» {state_ar}، ولم يُرسل شيء إلى المدير. اختر مشروعًا نشطًا.",
                                         failed=True)
             assert message is not None
             return message
@@ -728,6 +764,8 @@ class ManagerArenaRuntime:
                 for job in waiting:
                     job.status = "queued"
                     job.error = None
+                    if (job.context or {}).get("human_check_waiting"):  # E57: a later check alerts again
+                        job.context = {k: v for k, v in job.context.items() if k != "human_check_waiting"}
                     released += 1
                 await db.commit()
         queued = (await db.execute(select(ManagerJob.id).where(ManagerJob.status == "queued"))).first() is not None
@@ -768,8 +806,37 @@ class ManagerArenaRuntime:
             await db.commit()
         return settled
 
+    async def _retry_unreadable_reviews(self, db: AsyncSession) -> int:
+        """A review blocked only because no valid verdict could be READ gets one new job after a pause.
+
+        Live 2026-11-26 (PR #6): the reader took our own JSON retry for the reply, so the review was blocked and
+        the owner was asked, although the manager never failed to judge the PR. Other reasons stay blocked."""
+        retried = 0
+        blocked = list((await db.execute(select(Task).where(
+            Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID, Task.status == "blocked"))).scalars())
+        for review in blocked:
+            if not (review.error_message or "").startswith("Manager review needs a human: invalid JSON"):
+                continue
+            jobs = list((await db.execute(select(ManagerJob).where(ManagerJob.review_task_id == review.id))).scalars())
+            if any((j.context or {}).get("unreadable_retry") for j in jobs) or any(
+                    j.status in {"queued", "running", "waiting_connection"} for j in jobs):
+                continue
+            last = max((j.finished_at or j.updated_at for j in jobs if (j.finished_at or j.updated_at)), default=None)
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if last is not None and _now() - last < timedelta(seconds=UNREADABLE_RETRY_WAIT_SECONDS):
+                continue
+            parent = await db.get(Task, review.parent_task_id) if review.parent_task_id else None
+            review.status, review.error_message = "in_progress", None
+            await self.enqueue(db, "review", project_id=review.project_id, review_task_id=review.id,
+                               context={"unreadable_retry": True, "pr_number": getattr(parent, "pr_number", None),
+                                        "parent_task_id": review.parent_task_id})
+            retried += 1
+        return retried
+
     async def _enqueue_reviews(self, db: AsyncSession) -> int:
         await self._settle_stale_reviews(db)
+        await self._retry_unreadable_reviews(db)
         reviews = list((await db.execute(select(Task).where(
             Task.task_type == "review", Task.assigned_agent_id == MANAGER_AGENT_ID, Task.status == "queued",
         ))).scalars())
@@ -796,12 +863,15 @@ class ManagerArenaRuntime:
         results: list[dict[str, Any]] = []
         async with self._in_flight_lock():
             while True:
+                if restart_pending():
+                    break  # a safe restart waits for the running job; no new one starts (restart_guard)
                 async with self.session_factory() as db:
-                    job = (await db.execute(
+                    job = next((j for j in (await db.execute(
                         select(ManagerJob).where(ManagerJob.status == "queued").order_by(ManagerJob.created_at.asc())
-                    )).scalars().first()
+                    )).scalars() if j.id not in CLAIMED_JOBS), None)
                     if job is None:
                         break
+                    CLAIMED_JOBS.add(job.id)  # no await since the check: a peer reviewer cannot take it in between
                     try:
                         results.append(await self._run_job(db, job))
                     except Exception as exc:  # noqa: BLE001 - one broken job must not stop the queue
@@ -815,6 +885,8 @@ class ManagerArenaRuntime:
                             await db.commit()
                             await self._reply(db, job, f"تعذّر تنفيذ طلب المدير ({type(exc).__name__}).", failed=True)
                         results.append({"job_id": getattr(job, "id", None), "status": "failed"})
+                    finally:
+                        CLAIMED_JOBS.discard(job.id)
         return results
 
     async def _set_manager_status(self, db: AsyncSession, status: str) -> None:
@@ -846,6 +918,19 @@ class ManagerArenaRuntime:
                               readiness=ready["code"])
             await self._notify_waiting(db, job, ready)
             return {"job_id": job.id, "status": job.status}
+        if job.attempts >= MAX_JOB_ATTEMPTS and not (job.context or {}).get("fresh_session_retry"):
+            # 2026-11-26: the manager page kept the text but never sent it ("Reconnect" shown, no send button);
+            # the review of PR #6 failed and its review task stayed open. A new chat fixed it, so do that once here.
+            session = await self._open_session(db)
+            if session is not None:
+                await close_session(db, session, phase="closed", reason="sending failed 3 times; starting a new chat")
+            job.context = {**(job.context or {}), "fresh_session_retry": True}
+            job.attempts = 0
+            job.status = "queued"
+            db.add(AuditLog(actor="self-heal", action="manager.fresh_session_retry", resource_type="manager_job",
+                            resource_id=job.id, details={"kind": job.kind, "error": (job.error or "")[:300]}))
+            await db.commit()
+            return {"job_id": job.id, "status": job.status, "fresh_session_retry": True}
         if job.attempts >= MAX_JOB_ATTEMPTS:
             await self._finish(db, job, status="failed",
                                error=f"stopped after {job.attempts} attempts to avoid an endless loop")
@@ -887,6 +972,10 @@ class ManagerArenaRuntime:
                 parsed, error = await self._parse(db, job, reply)
                 if parsed is None and await self._answer_empty_tasks(db, job, reply):
                     return {"job_id": job.id, "status": job.status, "empty_tasks": True}
+                if parsed is None and job.kind == "review" and (why := self._cannot_review(reply)):
+                    # E80: the reviewer said in JSON that it cannot review this PR; asking again only repeats it.
+                    await self._needs_human(db, job, f"the reviewer could not review the PR: {why}", raw=reply)
+                    return {"job_id": job.id, "status": job.status, "error": "cannot_review"}
                 if parsed is None:
                     job.json_retries += 1
                     await db.commit()
@@ -920,7 +1009,9 @@ class ManagerArenaRuntime:
                 await self._reply(db, job, reply or "(لم يرسل المدير أي رد)")
             return {"job_id": job.id, "status": job.status}
         except ManagerArenaError as exc:
-            if exc.code in {"stalled", "needs_human"}:
+            if exc.code == "page_human_check":
+                await self._wait_for_human_check(db, job, exc.message)
+            elif exc.code in {"stalled", "needs_human"}:
                 await self._needs_human(db, job, exc.message, raw=None)
             elif exc.code == "busy_timeout":
                 await self._requeue_waiting_for_manager(db, job)
@@ -931,7 +1022,7 @@ class ManagerArenaRuntime:
             if exc.code == "busy":
                 await self._requeue_waiting_for_manager(db, job)
             elif exc.code == "needs_human":
-                await self._needs_human(db, job, f"Arena page needs a human: {exc.message}", raw=None)
+                await self._wait_for_human_check(db, job, f"Arena page needs a human: {exc.message}")
             else:
                 await self._connection_error(db, job, exc.code, f"{exc.code}: {exc.message}")
             return {"job_id": job.id, "status": job.status, "error": exc.code}
@@ -961,6 +1052,26 @@ class ManagerArenaRuntime:
                                     message=f"{job.kind}: {error[:300]}", link="/browsers"))
         await db.commit()
         await self._reply(db, job, text, waiting=True, readiness=code, repeated_error=same)
+
+    async def _wait_for_human_check(self, db: AsyncSession, job: ManagerJob, reason: str) -> None:
+        """E57: a human check on the page is not a bad reply. The job waits and resumes by itself once the page is clear.
+
+        AATM never solves or bypasses the check; it only stops, tells the owner once, and carries on afterwards.
+        The job is marked interrupted, so a prompt that already reached Arena is read back instead of sent twice.
+        """
+        self._refund_attempt(job)
+        context = dict(job.context or {})
+        first = not context.get("human_check_waiting")
+        job.context = {**context, "interrupted": True, "human_check_waiting": True}
+        job.status = "waiting_connection"
+        job.error = reason[:500]
+        if first:
+            db.add(Notification(category="arena", severity="critical", title="صفحة المدير تعرض فحصًا بشريًا",
+                                message=f"{job.kind}: {reason[:300]}", link="/browsers"))
+        await db.commit()
+        if first:
+            await self._reply(db, job, HUMAN_CHECK_WAIT_AR, waiting=True, readiness="needs_human")
+        await event_bus.emit("manager.activity", _job_dict(job) or {})
 
     def _backoff_seconds(self, job: ManagerJob) -> float:
         """Pause before the next real attempt (E37); busy waits are free and never reach this."""
@@ -1111,7 +1222,7 @@ class ManagerArenaRuntime:
             current = str(state.get("agent_state") or ("offline" if not state.get("connected") else "")) or "offline"
             if state.get("status") == "needs_human" or current == "needs_human":
                 raise ManagerArenaError(
-                    "needs_human", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
+                    "page_human_check", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
             if current != "generating":  # only a generating page refuses a submit with "busy"
                 try:
                     await self.adapter.submit(session.profile_id, text, source="manager")
@@ -1163,6 +1274,8 @@ class ManagerArenaRuntime:
 
         started = time.monotonic()
         last_change = time.monotonic()
+        quiet_since: float | None = None
+        empty_noted = False
         last_seen = (str(before.get("agent_state") or ""), before_since)
         seen_busy = resume
         while True:
@@ -1179,7 +1292,8 @@ class ManagerArenaRuntime:
                     await db.commit()
             if state.get("status") == "needs_human" or current == "needs_human":
                 await self._session_needs_human(db, session, str(state.get("needs_human_reason") or "human check on the Arena page"))
-                raise ManagerArenaError("needs_human", f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
+                raise ManagerArenaError("page_human_check",
+                                        f"Arena page needs a human: {state.get('needs_human_reason') or ''}".strip())
             if current in BUSY_STATES:
                 seen_busy = True
             if current == "keep_working_visible":
@@ -1221,7 +1335,26 @@ class ManagerArenaRuntime:
                 await db.commit()
             elif current in QUIET_STATES and (seen_busy or (since and since != before_since)
                                               or time.monotonic() - started > self.start_grace_seconds):
-                break
+                # E58: a page that reconnects says "ready" for a moment while Arena is still writing. Quiet is
+                # only the end when there is a reply on the page that is not our own prompt; otherwise wait a bit.
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                if time.monotonic() - quiet_since >= self.poll_seconds * EMPTY_REPLY_POLLS:
+                    break
+                try:
+                    latest_quiet = str((await self.adapter.read_last_reply(session.profile_id)).get("text") or "")
+                except ArenaAgentError:
+                    latest_quiet = ""
+                if latest_quiet.strip() and not _is_own_prompt(latest_quiet, text):
+                    break
+                if not empty_noted:
+                    empty_noted = True
+                    append_event(session, "quiet_without_reply", f"{current}: waiting for the reply", job_id=job.id)
+                    await db.commit()
+                await asyncio.sleep(self.poll_seconds)
+                continue
+            else:
+                quiet_since = None
             if time.monotonic() - last_change > self.stall_minutes * 60:
                 reason = f"stalled: no Arena activity for {self.stall_minutes:g} minutes"
                 await self._session_needs_human(db, session, reason)
@@ -1231,13 +1364,53 @@ class ManagerArenaRuntime:
             await asyncio.sleep(self.poll_seconds)
 
         reply = await self.adapter.read_last_reply(session.profile_id)
-        text_out = redact_secrets(str(reply.get("text") or ""))[:MAX_RAW_REPLY_CHARS]
+        if expects_json and _looks_cut(str(reply.get("text") or "")):
+            reply = await self._reread_after_reload(db, session, job, reply)
+        if _is_own_prompt(str(reply.get("text") or ""), text):
+            # Our own message is never the answer (its JSON template once became an invalid verdict): load the
+            # chat again and read once more; if it is still our message, there is no answer to parse.
+            append_event(session, "own_prompt_read_back", f"{len(str(reply.get('text') or ''))} chars", job_id=job.id)
+            reply = await self._reread_after_reload(db, session, job, reply, take_any=True)
+            if _is_own_prompt(str(reply.get("text") or ""), text):
+                reply = {**reply, "text": ""}
+        text_out = redact_secrets(str(reply.get("text") or ""))[:MAX_REPLY_PARSE_CHARS]  # E63: parse it all
         session.phase = "manager_ready"
         session.last_state_change_at = _now()
         append_event(session, "reply", f"{len(text_out)} chars", job_id=job.id)
         await db.commit()
         await self._stream(job, text_out)
         return text_out
+
+    async def _reread_after_reload(self, db: AsyncSession, session: ArenaSession, job: ManagerJob,
+                                   reply: dict[str, Any], *, take_any: bool = False) -> dict[str, Any]:
+        """E61: after a long agent run the live page can keep only a fragment ("Let") of the answer.
+
+        Loading the same chat again draws the whole transcript; the reply is then read once more.
+        """
+        from app.providers.adapters.arena_agent import ArenaAgentError
+
+        try:
+            page = (await self.adapter.selector_test(session.profile_id)).get("page") or {}
+            origin, path = str(page.get("origin") or ""), str(page.get("path") or "")
+            if not origin or not path.startswith("/agent/"):
+                return reply  # not a saved chat: reloading would open a new, empty one
+            append_event(session, "reply_cut_reload", f"{len(str(reply.get('text') or ''))} chars", job_id=job.id)
+            await db.commit()
+            before = (await self.adapter.state(session.profile_id)).get("connections_total")
+            await self.adapter.open_chat(session.profile_id, origin + path)
+            if isinstance(before, int):
+                await self.adapter._wait_for_new_page(session.profile_id, before)
+            await self.adapter.wait_for_state(session.profile_id, {"ready", "idle"}, timeout=90.0)
+            again = await self.adapter.read_last_reply(session.profile_id)
+        except ArenaAgentError as exc:
+            append_event(session, "reply_cut_reload_failed", f"{exc.code}: {exc.message}", job_id=job.id)
+            await db.commit()
+            return reply
+        if take_any and str(again.get("text") or "").strip():
+            return again  # the first read was our own message: any text read after the reload replaces it
+        if len(str(again.get("text") or "")) > len(str(reply.get("text") or "")):
+            return again
+        return reply
 
     async def _session_needs_human(self, db: AsyncSession, session: ArenaSession, reason: str) -> None:
         session.phase = "needs_human"
@@ -1331,7 +1504,14 @@ class ManagerArenaRuntime:
         await self._reply(db, job, summary.strip(), clarification=ambiguous, empty_tasks=True)
         return True
 
+    def _cannot_review(self, reply: str) -> str | None:
+        """The manager always gets its JSON retry; a peer reviewer overrides this (E80)."""
+        return None
+
     async def _parse(self, db: AsyncSession, job: ManagerJob, reply: str) -> tuple[dict[str, Any] | None, str]:
+        if is_prompt_echo(reply, job.kind):
+            # E66: the page gave back AATM's own prompt; its example JSON must never become a plan.
+            return None, "The text read back is the prompt, not the manager's answer."
         data = extract_manager_json(reply)
         if job.kind == "plan":
             known = {m["id"] for m in await self._team(db, job.project_id)}

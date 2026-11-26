@@ -1,24 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  Bell,
-  Bot,
-  Brain,
-  CheckSquare,
-  Cpu,
-  FolderCode,
-  FolderGit2,
-  Languages,
-  LayoutDashboard,
-  ListTodo,
-  LogIn,
-  LogOut,
-  MessageSquare,
-  Monitor,
-  OctagonAlert,
-  ShieldCheck,
-  SunMoon,
-} from 'lucide-react'
-import { Badge, Button, Input } from './components/ui'
+import { LogIn, LogOut, Zap } from 'lucide-react'
+import { Button, Input } from './components/ui'
 import { createPortal } from 'react-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { I18nProvider, useI18n } from './i18n/I18nContext'
@@ -26,7 +8,7 @@ import type { Language } from './i18n/types'
 import { apiFetch, getToken } from './lib/api'
 import { AgentsView, DashboardView, ManagerChatView, TasksView } from './views/CoreViews'
 import { ArenaAgentDashboard, ArenaConnectorPanel } from './views/ArenaViews'
-import { LIVE_EVENT, MissionControl, NeedsYouBadge, PullRequestsView } from './views/DashboardViews'
+import { LIVE_EVENT, MissionControl, PullRequestsView } from './views/DashboardViews'
 import {
   AgentMessagingPanel,
   ArenaAccountsSessionsPanel,
@@ -41,27 +23,47 @@ import {
 import { ApprovalsAuditView, QAView, SettingsNotificationsView } from './views/GovernanceViews'
 import { BrowserWallView, GitWorkflowsView, ProjectsMemoryView, ProvidersView } from './views/InfraViews'
 import CommandBridge from './bridge/Bridge'
+import { fill, NexusProvider, PageHeader, SubTabs, useConfirm, useToast } from './components/nexus'
+import { LanguageSwitch, MobileNav, NexusHeader, NexusSidebar, SECTION_ICONS, useBackendHealth } from './shell/NexusShell'
+import { DEFAULT_ROUTE, legacyRoute, parseHash, type Route, routeHash, SECTION_SUBS, type SectionId } from './shell/sections'
+import { CommandCenter } from './views/nexus/CommandCenter'
+import { WorkforceView } from './views/nexus/Workforce'
+import { TaskBoard } from './views/nexus/TaskBoard'
+import { OrgMap } from './views/nexus/OrgMap'
+import { IntegrationsCenter } from './views/nexus/Integrations'
+import { AnalyticsView } from './views/nexus/Analytics'
+import { AdminSettings, SecurityOverview, SystemLogs, UsersPermissions } from './views/nexus/Admin'
+import { ExecutivePlans } from './views/nexus/ExecutivePlans'
 
-type NavTab =
-  | 'bridge'
-  | 'dashboard'
-  | 'chat'
-  | 'agents'
-  | 'tasks'
-  | 'workspaces'
-  | 'browsers'
-  | 'providers'
-  | 'projects'
-  | 'git'
-  | 'qa'
-  | 'approvals'
-  | 'settings'
+function readRoute(): Route {
+  try { return window.location.hash ? parseHash(window.location.hash) : DEFAULT_ROUTE } catch { return DEFAULT_ROUTE }
+}
 
 function AATMWorkspace() {
   const { t, language, setLanguage, formatNumber } = useI18n()
   const { user, loading, login, logout, changePassword, syncPreferences } = useAuth()
 
-  const [tab, setTab] = useState<NavTab>('bridge')
+  const [route, setRoute] = useState<Route>(readRoute)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [openAgentId, setOpenAgentId] = useState<string | null>(null)
+  const [openTaskId, setOpenTaskId] = useState<string | null>(null)
+  const confirm = useConfirm()
+  const toast = useToast()
+  const health = useBackendHealth()
+  const navigate = useCallback((next: Route) => {
+    setRoute(next)
+    try {
+      if (window.location.hash !== routeHash(next)) window.history.pushState(null, '', routeHash(next))
+    } catch { /* sandboxed frames may refuse history changes */ }
+    window.scrollTo?.({ top: 0 })
+  }, [])
+  const navigateLegacy = useCallback((tab: string) => navigate(legacyRoute(tab || 'dashboard')), [navigate])
+  useEffect(() => {
+    const onHash = () => setRoute(readRoute())
+    window.addEventListener('hashchange', onHash)
+    window.addEventListener('popstate', onHash)
+    return () => { window.removeEventListener('hashchange', onHash); window.removeEventListener('popstate', onHash) }
+  }, [])
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('aatm_theme') === 'light' ? 'light' : 'dark'))
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
 
@@ -115,72 +117,54 @@ function AATMWorkspace() {
     // others. Per-dataset errors are tracked so each page can render a clear
     // Arabic error state instead of a silent loading placeholder.
     const nextErrors: Record<string, string | null> = {}
-    const track = async <T,>(key: string, run: () => Promise<T>, fallback: T): Promise<T> => {
+    // Each dataset is shown as soon as its own request answers: a slow endpoint (for example
+    // /qa/summary, which runs checks) must not keep every other screen empty.
+    const track = async <T,>(key: string, run: () => Promise<T>, fallback: T, apply: (value: T) => void) => {
+      let value = fallback
       try {
-        const value = await run()
+        value = await run()
         nextErrors[key] = null
-        return value
       } catch (err: any) {
         nextErrors[key] = err?.message || t.common.loadFailed
-        return fallback
+      }
+      apply(value)
+    }
+    const applyProjects = (pr: any[]) => {
+      setProjects(pr)
+      if (pr.length > 0) {
+        // A completed or disabled project refuses new requests, so the default is the first active one.
+        const usable = pr.filter((p: any) => (p.status ?? 'active') === 'active')
+        const stillThere = activeProjectId ? pr.some((p: any) => p.id === activeProjectId) : false
+        if (!stillThere || !projectPickedByUser.current) setActiveProjectId((usable[0] ?? pr[0]).id)
       }
     }
 
-    const [ov, ag, tpl, tk, am, pr, ch, br, bc, be, us, pv, pu, ac, ss, dv, gt, qa, sp, ap, au, nf, mm] = await Promise.all([
-      track('overview', () => apiFetch<any>('/dashboard/overview'), null),
-      track('agents', () => apiFetch<any[]>('/agents'), []),
-      track('templates', () => apiFetch<any[]>('/employees/templates'), []),
-      track('tasks', () => apiFetch<any[]>('/tasks'), []),
-      track('messages', () => apiFetch<any[]>('/messages'), []),
-      track('projects', () => apiFetch<any[]>('/projects'), []),
-      track('chat', () => apiFetch<any[]>('/chat'), []),
-      track('browsers', () => apiFetch<any[]>('/browsers'), []),
-      track('browserCaps', () => apiFetch<any>('/browsers/capabilities'), null),
-      track('browserEngines', () => apiFetch<any[]>('/browsers/engines'), []),
-      track('userscripts', () => apiFetch<any[]>('/userscripts'), []),
-      track('providers', () => apiFetch<any[]>('/providers'), []),
-      track('providerUsage', () => apiFetch<any>('/providers/usage'), null),
-      track('accounts', () => apiFetch<any[]>('/accounts'), []),
-      track('sessions', () => apiFetch<any[]>('/sessions'), []),
-      track('devices', () => apiFetch<any[]>('/devices'), []),
-      track('git', () => apiFetch<any>('/git/status'), null),
-      track('qa', () => apiFetch<any>('/qa/summary'), null),
-      track('securityPosture', () => apiFetch<any>('/governance/security-posture'), null),
-      track('approvals', () => apiFetch<any[]>('/approvals'), []),
-      track('audit', () => apiFetch<any[]>('/audit'), []),
-      track('notifications', () => apiFetch<any[]>('/notifications'), []),
-      track('memory', () => apiFetch<any[]>(`/memory?q=${encodeURIComponent(memQuery)}`), []),
+    await Promise.all([
+      track('overview', () => apiFetch<any>('/dashboard/overview'), null, setOverview),
+      track('agents', () => apiFetch<any[]>('/agents'), [], setAgents),
+      track('templates', () => apiFetch<any[]>('/employees/templates'), [], setTemplates),
+      track('tasks', () => apiFetch<any[]>('/tasks'), [], setTasks),
+      track('messages', () => apiFetch<any[]>('/messages'), [], setAgentMessages),
+      track('projects', () => apiFetch<any[]>('/projects'), [], applyProjects),
+      track('chat', () => apiFetch<any[]>('/chat'), [], setChatMessages),
+      track('browsers', () => apiFetch<any[]>('/browsers'), [], setBrowsers),
+      track('browserCaps', () => apiFetch<any>('/browsers/capabilities'), null, setBrowserCaps),
+      track('browserEngines', () => apiFetch<any[]>('/browsers/engines'), [], setBrowserEngines),
+      track('userscripts', () => apiFetch<any[]>('/userscripts'), [], setUserscripts),
+      track('providers', () => apiFetch<any[]>('/providers'), [], setProviders),
+      track('providerUsage', () => apiFetch<any>('/providers/usage'), null, setProviderUsage),
+      track('accounts', () => apiFetch<any[]>('/accounts'), [], setAccounts),
+      track('sessions', () => apiFetch<any[]>('/sessions'), [], setSessions),
+      track('devices', () => apiFetch<any[]>('/devices'), [], setDevices),
+      track('git', () => apiFetch<any>('/git/status'), null, setGitData),
+      track('qa', () => apiFetch<any>('/qa/summary'), null, setQaData),
+      track('securityPosture', () => apiFetch<any>('/governance/security-posture'), null, setSecurityPosture),
+      track('approvals', () => apiFetch<any[]>('/approvals'), [], setApprovals),
+      track('audit', () => apiFetch<any[]>('/audit'), [], setAuditLogs),
+      track('notifications', () => apiFetch<any[]>('/notifications'), [], setNotifications),
+      track('memory', () => apiFetch<any[]>(`/memory?q=${encodeURIComponent(memQuery)}`), [], setMemories),
     ])
     setErrors(nextErrors)
-    setOverview(ov)
-    setAgents(ag)
-    setTemplates(tpl)
-    setTasks(tk)
-    setAgentMessages(am)
-    setProjects(pr)
-    if (pr.length > 0) {
-      // A completed or disabled project refuses new requests, so the default is the first active one.
-      const usable = pr.filter((p: any) => (p.status ?? 'active') === 'active')
-      const stillThere = activeProjectId ? pr.some((p: any) => p.id === activeProjectId) : false
-      if (!stillThere || !projectPickedByUser.current) setActiveProjectId((usable[0] ?? pr[0]).id)
-    }
-    setChatMessages(ch)
-    setBrowsers(br)
-    setBrowserCaps(bc)
-    setBrowserEngines(be)
-    setUserscripts(us)
-    setProviders(pv)
-    setProviderUsage(pu)
-    setAccounts(ac)
-    setSessions(ss)
-    setDevices(dv)
-    setGitData(gt)
-    setQaData(qa)
-    setSecurityPosture(sp)
-    setApprovals(ap)
-    setAuditLogs(au)
-    setNotifications(nf)
-    setMemories(mm)
     const failed = Object.entries(nextErrors).filter(([, v]) => v).map(([k]) => k)
     setErrorBanner(failed.length ? t.common.loadFailed : null)
   }, [activeProjectId, t.common.loadFailed])
@@ -298,14 +282,18 @@ function AATMWorkspace() {
   const anyEmergencyStopped = agents.some((a) => a.is_emergency_stopped)
 
   const toggleEmergencyStop = async () => {
+    const n = t.nexus.shell
+    if (!anyEmergencyStopped && !(await confirm({ message: n.emergencyConfirm, confirmLabel: n.emergencyStop, danger: true }))) return
     try {
       if (anyEmergencyStopped) {
         await apiFetch('/emergency-stop/clear', { method: 'POST' })
+        toast.push('success', n.resumeDone)
       } else {
         await apiFetch('/emergency-stop', {
           method: 'POST',
           body: JSON.stringify({ scope: 'global', reason: t.common.emergencyStopReason }),
         })
+        toast.push('warning', n.emergencyDone)
       }
       loadAll()
     } catch (err: any) {
@@ -313,26 +301,23 @@ function AATMWorkspace() {
     }
   }
 
-  const navItems: Array<{ id: NavTab; label: string; icon: React.ReactNode }> = [
-    { id: 'dashboard', label: t.nav.dashboard, icon: <LayoutDashboard className="h-4 w-4" /> },
-    { id: 'chat', label: t.nav.chat, icon: <MessageSquare className="h-4 w-4" /> },
-    { id: 'agents', label: t.nav.agents, icon: <Bot className="h-4 w-4" /> },
-    { id: 'tasks', label: t.nav.tasks, icon: <ListTodo className="h-4 w-4" /> },
-    { id: 'workspaces', label: t.nav.workspaces, icon: <FolderCode className="h-4 w-4" /> },
-    { id: 'browsers', label: t.nav.browsers, icon: <Monitor className="h-4 w-4" /> },
-    { id: 'providers', label: t.nav.providers, icon: <Cpu className="h-4 w-4" /> },
-    { id: 'projects', label: t.nav.projects, icon: <Brain className="h-4 w-4" /> },
-    { id: 'git', label: t.nav.git, icon: <FolderGit2 className="h-4 w-4" /> },
-    { id: 'qa', label: t.nav.qa, icon: <ShieldCheck className="h-4 w-4" /> },
-    { id: 'approvals', label: t.nav.approvals, icon: <CheckSquare className="h-4 w-4" /> },
-    { id: 'settings', label: t.nav.settings, icon: <Bell className="h-4 w-4" /> },
-  ]
-
   const unreadNotifs = notifications.filter((n) => !n.is_read).length
+  const pendingApprovals = approvals.filter((a) => String(a.status).toLowerCase() === 'pending').length
+  const failedTasks = tasks.filter((x) => ['failed', 'blocked'].includes(String(x.status))).length
+  const badges: Partial<Record<SectionId, number>> = { executive: pendingApprovals, projects: failedTasks, admin: unreadNotifs }
+
+  const openAgent = (id: string | null) => {
+    setOpenAgentId(id)
+    if (id && route.section !== 'workforce') navigate({ section: 'workforce', sub: 'agents' })
+  }
+  const openTask = (id: string | null) => {
+    setOpenTaskId(id)
+    if (id && !(route.section === 'projects' && route.sub === 'tasks')) navigate({ section: 'projects', sub: 'tasks' })
+  }
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-300">
+      <div className="flex min-h-screen items-center justify-center bg-nexus-bg text-nexus-muted" role="status">
         {t.common.loading}
       </div>
     )
@@ -340,38 +325,28 @@ function AATMWorkspace() {
 
   if (!user) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-950 p-4 text-slate-100">
-        <div className="mb-6 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-600 font-bold text-white">AA</div>
+      <div className="flex min-h-screen flex-col items-center justify-center bg-nexus-bg bg-[radial-gradient(ellipse_at_top,rgb(var(--nx-cyan)/0.12),transparent_60%)] p-4 text-nexus-text">
+        <div className="mb-8 flex flex-col items-center gap-3 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-nexus-cyan to-nexus-violet text-nexus-on-accent shadow-glow">
+            <Zap className="h-7 w-7" aria-hidden />
+          </div>
           <div>
-            <div className="text-lg font-bold tracking-tight text-white">{t.appName}</div>
-            <div className="text-xs text-slate-400">{t.appSubtitle}</div>
+            <div className="font-display text-lg font-bold tracking-[0.22em] text-nexus-text">{t.nexus.brand}</div>
+            <div className="mt-1 text-xs text-nexus-muted">{t.nexus.tagline}</div>
+            <div className="mt-1 text-[11px] text-nexus-dim"><span className="font-semibold text-nexus-cyan">{t.appName}</span> · <span>{t.appSubtitle}</span></div>
           </div>
         </div>
 
-        <form onSubmit={handleSignIn} className="w-full max-w-sm space-y-4 rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
-          <div className="flex items-center justify-between">
-            <h1 className="text-lg font-semibold text-white">{t.auth.signIn}</h1>
-            <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-              {(['en', 'ar', 'fa'] as const).map((code) => (
-                <button
-                  key={code}
-                  type="button"
-                  onClick={() => handleLanguageChange(code)}
-                  className={`rounded px-2 py-0.5 text-xs font-medium ${
-                    language === code ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {code.toUpperCase()}
-                </button>
-              ))}
-            </div>
+        <form onSubmit={handleSignIn} className="w-full max-w-sm space-y-4 rounded-2xl border border-nexus-border bg-nexus-surface/90 p-6 shadow-card backdrop-blur">
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-lg font-semibold text-nexus-text">{t.auth.signIn}</h1>
+            <LanguageSwitch language={language} onChange={handleLanguageChange} />
           </div>
 
           <p className="text-xs text-slate-400">{t.auth.authRequiredHint}</p>
 
           {authError && (
-            <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+            <div role="alert" className="rounded-lg border border-nexus-error/40 bg-nexus-error/10 px-3 py-2 text-xs text-nexus-error">
               {authError}
             </div>
           )}
@@ -408,7 +383,7 @@ function AATMWorkspace() {
       <div className="flex min-h-screen flex-col items-center justify-center bg-slate-950 p-4 text-slate-100">
         <form
           onSubmit={handleForcedPasswordChange}
-          className="w-full max-w-md space-y-4 rounded-xl border border-amber-500/40 bg-slate-900 p-6 shadow-xl"
+          className="w-full max-w-md space-y-4 rounded-2xl border border-nexus-warning/40 bg-nexus-surface p-6 shadow-card"
         >
           <div className="flex items-center justify-between">
             <h1 className="text-lg font-semibold text-white">{t.auth.changePasswordTitle}</h1>
@@ -420,7 +395,7 @@ function AATMWorkspace() {
           <p className="text-xs text-slate-300">{t.auth.changePasswordSubtitle}</p>
 
           {authError && (
-            <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+            <div role="alert" className="rounded-lg border border-nexus-error/40 bg-nexus-error/10 px-3 py-2 text-xs text-nexus-error">
               {authError}
             </div>
           )}
@@ -460,229 +435,204 @@ function AATMWorkspace() {
     )
   }
 
+  const subs = SECTION_SUBS[route.section] as string[]
+  const SectionIcon = SECTION_ICONS[route.section]
+  const sub = route.sub
+  const subLabel = (t.nexus.sub as Record<string, string>)[sub] ?? sub
+  const legacyHeader = <PageHeader title={subLabel} subtitle={t.nexus.navHint[route.section]} />
+  const reload = () => loadAll()
+
   return (
-    <div className="flex min-h-screen bg-slate-950 text-slate-100">
-      <aside className="hidden w-64 shrink-0 flex-col border-e border-slate-800 bg-slate-900/80 p-4 md:flex md:sticky md:top-0 md:h-screen">
-        <div className="mb-6 flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-600 font-bold text-white">AA</div>
-          <div>
-            <div className="text-base font-bold tracking-tight text-white">{t.appName}</div>
-            <div className="text-[11px] text-slate-400">{t.appSubtitle}</div>
-          </div>
-        </div>
+    <div className="flex min-h-screen bg-nexus-bg text-nexus-text">
+      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-[100] focus:rounded-lg focus:bg-nexus-cyan focus:px-3 focus:py-2 focus:text-nexus-on-accent">
+        {t.nexus.shell.skipToContent}
+      </a>
+      <NexusSidebar route={route} onNavigate={navigate} badges={badges} user={user} onLogout={logout} />
+      <MobileNav open={mobileNavOpen} onClose={() => setMobileNavOpen(false)} route={route} onNavigate={navigate} badges={badges} />
 
-        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto pe-1">
-          <button
-            onClick={() => setTab('bridge')}
-            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-              tab === 'bridge'
-                ? 'bg-cyan-500/20 font-medium text-cyan-300'
-                : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-            }`}
-            data-testid="nav-bridge"
-          >
-            <span className="flex items-center gap-2.5">
-              <Cpu className="h-4 w-4" />
-              {t.bridge.title}
-            </span>
-          </button>
-          <div className="mt-3 mb-1 flex items-center justify-between px-3 text-[11px] uppercase tracking-wider text-slate-500">
-            <span>{t.bridge.advanced}</span>
-            <span className="normal-case tracking-normal text-slate-600">{t.bridge.advancedHint}</span>
-          </div>
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setTab(item.id)}
-              className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-start text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-                tab === item.id
-                  ? 'bg-sky-600/20 font-medium text-sky-400'
-                  : 'text-slate-300 hover:bg-slate-800/60 hover:text-white'
-              }`}
-            >
-              <span className="flex items-center gap-2.5">
-                {item.icon}
-                {item.label}
-              </span>
-              {item.id === 'settings' && unreadNotifs > 0 && <Badge variant="info">{unreadNotifs}</Badge>}
-            </button>
-          ))}
-        </nav>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <NexusHeader
+          route={route}
+          onNavigate={navigate}
+          onOpenMenu={() => setMobileNavOpen(true)}
+          agents={agents}
+          tasks={tasks}
+          projects={projects}
+          notifications={notifications}
+          activeProject={activeProject}
+          wsStatus={wsStatus}
+          health={health.state}
+          user={user}
+          theme={theme}
+          language={language}
+          emergencyStopped={anyEmergencyStopped}
+          onToggleEmergency={toggleEmergencyStop}
+          onToggleTheme={() => handleThemeToggle(theme === 'dark' ? 'light' : 'dark')}
+          onLanguage={handleLanguageChange}
+          onLogout={logout}
+          onReload={reload}
+          onOpenAgent={(id) => setOpenAgentId(id)}
+          onOpenTask={(id) => setOpenTaskId(id)}
+        />
 
-        <div className="mt-4 border-t border-slate-800 pt-3 text-xs">
-          <div className="space-y-2">
-            <div className="truncate text-slate-400">
-              {t.auth.signedInAs}: <span className="text-slate-200">{user.email}</span>
-            </div>
-            <Button size="sm" variant="secondary" className="w-full" onClick={logout}>
-              <LogOut className="h-3.5 w-3.5" />
-              {t.auth.signOut}
-            </Button>
-          </div>
-        </div>
-      </aside>
-
-      <div className="flex flex-1 flex-col">
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/50 px-5 py-3">
-          <div className="flex w-full items-center gap-1.5 overflow-x-auto pb-1 md:hidden" aria-label="Mobile navigation">
-            <Button size="sm" className="shrink-0" variant={tab === 'bridge' ? 'primary' : 'secondary'} onClick={() => setTab('bridge')}>
-              {t.bridge.title}
-            </Button>
-            {navItems.map((item) => (
-              <Button
-                key={item.id}
-                size="sm"
-                className="shrink-0"
-                variant={tab === item.id ? 'primary' : 'secondary'}
-                onClick={() => setTab(item.id)}
-              >
-                {item.label}
-              </Button>
-            ))}
-          </div>
-
-          <div className="hidden items-center gap-2 text-xs text-slate-400 md:flex">
-            <Badge variant={wsStatus === 'live' ? 'success' : wsStatus === 'connecting' ? 'warning' : 'neutral'}>
-              {wsStatus === 'live' ? t.common.liveConnected : wsStatus === 'connecting' ? t.common.liveConnecting : t.common.liveOffline}
-            </Badge>
-            <Badge variant="success">
-              {formatNumber(agents.length)} {t.common.employees}
-            </Badge>
-            <Badge variant="info">
-              {formatNumber(devices.length)} {t.common.deviceNodes}
-            </Badge>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {activeProject && <span data-testid="active-project-banner" className="max-w-[14rem] truncate rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 text-xs text-indigo-100"
-              title={activeProject.name}>{t.common.activeProject}: {activeProject.name}</span>}
-            <NeedsYouBadge onOpen={() => setTab('dashboard')} />
-            <Button size="sm" variant={anyEmergencyStopped ? 'secondary' : 'danger'} onClick={toggleEmergencyStop}>
-              <OctagonAlert className="h-4 w-4" />
-              {anyEmergencyStopped ? t.common.resumeSystem : t.common.emergencyStop}
-            </Button>
-
-            <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-              <Languages className="mx-1 h-3.5 w-3.5 text-slate-400" />
-              {(['en', 'ar', 'fa'] as const).map((code) => (
-                <button
-                  key={code}
-                  onClick={() => handleLanguageChange(code)}
-                  className={`rounded px-2 py-0.5 text-xs font-medium ${
-                    language === code ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {code.toUpperCase()}
-                </button>
-              ))}
-            </div>
-
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => handleThemeToggle(theme === 'dark' ? 'light' : 'dark')}
-              aria-label={t.settings.theme}
-            >
-              <SunMoon className="h-4 w-4" />
-            </Button>
-          </div>
-        </header>
-
-        {tab === 'bridge' &&
+        {route.section === 'command' && sub === 'bridge' &&
           createPortal(
             <div className="bridge-shell" data-testid="bridge-overlay">
-              <CommandBridge wsStatus={wsStatus} onOpenAdvanced={(next) => setTab((next as NavTab) || 'dashboard')} />
+              <CommandBridge wsStatus={wsStatus} onOpenAdvanced={(next) => navigateLegacy(next ? String(next) : 'dashboard')} />
+              <button type="button" onClick={() => navigate({ section: 'command', sub: 'overview' })} data-testid="bridge-exit"
+                className="fixed bottom-4 start-4 z-[2147483000] inline-flex items-center gap-2 rounded-lg border border-nexus-cyan/50 bg-nexus-surface/90 px-3 py-2 text-xs font-medium text-nexus-text shadow-glow backdrop-blur hover:bg-nexus-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nexus-cyan">
+                <Zap className="h-3.5 w-3.5 text-nexus-cyan" />{t.nexus.cc.exitBridge}
+              </button>
             </div>,
             document.body,
           )}
 
-        <main className="flex-1 space-y-6 p-5">
+        <main id="main" className="min-w-0 flex-1 space-y-5 p-4 md:p-6" data-testid="nexus-main" data-section={route.section} data-sub={sub}>
+          <div className="space-y-3">
+            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-nexus-dim">
+              <SectionIcon className="h-3.5 w-3.5 text-nexus-cyan" />{t.nexus.nav[route.section]}
+            </p>
+            <SubTabs
+              label={t.nexus.nav[route.section]}
+              active={sub}
+              onChange={(next) => navigate({ section: route.section, sub: next })}
+              tabs={subs.map((id) => ({
+                id,
+                label: (t.nexus.sub as Record<string, string>)[id] ?? id,
+                badge: id === 'approvals' ? pendingApprovals : undefined,
+              }))}
+            />
+          </div>
+
           {errorBanner && (
-            <div className="rounded-lg border border-rose-500/40 bg-rose-950/40 px-4 py-2 text-sm text-rose-200">
+            <div role="alert" className="rounded-lg border border-nexus-error/40 bg-nexus-error/10 px-4 py-2 text-sm text-nexus-error">
               {errorBanner}
             </div>
           )}
 
-          {tab === 'dashboard' && <MissionControl projectId={activeProjectId} onNavigate={(next) => setTab(next as NavTab)} />}
-          {tab === 'dashboard' && (
-            <DashboardView
-              overview={overview}
-              error={errors.overview}
-              onRefresh={() => loadAll()}
-              onRunCycle={() => apiFetch('/orchestration/cycle', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
-              onSelfHeal={() => apiFetch('/qa/self-heal', { method: 'POST' }).then(() => loadAll()).catch((e) => setErrorBanner(e.message))}
-              onOpenProvidersWizard={() => setTab('providers')}
-            />
-          )}
-          {tab === 'chat' && (
-            <ManagerChatView messages={chatMessages} projectId={activeProjectId} projects={projects} onSelectProject={selectProject} error={errors.chat} onReload={() => loadAll()} onChatCleared={() => setChatMessages([])} />
-          )}
-          {tab === 'agents' && (
-            <div className="space-y-6">
-              <TeamScalingPanel onReload={() => loadAll()} />
-              <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={() => loadAll()} />
-              <AgentsView agents={agents} providers={providers} error={errors.agents} onReload={() => loadAll()} />
-            </div>
-          )}
-          {tab === 'tasks' && (
-            <div className="space-y-6">
-              <AgentMessagingPanel agents={agents} messages={agentMessages} projectId={activeProjectId} onReload={() => loadAll()} />
-              <TasksView tasks={tasks} projectId={activeProjectId} error={errors.tasks} onReload={() => loadAll()} />
-            </div>
-          )}
-          {tab === 'workspaces' && <WorkspacesView agents={agents} />}
-          {tab === 'browsers' && (
-            <div className="space-y-6">
-              <ArenaAgentDashboard />
-              <ArenaConnectorPanel />
-              <UserscriptsEnginesPanel engines={browserEngines} userscripts={userscripts} onReload={() => loadAll()} />
-              <BrowserWallView browsers={browsers} capabilities={browserCaps} error={errors.browsers} onReload={() => loadAll()} />
-            </div>
-          )}
-          {tab === 'providers' && (
-            <div className="space-y-6">
-              <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} error={errors.providers} onReload={() => loadAll()} />
-              <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={() => loadAll()} />
-            </div>
-          )}
-          {tab === 'projects' && (
-            <div className="space-y-6">
-              <SDLCIdeaExecutorPanel onReload={() => loadAll()} />
-              <ProjectsMemoryView
-                projects={projects}
-                memories={memories}
-                activeProjectId={activeProjectId}
-                onSelectProject={selectProject}
-                onReload={(q) => loadAll(q)}
-              />
-            </div>
-          )}
-          {tab === 'git' && (
-            <div className="space-y-6">
-              <PullRequestsView projectId={activeProjectId} />
-              <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} error={errors.git} onReload={() => loadAll()} />
-            </div>
-          )}
-          {tab === 'qa' && (
-            <div className="space-y-6">
-              <QAView qaData={qaData} securityPosture={securityPosture} error={errors.qa} onReload={() => loadAll()} />
-              <MultiDeviceNodesPanel devices={devices} onReload={() => loadAll()} />
-              <PromptInjectionGuardPanel />
-            </div>
-          )}
-          {tab === 'approvals' && (
-            <ApprovalsAuditView approvals={approvals} auditLogs={auditLogs} error={errors.approvals} onReload={() => loadAll()} />
-          )}
-          {tab === 'settings' && (
-            <SettingsNotificationsView
-              notifications={notifications}
-              theme={theme}
-              error={errors.notifications}
-              onToggleTheme={handleThemeToggle}
-              onChangeLanguage={handleLanguageChange}
-              onReload={() => loadAll()}
-            />
-          )}
+          <div className="animate-nx-fade-in space-y-6" key={`${route.section}/${sub}`}>
+            {route.section === 'command' && (sub === 'overview' || sub === 'bridge') && (
+              <CommandCenter overview={overview} agents={agents} tasks={tasks} projects={projects} approvals={approvals}
+                devices={devices} resources={qaData?.resources} health={health} onNavigate={navigate} />
+            )}
+            {route.section === 'command' && sub === 'mission' && (
+              <>
+                {legacyHeader}
+                <MissionControl projectId={activeProjectId} onNavigate={navigateLegacy} />
+                <DashboardView
+                  overview={overview}
+                  error={errors.overview}
+                  onRefresh={reload}
+                  onRunCycle={() => apiFetch('/orchestration/cycle', { method: 'POST' }).then(reload).catch((e) => setErrorBanner(e.message))}
+                  onSelfHeal={() => apiFetch('/qa/self-heal', { method: 'POST' }).then(reload).catch((e) => setErrorBanner(e.message))}
+                  onOpenProvidersWizard={() => navigate({ section: 'integrations', sub: 'providers' })}
+                />
+              </>
+            )}
+
+            {route.section === 'executive' && (
+              <>
+                <PageHeader title={t.nexus.executive.title} subtitle={t.nexus.executive.subtitle} />
+                {sub === 'chat' && (
+                  <ManagerChatView messages={chatMessages} projectId={activeProjectId} projects={projects} onSelectProject={selectProject}
+                    error={errors.chat} onReload={reload} onChatCleared={() => setChatMessages([])} />
+                )}
+                {sub === 'plans' && <ExecutivePlans tasks={tasks} agents={agents} projects={projects} onNavigate={navigate} onOpenTask={openTask} />}
+                {sub === 'approvals' && <ApprovalsAuditView approvals={approvals} auditLogs={auditLogs} error={errors.approvals} onReload={reload} />}
+              </>
+            )}
+
+            {route.section === 'workforce' && sub === 'agents' && (
+              <WorkforceView agents={agents} tasks={tasks} projects={projects} templates={templates} onReload={reload}
+                openAgentId={openAgentId} onOpenAgent={setOpenAgentId} />
+            )}
+            {route.section === 'workforce' && sub === 'team' && (
+              <>
+                {legacyHeader}
+                <TeamScalingPanel onReload={reload} />
+                <EmployeeCreatorAndOrgPanel agents={agents} templates={templates} onReload={reload} />
+                <AgentsView agents={agents} providers={providers} error={errors.agents} onReload={reload} />
+              </>
+            )}
+            {route.section === 'workforce' && sub === 'workspaces' && (<>{legacyHeader}<WorkspacesView agents={agents} /></>)}
+            {route.section === 'workforce' && sub === 'messaging' && (
+              <>{legacyHeader}<AgentMessagingPanel agents={agents} messages={agentMessages} projectId={activeProjectId} onReload={reload} /></>
+            )}
+
+            {route.section === 'projects' && sub === 'tasks' && (
+              <>
+                <PageHeader title={t.nexus.nav.projects} subtitle={t.nexus.navHint.projects} />
+                <TasksView tasks={tasks} projectId={activeProjectId} projects={projects} error={errors.tasks} onReload={reload} />
+                <TaskBoard tasks={tasks} agents={agents} projects={projects} projectId={activeProjectId} onReload={reload}
+                  openTaskId={openTaskId} onOpenTask={setOpenTaskId} />
+              </>
+            )}
+            {route.section === 'projects' && sub === 'projectsList' && (
+              <>
+                {legacyHeader}
+                <ProjectsMemoryView projects={projects} memories={memories} activeProjectId={activeProjectId}
+                  onSelectProject={selectProject} onReload={(q) => loadAll(q)} />
+                <SDLCIdeaExecutorPanel onReload={reload} />
+              </>
+            )}
+            {route.section === 'projects' && sub === 'pullRequests' && (
+              <>
+                {legacyHeader}
+                <PullRequestsView projectId={activeProjectId} />
+                <GitWorkflowsView gitData={gitData} approvals={approvals} agents={agents} error={errors.git} onReload={reload} />
+              </>
+            )}
+
+            {route.section === 'org' && (
+              <OrgMap agents={agents} tasks={tasks} templates={templates} onOpenAgent={openAgent} onOpenTask={openTask} />
+            )}
+
+            {route.section === 'integrations' && sub === 'integrationsOverview' && (
+              <IntegrationsCenter providers={providers} browsers={browsers} onNavigate={navigate} onReload={reload} />
+            )}
+            {route.section === 'integrations' && sub === 'providers' && (
+              <>
+                {legacyHeader}
+                <ProvidersView providers={providers} usage={providerUsage} agents={agents} sessions={sessions} error={errors.providers} onReload={reload} />
+                <ArenaAccountsSessionsPanel accounts={accounts} sessions={sessions} onReload={reload} />
+              </>
+            )}
+            {route.section === 'integrations' && sub === 'browsers' && (
+              <>
+                {legacyHeader}
+                <ArenaAgentDashboard />
+                <ArenaConnectorPanel />
+                <UserscriptsEnginesPanel engines={browserEngines} userscripts={userscripts} onReload={reload} />
+                <BrowserWallView browsers={browsers} capabilities={browserCaps} error={errors.browsers} onReload={reload} />
+              </>
+            )}
+            {route.section === 'integrations' && sub === 'devices' && (<>{legacyHeader}<MultiDeviceNodesPanel devices={devices} onReload={reload} /></>)}
+
+            {route.section === 'analytics' && sub === 'metrics' && (
+              <AnalyticsView agents={agents} tasks={tasks} projects={projects} usage={providerUsage} devices={devices} resources={qaData?.resources} />
+            )}
+            {route.section === 'analytics' && sub === 'quality' && (
+              <>{legacyHeader}<QAView qaData={qaData} securityPosture={securityPosture} error={errors.qa} onReload={reload} /></>
+            )}
+
+            {route.section === 'admin' && sub === 'settings' && (
+              <AdminSettings user={user} health={health.data}>
+                <SettingsNotificationsView
+                  notifications={notifications}
+                  theme={theme}
+                  error={errors.notifications}
+                  onToggleTheme={handleThemeToggle}
+                  onChangeLanguage={handleLanguageChange}
+                  onReload={reload}
+                />
+              </AdminSettings>
+            )}
+            {route.section === 'admin' && sub === 'audit' && (<>{legacyHeader}<SystemLogs auditLogs={auditLogs} /></>)}
+            {route.section === 'admin' && sub === 'security' && (
+              <>{legacyHeader}<SecurityOverview posture={securityPosture}><PromptInjectionGuardPanel /></SecurityOverview></>
+            )}
+            {route.section === 'admin' && sub === 'users' && (<>{legacyHeader}<UsersPermissions user={user} /></>)}
+          </div>
         </main>
       </div>
     </div>
@@ -693,7 +643,9 @@ export default function App() {
   return (
     <I18nProvider>
       <AuthProvider>
-        <AATMWorkspace />
+        <NexusProvider>
+          <AATMWorkspace />
+        </NexusProvider>
       </AuthProvider>
     </I18nProvider>
   )

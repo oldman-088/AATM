@@ -5,25 +5,60 @@ import { MockWebSocket, installFetchMock, installWebSocketMock, settle } from '.
 
 const AR_DASHBOARD_TITLE = 'مركز القيادة التنفيذي'
 
+// NEXUS COMMAND: eight sections in the sidebar (owner spec §3A).
 const EN_NAV = [
-  'Executive Dashboard',
-  'Manager Chat',
-  'AI Employees & Org',
-  'Tasks & Messaging',
-  'Workspaces & Files',
-  'Browsers & Userscripts',
-  'Arena & AI Providers',
-  'Projects, SDLC & Memory',
-  'GitHub Integration',
-  'Monitoring, QA & Devices',
-  'Approvals & Activity Logs',
-  'Security & Settings',
+  'Command Center',
+  'AI Executive Director',
+  'AI Workforce',
+  'Projects & Tasks',
+  'Organization Map',
+  'Integrations',
+  'Analytics & Monitoring',
+  'System Administration',
 ]
+const SECTIONS: Record<string, string[]> = {
+  command: ['overview', 'mission'],
+  executive: ['chat', 'plans', 'approvals'],
+  workforce: ['agents', 'team', 'workspaces', 'messaging'],
+  projects: ['tasks', 'projectsList', 'pullRequests'],
+  org: [],
+  integrations: ['integrationsOverview', 'providers', 'browsers', 'devices'],
+  analytics: ['metrics', 'quality'],
+  admin: ['settings', 'audit', 'security', 'users'],
+}
 
-/** Sidebar nav buttons are the ones that carry an icon + label pair. */
-function navButton(label: string) {
-  const buttons = screen.getAllByRole('button', { name: new RegExp(label) })
-  return buttons[0]
+/** Where each pre-NEXUS screen now lives: [section, sub-tab]. */
+const SCREEN: Record<string, [string, string | null]> = {
+  'Executive Dashboard': ['command', 'mission'],
+  'Manager Chat': ['executive', 'chat'],
+  'AI Employees & Org': ['workforce', 'team'],
+  'Tasks & Messaging': ['projects', 'tasks'],
+  'Workspaces & Files': ['workforce', 'workspaces'],
+  'Browsers & Userscripts': ['integrations', 'browsers'],
+  'Arena & AI Providers': ['integrations', 'providers'],
+  'Projects, SDLC & Memory': ['projects', 'projectsList'],
+  'GitHub Integration': ['projects', 'pullRequests'],
+  'Devices': ['integrations', 'devices'],
+  'QA': ['analytics', 'quality'],
+  'Approvals & Activity Logs': ['executive', 'approvals'],
+  'Security & Settings': ['admin', 'settings'],
+}
+
+function goTo(screenName: string) {
+  const [section, sub] = SCREEN[screenName]
+  fireEvent.click(screen.getByTestId(`nav-${section}`))
+  if (sub) fireEvent.click(screen.getByTestId(`subtab-${sub}`))
+}
+
+function visitEverySection(check?: () => void) {
+  for (const [section, subs] of Object.entries(SECTIONS)) {
+    fireEvent.click(screen.getByTestId(`nav-${section}`))
+    check?.()
+    for (const sub of subs) {
+      fireEvent.click(screen.getByTestId(`subtab-${sub}`))
+      check?.()
+    }
+  }
 }
 
 async function renderWorkspace() {
@@ -69,40 +104,31 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     await settle()
   })
 
-  it('renders all 12 navigation tabs and keeps labels localized in each locale', async () => {
+  it('renders the 8 NEXUS sections and keeps labels localized in each locale', async () => {
     installFetchMock()
     await renderWorkspace()
-    // EN: every tab label is present in the sidebar
-    for (const label of EN_NAV) {
-      expect(navButton(label)).toBeInTheDocument()
-    }
+    for (const section of Object.keys(SECTIONS)) expect(screen.getByTestId(`nav-${section}`)).toBeInTheDocument()
+    for (const label of EN_NAV) expect(screen.getAllByRole('button', { name: new RegExp(label) }).length).toBeGreaterThan(0)
 
-    // AR: nav labels translate and document flips to RTL
     fireEvent.click(screen.getByText('AR'))
     expect(document.documentElement.dir).toBe('rtl')
-    expect(screen.getAllByRole('button', { name: /لوحة القيادة/ }).length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('button', { name: /مركز القيادة/ }).length).toBeGreaterThan(0)
 
-    // FA: nav labels translate and remain RTL
     fireEvent.click(screen.getByText('FA'))
     expect(document.documentElement.dir).toBe('rtl')
-    expect(screen.getAllByRole('button', { name: /داشبورد/ }).length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('button', { name: /مرکز فرماندهی/ }).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByText('EN'))
     expect(document.documentElement.dir).toBe('ltr')
     await settle()
   })
 
-  it('mounts every one of the 12 tabs without crashing', async () => {
+  it('mounts every section and sub-view without crashing', async () => {
     const { calls } = installFetchMock()
     await renderWorkspace()
 
-    for (const label of EN_NAV) {
-      fireEvent.click(navButton(label))
-      // each tab click must not throw and must keep the shell mounted
-      expect(screen.getByText('AATM')).toBeInTheDocument()
-    }
+    visitEverySection(() => expect(screen.getAllByText('AATM').length).toBeGreaterThan(0))
 
-    // The telemetry loader must have hit the core sections for each mounted tab
     const paths = calls.map((c) => c.path)
     expect(paths).toContain('/api/v1/dashboard/overview')
     expect(paths).toContain('/api/v1/qa/summary')
@@ -116,7 +142,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     installFetchMock()
     await renderWorkspace()
 
-    fireEvent.click(navButton('Executive Dashboard'))
+    goTo('Executive Dashboard')
     await screen.findByText('Executive Command Center', { selector: 'h2' })
 
     fireEvent.click(screen.getByText('AR'))
@@ -131,6 +157,8 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     await renderWorkspace()
 
     fireEvent.click(screen.getByRole('button', { name: /Emergency Stop/ }))
+    // Stopping every agent asks first (NEXUS confirm dialog).
+    fireEvent.click(await screen.findByTestId('confirm-ok'))
 
     await waitFor(() => {
       const stop = calls.find((c) => c.path === '/api/v1/emergency-stop' && c.method === 'POST')
@@ -155,7 +183,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
         },
       ],
     })
-    fireEvent.click(navButton('Executive Dashboard'))
+    goTo('Executive Dashboard')
     fireEvent.click(screen.getByRole('button', { name: /Run Orchestration Cycle/ }))
 
     const resume = await screen.findByRole('button', { name: /Resume System/ })
@@ -171,7 +199,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     const { calls } = installFetchMock()
     await renderWorkspace()
 
-    fireEvent.click(navButton('AI Employees & Org'))
+    goTo('AI Employees & Org')
     const nameInput = await screen.findByPlaceholderText('Employee Name (e.g., API Specialist)')
     fireEvent.change(nameInput, { target: { value: 'RTL Specialist' } })
     fireEvent.click(screen.getByRole('button', { name: /Create Employee/ }))
@@ -196,7 +224,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     await renderWorkspace()
 
     fireEvent.click(screen.getByText('AR'))
-    fireEvent.click(navButton('الموظفون'))
+    goTo('AI Employees & Org')
 
     expect(await screen.findByPlaceholderText('اسم الموظف (مثل: متخصص واجهات برمجية)')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /إنشاء موظف/ })).toBeInTheDocument()
@@ -208,7 +236,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     const { calls } = installFetchMock()
     await renderWorkspace()
 
-    fireEvent.click(navButton('Projects, SDLC & Memory'))
+    goTo('Projects, SDLC & Memory')
     fireEvent.change(await screen.findByPlaceholderText('Project Name'), { target: { value: 'AATM v2.1' } })
     fireEvent.change(screen.getByPlaceholderText(/Describe your software idea/), {
       target: { value: 'Ship the multilingual enterprise console' },
@@ -244,7 +272,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
     localStorage.setItem('aatm_jwt_token', 'test-jwt')
     await renderWorkspace()
 
-    fireEvent.click(navButton('Monitoring, QA & Devices'))
+    goTo('Devices')
     fireEvent.change(await screen.findByPlaceholderText('Node Name'), { target: { value: 'Edge Node' } })
     fireEvent.click(screen.getByRole('button', { name: /Register Node/ }))
 
@@ -266,10 +294,7 @@ describe('AATM Frontend & Multilingual RTL System', () => {
   it('never renders a localhost or 127.0.0.1 URL in the UI', async () => {
     installFetchMock()
     const { container } = await renderWorkspace()
-    for (const label of EN_NAV) {
-      fireEvent.click(navButton(label))
-      expect(container.innerHTML).not.toMatch(/localhost|127\.0\.0\.1/)
-    }
+    visitEverySection(() => expect(container.innerHTML).not.toMatch(/localhost|127\.0\.0\.1/))
     await settle()
   })
 })
@@ -298,7 +323,7 @@ describe('Manager Chat project selection', () => {
     let projects = [oldP, newP] // the API lists the project marked active first
     installFetchMock({ '/api/v1/projects': () => projects })
     await renderWorkspace()
-    fireEvent.click(navButton('Manager Chat'))
+    goTo('Manager Chat')
     const select = (await screen.findByLabelText('Project')) as HTMLSelectElement
     await waitFor(() => expect(select.value).toBe('p-old'))
 
@@ -333,7 +358,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     })
     await renderWorkspace()
 
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
 
     fireEvent.change(await screen.findByPlaceholderText('Pull request title'), {
       target: { value: 'feat(frontend): sprint v2.2 governance controls' },
@@ -385,7 +410,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     })
     await renderWorkspace()
 
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.click(await screen.findByRole('button', { name: /^Issue$/ }))
     fireEvent.change(await screen.findByPlaceholderText('Issue title'), {
       target: { value: 'RTL audit follow-ups' },
@@ -421,7 +446,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
   it('shows pending and blocks submission until approval', async () => {
     installFetchMock()
     await renderWorkspace()
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.change(await screen.findByPlaceholderText('Pull request title'), { target: { value: 'Pending PR' } })
     fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
     expect(await screen.findByText('Approval status: Pending')).toBeInTheDocument()
@@ -435,7 +460,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
         : [{ id: 'branch-approval', status: 'approved', action_type: 'branch' }],
     })
     await renderWorkspace()
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
     expect(screen.getByLabelText('From branch')).toHaveValue('main')
     expect(screen.getByRole('button', { name: /Request Approval/ })).toBeDisabled()
@@ -459,7 +484,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       ? { ok: false, status: 403, json: async () => ({ detail: 'Approval does not match the requested branch write' }) }
       : original(input, init))
     await renderWorkspace()
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
     fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/rejected' } })
     fireEvent.change(screen.getByPlaceholderText('Approval UUID'), { target: { value: 'approved-branch' } })
@@ -470,7 +495,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
   it('blocks branch submission while its approval is pending', async () => {
     const { calls } = installFetchMock()
     await renderWorkspace()
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.click(await screen.findByRole('button', { name: /^Branch$/ }))
     fireEvent.change(screen.getByLabelText('Branch name'), { target: { value: 'feature/a' } })
     fireEvent.click(screen.getByRole('button', { name: /Request Approval/ }))
@@ -483,7 +508,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     const { calls } = installFetchMock()
     await renderWorkspace()
 
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.change(await screen.findByPlaceholderText('Pull request title'), {
       target: { value: 'Needs governance approval' },
     })
@@ -526,7 +551,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     })
     await renderWorkspace()
 
-    fireEvent.click(navButton('Arena & AI Providers'))
+    goTo('Arena & AI Providers')
 
     expect(await screen.findByText('Provider Budget & Headroom')).toBeInTheDocument()
     // daily: $3.50 spent against the $25 settings limit -> $21.50 headroom
@@ -554,7 +579,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       },
     })
     await renderWorkspace()
-    fireEvent.click(navButton('Arena & AI Providers'))
+    goTo('Arena & AI Providers')
     expect(await screen.findByText('$8.00 / $50.00')).toBeInTheDocument()
     expect(screen.getByText('$42.00')).toBeInTheDocument()
     expect(screen.getByText('$75.00 / $500.00')).toBeInTheDocument()
@@ -567,7 +592,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       budget_summary: { daily_limit_usd: 0, monthly_limit_usd: 0, global_daily_spend_usd: 0, global_monthly_spend_usd: 0, daily_remaining_usd: 0, monthly_remaining_usd: 0 },
     } })
     await renderWorkspace()
-    fireEvent.click(navButton('Arena & AI Providers'))
+    goTo('Arena & AI Providers')
     expect(await screen.findAllByText('$0.00 / $0.00')).toHaveLength(2)
     expect(screen.getAllByText('$0.00').length).toBeGreaterThanOrEqual(2)
   })
@@ -579,7 +604,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
       '/api/v1/providers/p1/test': { provider_id: 'p1', model: 'model', content: 'ok' },
     })
     await renderWorkspace()
-    fireEvent.click(navButton('Arena & AI Providers'))
+    goTo('Arena & AI Providers')
     await screen.findByRole('option', { name: 'session-1' })
     fireEvent.change(screen.getByLabelText('Optional agent'), { target: { value: 'worker-1' } })
     fireEvent.change(screen.getByLabelText('Optional session'), { target: { value: 'session-1' } })
@@ -599,7 +624,7 @@ describe('Sprint v2.2 — approval-gated GitHub writes & provider budgets', () =
     })
     await renderWorkspace()
 
-    fireEvent.click(navButton('Arena & AI Providers'))
+    goTo('Arena & AI Providers')
     expect(await screen.findByText(/\$0\.02 \/ \$30\.00/)).toBeInTheDocument()
     // the budgets setting was requested, failed, and the UI degraded to summed provider caps
     expect(failing.calls.some((c) => c.path === '/api/v1/settings')).toBe(true)
@@ -615,7 +640,7 @@ describe('Round 4 workflow and Git controls', () => {
   it('edits, reorders and submits a structured browser workflow with safe text output', async () => {
     const { calls } = installFetchMock({ '/api/v1/browsers': [{ id: 'profile-1', name: 'Profile One', status: 'stopped', mode: 'background', current_url: 'about:blank' }] })
     await renderWorkspace()
-    fireEvent.click(navButton('Browsers & Userscripts'))
+    goTo('Browsers & Userscripts')
     fireEvent.change(await screen.findByLabelText('Browser profile'), { target: { value: 'profile-1' } })
     fireEvent.change(screen.getByLabelText('Engine'), { target: { value: 'automa' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add step' }))
@@ -636,7 +661,7 @@ describe('Round 4 workflow and Git controls', () => {
   it('creates and confirms removal of an agent worktree with authenticated requests', async () => {
     const { calls } = installFetchMock()
     await renderWorkspace()
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.change(await screen.findByLabelText('Agent'), { target: { value: 'worker-1' } })
     fireEvent.change(screen.getByLabelText('Worktree branch'), { target: { value: 'worker-1/task' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create Worktree' }))
@@ -651,7 +676,7 @@ describe('Round 4 workflow and Git controls', () => {
     const { calls } = installFetchMock({ '/api/v1/approvals': (_path: string, init: RequestInit) => (init.method || 'GET') === 'POST'
       ? { id: 'comment-approval', status: 'pending' } : [{ id: 'comment-approval', status: 'approved' }] })
     await renderWorkspace()
-    fireEvent.click(navButton('GitHub Integration'))
+    goTo('GitHub Integration')
     fireEvent.click(await screen.findByRole('button', { name: 'PR Comment / Review' }))
     fireEvent.change(screen.getByLabelText('PR number'), { target: { value: '12' } })
     fireEvent.change(screen.getByLabelText('Comment body'), { target: { value: 'Looks good.' } })
@@ -740,7 +765,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
         new_password: 'NewStrongPassword!2026',
       })
     })
-    await waitFor(() => expect(screen.getAllByText('Executive Dashboard').length).toBeGreaterThan(0))
+    await waitFor(() => expect(screen.getAllByText('Command Center').length).toBeGreaterThan(0))
     expect(localStorage.getItem('aatm_jwt_token')).toBe('dummy-rotated-jwt-token')
     expect(wsMock.instances.length).toBe(1)
     expect(wsMock.instances[0].url).not.toContain('?token=')
@@ -786,7 +811,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
       },
     })
     await renderWorkspace()
-    fireEvent.click(navButton('Executive Dashboard'))
+    goTo('Executive Dashboard')
     expect(await screen.findByText('SANDBOX_UNAVAILABLE')).toBeInTheDocument()
     expect(screen.getByText(/Sandbox image 'aatm-sandbox:latest' is missing\./)).toBeInTheDocument()
   })
@@ -840,7 +865,7 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
       },
     })
     await renderWorkspace()
-    fireEvent.click(navButton('Executive Dashboard'))
+    goTo('Executive Dashboard')
     expect(await screen.findByText('NO_MODEL_CONFIGURED')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Open Provider Setup Wizard/i }))
 
@@ -855,24 +880,26 @@ describe('Phase 1 Frontend Security & Auth Gates', () => {
     expect(await screen.findByText(/Connected to claude-sonnet-4-5 in 42\.5 ms/)).toBeInTheDocument()
   })
 
-  it('Phase 7: renders all 12 mobile navigation tabs, toggles light mode, and displays QA security posture', async () => {
+  it('Phase 7: renders the 8 mobile navigation sections, toggles light mode, and displays QA security posture', async () => {
     installFetchMock()
     localStorage.setItem('aatm_jwt_token', 'test-jwt')
     await renderWorkspace()
 
-    // Mobile navigation exposes the Command Bridge plus the 12 advanced screens.
-    const mobileNav = await screen.findByLabelText('Mobile navigation')
-    expect(mobileNav.querySelectorAll('button')).toHaveLength(13)
+    // The mobile menu opens a drawer with the 8 sections.
+    fireEvent.click(screen.getByTestId('mobile-nav-button'))
+    const mobileNav = await screen.findByTestId('mobile-nav')
+    expect(mobileNav.querySelectorAll('[data-testid^="nav-"]')).toHaveLength(8)
+    fireEvent.click(within(mobileNav).getByRole('button', { name: 'Close navigation' }))
 
     // Light/dark theme toggle updates root element class cleanly
-    const themeBtn = screen.getByRole('button', { name: /Theme Mode/i })
+    const themeBtn = screen.getByTestId('theme-toggle')
     fireEvent.click(themeBtn)
     expect(document.documentElement.classList.contains('light')).toBe(true)
     fireEvent.click(themeBtn)
     expect(document.documentElement.classList.contains('dark')).toBe(true)
 
     // QA view displays Runtime Security Posture from /governance/security-posture
-    fireEvent.click(navButton('Monitoring, QA & Devices'))
+    goTo('QA')
     expect(await screen.findByText('Runtime Security Posture')).toBeInTheDocument()
     expect(screen.getByText(/HTTP Headers Enforced/)).toBeInTheDocument()
   })

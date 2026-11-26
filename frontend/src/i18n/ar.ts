@@ -1,6 +1,8 @@
+import { nexusAr } from './nexus'
 import type { Translations } from './types'
 
 export const ar: Translations = {
+  nexus: nexusAr,
   appName: 'AATM',
   appSubtitle: 'مدير فريق وكلاء الذكاء الاصطناعي',
   nav: {
@@ -113,6 +115,7 @@ export const ar: Translations = {
     approvalsSublabel: 'مركز الموافقات',
   },
   chat: {
+    noActiveProject: 'لا يوجد مشروع نشط: كل المشاريع مكتملة أو معطّلة. أنشئ مشروعاً جديداً أو فعّل مشروعاً من شاشة المشاريع.',
     inactiveProject: 'المشروع «{name}» مكتمل أو معطّل ولا يستقبل طلبات جديدة. اختر مشروعًا نشطًا من القائمة أعلاه.',
     title: 'محادثة المدير الهندسي للذكاء الاصطناعي',
     placeholder: 'أصدر أمراً تنفيذياً (مثل: "create task..." أو "orchestrate" أو "merge main")...',
@@ -136,6 +139,11 @@ export const ar: Translations = {
     modelSaved: 'تم تحديث النموذج',
   },
   tasks: {
+    createNeedsProject: 'اختر أو أنشئ مشروعاً نشطاً أولاً: كل مهمة تتبع مشروعاً.',
+    createProjectInactive: 'المشروع «{name}» مكتمل أو معطّل، فلا يستقبل مهام جديدة. فعّله من شاشة المشاريع أو اختر مشروعاً نشطاً.',
+    createNeedsTitle: 'اكتب عنوان المهمة أولاً.',
+    createDone: 'أُنشئت المهمة ودخلت الطابور.',
+    createFailed: 'تعذّر إنشاء المهمة: {reason}',
     title: 'جدولة المهام وإدارة التبعيات',
     newTask: 'مهمة جديدة',
     taskTitle: 'عنوان المهمة',

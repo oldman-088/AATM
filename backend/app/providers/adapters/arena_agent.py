@@ -32,6 +32,7 @@ from app.providers.base import (
 
 COMMAND_TIMEOUTS = {"new_session": 90.0, "select_repo": 40.0, "submit": 60.0, "keep_working": 30.0, "stop": 15.0, "read_last_reply": 20.0, "selector_test": 20.0}
 QUIET_STATES = {"idle", "ready"}
+SENT_STATES = {"generating", "keep_working_visible", "tool_call_limit"}  # submit refuses a busy page, so ours started it
 MAX_REPLY_CHARS = 60_000
 
 
@@ -202,13 +203,57 @@ class ArenaAgentAdapter(BaseProviderAdapter):
         raise ArenaAgentError(str(result.get("code") or "repo_not_selected"),
                               f"Could not select {repo} in Arena (selected: {detail}).")
 
+    send_retry_wait_seconds = 3.0
+
     async def submit(self, profile_id: str, text: str, *, source: str = "worker", repo: str | None = None) -> dict[str, Any]:
-        """Send a prompt. With ``repo`` the page refuses it unless that repository is selected."""
+        """Send a prompt. With ``repo`` the page refuses it unless that repository is selected.
+
+        E79 (2026-11-26): follow-ups failed with "send_failed" and nobody could tell why. When the page says the
+        text was typed but not sent, AATM now looks at the page (read-only): a running agent means the message
+        did go out (sending it again would duplicate it); a quiet, visible page gets one more try; otherwise the
+        error carries what the page showed, so the cause is in the task's error message.
+        """
         async with arena_submit_queue.slot(profile_id, source=source):
-            result = await (self.command(profile_id, "submit", text, repo=repo) if repo else self.command(profile_id, "submit", text))
+            for attempt in range(2):
+                try:
+                    result = await (self.command(profile_id, "submit", text, repo=repo) if repo
+                                    else self.command(profile_id, "submit", text))
+                except ArenaAgentError as exc:
+                    if exc.code != "send_failed":
+                        raise
+                    page = await self._page_after_send_failed(profile_id)
+                    if page.get("went_out"):
+                        return {"sent": True, "how": "seen_running_after_send_failed", "chars": len(text)}
+                    if attempt == 0 and page.get("retry"):
+                        await asyncio.sleep(self.send_retry_wait_seconds)
+                        continue
+                    raise ArenaAgentError("send_failed", f"{exc.message} [page: {page.get('summary')}]") from exc
+                break
         if not result.get("sent"):
             raise ArenaAgentError("send_failed", "The Arena page did not confirm the message was sent.")
         return result
+
+    async def _page_after_send_failed(self, profile_id: str) -> dict[str, Any]:
+        """Read-only look at a page that refused to send: did it go out, may we retry, and what does it show."""
+        try:
+            page = await self.selector_test(profile_id)
+        except ArenaAgentError as exc:
+            return {"went_out": False, "retry": False, "summary": f"selector_test failed ({exc.code})"}
+        state = str(page.get("state") or "?")
+        composer = page.get("composer") or {}
+        send = page.get("send") or {}
+        human = page.get("human_check") or {}
+        offline = page.get("offline") or {}
+        visibility = str((page.get("page") or {}).get("visibility") or "?")
+        summary = (f"state={state}, visibility={visibility}, composer={'yes' if composer.get('found') else 'no'}"
+                   f"{' (disabled)' if composer.get('disabled') else ''}, send_button="
+                   f"{'no' if not send.get('found') else ('disabled' if send.get('disabled') else 'enabled')}"
+                   f"{', human_check=' + str(human.get('reason'))[:80] if human.get('found') else ''}"
+                   f"{', offline=' + str(offline.get('reason'))[:80] if offline.get('found') else ''}")
+        went_out = state in SENT_STATES or bool((page.get("stop") or {}).get("found"))
+        retry = (not went_out and state in QUIET_STATES and visibility != "hidden" and bool(composer.get("found"))
+                 and not composer.get("disabled") and not human.get("found") and not offline.get("found"))
+        return {"went_out": went_out, "retry": retry, "summary": summary}
 
     async def keep_working(self, profile_id: str) -> dict[str, Any]:
         return await self.command(profile_id, "keep_working")

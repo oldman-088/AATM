@@ -103,5 +103,6 @@ def aatm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def watchdog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AATM_WATCHDOG_LOG", str(tmp_path / "watchdog.log"))
+    monkeypatch.setenv("AATM_WATCHDOG_REOPEN", "0")  # a test must never reload a live Arena window
     return load_script("watchdog.py", "watchdog_under_test")
 

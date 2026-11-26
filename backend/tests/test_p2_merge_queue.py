@@ -203,3 +203,48 @@ async def test_owner_resolve_conflict_button_sends_one_follow_up(env, monkeypatc
         from app.models import AuditLog
         log = (await db.execute(select(AuditLog).where(AuditLog.action == "merge_queue.conflict_follow_up"))).scalars().one()
         assert log.actor != "aatm-merge-queue" and log.resource_id == project_id
+
+
+async def test_an_approved_docs_only_pr_without_ci_is_merged(env, monkeypatch):
+    """Owner 2026-11-26: PR #4 (one .md file, repo without CI yet) waited forever and reserved its worker."""
+    merged = _merges(monkeypatch)
+    gh = FakeGitHub()
+    gh.pr.update(ci="none", files=["docs/INTEGRATIONS_EVALUATION.md", "README.md"])
+    queue = MergeQueue(gh, interval=0)
+    project_id, _task_id, approval_id = await _setup(env)
+    assert (await _tick(env, queue, project_id))["status"] == "merged" and merged == [7]
+    async with env() as db:
+        assert "documentation only" in (await db.get(ApprovalRequest, approval_id)).review_note
+
+
+async def test_code_without_ci_or_docs_with_red_ci_still_never_merges(env, monkeypatch):
+    merged = _merges(monkeypatch)
+    gh = FakeGitHub()
+    queue = MergeQueue(gh, interval=0)
+    project_id, _task_id, _ = await _setup(env)
+    gh.pr.update(ci="none", files=["docs/a.md", "app/main.py"])
+    assert (await _tick(env, queue, project_id))["status"] == "no_ci"
+    gh.pr.update(ci="failure", files=["docs/a.md"], checks=[{"name": "lint", "result": "failure"}])
+    assert (await _tick(env, queue, project_id))["status"] == "ci_failed"
+    monkeypatch.setattr("app.orchestration.merge_queue.get_settings",
+                        lambda: type("S", (), {"AUTO_MERGE_DOCS_WITHOUT_CI": False})())
+    gh.pr.update(ci="none", files=["docs/a.md"])
+    assert (await _tick(env, queue, project_id))["status"] == "no_ci"
+    assert merged == []
+
+
+async def test_a_base_without_any_ci_does_not_hold_the_queue_forever(env, monkeypatch):
+    _merges(monkeypatch)
+    gh = FakeGitHub()
+    queue = MergeQueue(gh, interval=0)
+    project_id, _task_id, _ = await _setup(env)
+    await _tick(env, queue, project_id)
+    gh.base["ci"] = "none"
+    assert (await _tick(env, queue, project_id))["status"] == "waiting_base"  # checks may not have started yet
+    async with env() as db:
+        project = await db.get(Project, project_id)
+        state = dict(project.config["merge_queue"])
+        state["last_merge"] = {**state["last_merge"], "at": "2026-01-01T00:00:00+00:00"}
+        project.config = {**project.config, "merge_queue": state}
+        await db.commit()
+    assert (await _tick(env, queue, project_id))["status"] == "idle"

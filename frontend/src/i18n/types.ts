@@ -1,6 +1,9 @@
+import type { NexusStrings } from './nexus'
+
 export type Language = 'en' | 'ar' | 'fa'
 
 export interface Translations {
+  nexus: NexusStrings
   appName: string
   appSubtitle: string
   nav: {
@@ -115,6 +118,7 @@ export interface Translations {
     approvalsSublabel: string
   }
   chat: {
+    noActiveProject: string
     inactiveProject: string
     title: string
     placeholder: string
@@ -138,6 +142,11 @@ export interface Translations {
     modelSaved: string
   }
   tasks: {
+    createNeedsProject: string
+    createProjectInactive: string
+    createNeedsTitle: string
+    createDone: string
+    createFailed: string
     title: string
     newTask: string
     taskTitle: string

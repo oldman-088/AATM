@@ -18,6 +18,13 @@ fi
 
 mkdir -p logs
 
+# E67: each start used to truncate the service log with ">", so a restart after a crash or a power
+# cut erased the only record of why the stack stopped. Keep the previous run as <name>.log.prev.
+keep_previous_log() {
+  local log="$ROOT_DIR/logs/$1.log"
+  if [[ -s "$log" ]]; then mv -f "$log" "$log.prev"; fi
+}
+
 bridge_port_open() {
   "$ROOT_DIR/.venv/bin/python" - "$1" <<'PY' >/dev/null 2>&1
 import socket, sys
@@ -86,6 +93,7 @@ if [[ "${ARENA_BRIDGE_AUTOSTART:-true}" == "true" ]]; then
       stop_pid_file bridge bridge.server
     fi
     echo "[AATM] Starting local Arena bridge on 127.0.0.1:${ARENA_BRIDGE_PORT:-4100}..."
+    keep_previous_log bridge
     (set -a; [[ -f .env ]] && . ./.env; set +a; \
       ARENA_CONNECTOR_STATE_FILE="${ARENA_CONNECTOR_STATE_FILE:-$HOME/.aatm/bridge/connector-profiles.json}" \
       ARENA_BRIDGE_HOST=127.0.0.1 nohup "$ROOT_DIR/.venv/bin/python" -m bridge.server \
@@ -116,6 +124,7 @@ else
   # Export the root .env into the backend's environment, exactly like the bridge above: env:VAR
   # credential refs and the backend -> bridge ARENA_BRIDGE_TOKEN are read from the process
   # environment, so both processes must get the same token from the same file.
+  keep_previous_log backend
   (set -a; [[ -f .env ]] && . ./.env; set +a; \
     AATM_AUTO_SNAPSHOT="${AATM_AUTO_SNAPSHOT:-1}" nohup "$ROOT_DIR/.venv/bin/uvicorn" app.main:app \
     --app-dir "$ROOT_DIR/backend" --host 0.0.0.0 --port "$BACKEND_PORT" \
@@ -146,6 +155,7 @@ if [[ -x frontend/node_modules/.bin/vite ]]; then
   else
     echo "[AATM] Starting Frontend Dev Server on 0.0.0.0:${FRONTEND_PORT}..."
     # Start vite directly so the PID file names the real server and stop.sh can stop it.
+    keep_previous_log frontend
     (cd frontend; nohup ./node_modules/.bin/vite --host 0.0.0.0 --port "$FRONTEND_PORT" --strictPort \
       > "$ROOT_DIR/logs/frontend.log" 2>&1 < /dev/null & echo $! > "$ROOT_DIR/logs/frontend.pid")
   fi
@@ -153,7 +163,7 @@ else
   echo "[AATM] Frontend skipped (frontend/node_modules is missing)."
 fi
 
-# Read-only watchdog (notifications + logs/watchdog.log). It never restarts or changes anything.
+# Watchdog (notifications + logs/watchdog.log). It only reloads a disconnected Arena window (E56).
 if [[ "${WATCHDOG_AUTOSTART:-true}" == "true" ]]; then
   if [[ -f logs/watchdog.pid ]] && kill -0 "$(cat logs/watchdog.pid)" 2>/dev/null; then
     echo "[AATM] Watchdog already running (PID $(cat logs/watchdog.pid))."

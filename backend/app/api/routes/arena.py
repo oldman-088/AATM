@@ -34,6 +34,7 @@ from app.browser.arena_sessions import (
     arena_agent_overview,
     close_session,
     open_session_for,
+    resume_profile_after_human,
     session_dict,
     set_arena_mode,
 )
@@ -44,7 +45,7 @@ from app.core.events import event_bus
 from app.db.backup import backup_before
 from app.db.base import utcnow
 from app.db.session import get_db
-from app.models import Agent, AgentMessage, ArenaSession, AuditLog, BrowserProfile, ManagerJob, Task, User, Userscript
+from app.models import Agent, ArenaSession, AuditLog, BrowserProfile, ManagerJob, Task, User, Userscript
 from app.runtime.agent_protocol import redact_secrets
 
 router = APIRouter(tags=["arena"], dependencies=[Depends(get_current_user)])
@@ -249,35 +250,8 @@ async def resume_after_human(profile_id: str, user: User = Depends(get_current_u
     """A human resolved the check in the browser: clear needs_human and re-queue the blocked task."""
     profile = await _profile_or_404(db, profile_id)
     bridge = await bridge_call("POST", f"/v1/connector/profiles/{profile_id}/reset") if arena_gate()["enabled"] else {"ok": False, "code": "not_enabled"}
-    profile.connector_status = "ready" if bridge.get("ok") and bridge.get("connected") else "offline"
-    profile.needs_human_reason = None
-    requeued: list[str] = []
-    skipped: list[str] = []
-    agent = await db.get(Agent, profile.agent_id) if profile.agent_id else None
-    if agent is not None:
-        if agent.status == "needs_human":
-            agent.status = "idle"
-        blocked = list((await db.execute(select(Task).where(Task.status == "blocked", Task.assigned_agent_id == agent.id))).scalars())
-        # E32: Resume continues the work this window was doing, not every blocked task the worker owns
-        # (another project's task, or one whose pull request already exists, must not be re-run).
-        open_sessions = (await db.execute(select(ArenaSession).where(
-            ArenaSession.profile_id == profile.id, ArenaSession.is_open.is_(True)))).scalars()
-        current_ids = {tid for sess in open_sessions for tid in (sess.task_id, sess.active_task_id) if tid}
-        if agent.current_task_id:
-            current_ids.add(agent.current_task_id)
-        for task in blocked:
-            if not any(cp.get("event") == "needs_human" for cp in (task.checkpoints or []) if isinstance(cp, dict)):
-                continue
-            if current_ids and task.id not in current_ids:
-                skipped.append(task.id)
-                continue
-            task.status = "queued"
-            task.lock_owner = None
-            task.checkpoints = list(task.checkpoints or []) + [{"ts": utcnow().isoformat(), "event": "human_resolved", "by": user.email}]
-            paused = list((await db.execute(select(AgentMessage).where(AgentMessage.task_id == task.id, AgentMessage.execution_status == "paused"))).scalars())
-            for message in paused:
-                message.execution_status = "cancelled"
-            requeued.append(task.id)
+    requeued, skipped = await resume_profile_after_human(
+        db, profile, actor=user.email, connected=bool(bridge.get("ok") and bridge.get("connected")))
     db.add(AuditLog(actor=user.email, action="arena.human_resolved", resource_type="browser_profile", resource_id=profile.id,
                     details={"requeued_tasks": requeued, "skipped_tasks": skipped, "bridge_ok": bool(bridge.get("ok"))}))
     await db.commit()

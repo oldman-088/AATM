@@ -273,6 +273,8 @@ export function ManagerChatView({
   const chatProjects = (projects || []).filter((p: any) => (p.status ?? 'active') === 'active' || p.id === projectId)
   const selected = (projects || []).find((p: any) => p.id === projectId)
   const inactive = selected && (selected.status ?? 'active') !== 'active' ? selected : null
+  // Projects exist but none takes requests (all completed or disabled): say so instead of failing on send.
+  const noActive = (projects || []).length > 0 && !(projects || []).some((p: any) => (p.status ?? 'active') === 'active')
 
   const clearChat = async () => {
     if (!window.confirm(t.bridge.clearChatConfirm)) return
@@ -298,7 +300,7 @@ export function ManagerChatView({
 
   const sendDirective = async (msgText: string) => {
     if (!msgText.trim()) return
-    if (inactive) return  // a completed or disabled project refuses new requests; the banner says so
+    if (inactive || noActive) return  // a completed or disabled project refuses new requests; the banner says so
     if (!projectId && (projects?.length ?? 0) > 1) {
       setSendError(t.chat.projectRequired)
       return
@@ -386,7 +388,10 @@ export function ManagerChatView({
           ))}
         </div>
 
-        {inactive && <p data-testid="chat-inactive-project" role="alert"
+        {noActive && <p data-testid="chat-no-active-project" role="alert"
+          className="mt-4 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-start text-sm text-amber-100">
+          {t.chat.noActiveProject}</p>}
+        {!noActive && inactive && <p data-testid="chat-inactive-project" role="alert"
           className="mt-4 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-start text-sm text-amber-100">
           {t.chat.inactiveProject.replace('{name}', inactive.name)}</p>}
         <form
@@ -402,7 +407,7 @@ export function ManagerChatView({
             placeholder={t.chat.placeholder}
             disabled={sending}
           />
-          <Button type="submit" disabled={sending || !text.trim() || !!inactive}>
+          <Button type="submit" disabled={sending || !text.trim() || !!inactive || noActive}>
             {t.chat.send}
           </Button>
         </form>
@@ -585,11 +590,13 @@ function taskTone(status: string): 'success' | 'danger' | 'warning' | 'info' | '
 export function TasksView({
   tasks,
   projectId,
+  projects,
   error,
   onReload,
 }: {
   tasks: any[]
   projectId: string | null
+  projects?: any[]
   error?: string | null
   onReload: () => void
 }) {
@@ -612,21 +619,42 @@ export function TasksView({
   const statusOptions = Array.from(new Set(tasks.map((task) => String(task.status)))).sort()
   const visibleTasks = statusFilter === 'all' ? tasks : tasks.filter((task) => task.status === statusFilter)
 
+  // Why a new task cannot be created right now; shown next to the form instead of failing silently.
+  const [createNotice, setCreateNotice] = useState<{ kind: 'error' | 'ok'; text: string } | null>(null)
+  const currentProject = (projects || []).find((p: any) => p.id === projectId)
+  const projectBlocked = !projectId
+    ? t.tasks.createNeedsProject
+    : currentProject && (currentProject.status ?? 'active') !== 'active'
+      ? t.tasks.createProjectInactive.replace('{name}', currentProject.name)
+      : null
+
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!projectId || !title.trim()) return
-    await apiFetch('/tasks', {
-      method: 'POST',
-      body: JSON.stringify({
-        project_id: projectId,
-        division_code: division,
-        title,
-        priority,
-        execution_mode: executionMode,
-      }),
-    })
-    setTitle('')
-    onReload()
+    if (projectBlocked) {
+      setCreateNotice({ kind: 'error', text: projectBlocked })
+      return
+    }
+    if (!title.trim()) {
+      setCreateNotice({ kind: 'error', text: t.tasks.createNeedsTitle })
+      return
+    }
+    try {
+      await apiFetch('/tasks', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: projectId,
+          division_code: division,
+          title,
+          priority,
+          execution_mode: executionMode,
+        }),
+      })
+      setTitle('')
+      setCreateNotice({ kind: 'ok', text: t.tasks.createDone })
+      onReload()
+    } catch (err) {
+      setCreateNotice({ kind: 'error', text: t.tasks.createFailed.replace('{reason}', err instanceof Error ? err.message : String(err)) })
+    }
   }
 
   const updateTaskStatus = async (taskId: string, status: string) => {
@@ -674,9 +702,17 @@ export function TasksView({
               <option value="medium">{t.tasks.priorityMedium}</option>
               <option value="low">{t.tasks.priorityLow}</option>
             </Select>
-            <Button type="submit">{t.common.create}</Button>
+            <Button type="submit" data-testid="task-create-submit">{t.common.create}</Button>
           </div>
         </form>
+        {(projectBlocked || createNotice) && (
+          <p data-testid="task-create-notice" role={(createNotice?.kind ?? 'error') === 'error' ? 'alert' : 'status'}
+            className={`mt-3 rounded-md border px-3 py-2 text-start text-sm ${(createNotice?.kind ?? 'error') === 'ok'
+              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
+              : 'border-amber-500/50 bg-amber-500/10 text-amber-100'}`}>
+            {createNotice?.text ?? projectBlocked}
+          </p>
+        )}
       </Card>
 
       {error ? (

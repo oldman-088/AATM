@@ -962,6 +962,12 @@ async def test_real_failure_still_stops_after_three_attempts(env, scripted):
             await runtime._run_job(db, job)
         job = await db.get(ManagerJob, job_id)
         assert job.attempts == 3 and job.status == "waiting_connection"
+        # 2026-11-26: three failed sends first get one fresh Arena chat, then three more attempts.
+        result = await runtime._run_job(db, job)
+        assert result.get("fresh_session_retry") is True and job.attempts == 0 and job.status == "queued"
+        assert job.context["fresh_session_retry"] is True
+        for _ in range(3):
+            await runtime._run_job(db, job)
         result = await runtime._run_job(db, job)
     assert result["status"] == "failed" and "stopped after 3 attempts" in job.error
 
@@ -1184,3 +1190,37 @@ async def test_a_generating_window_is_awaited_before_the_prompt_is_sent(env, scr
     async with env() as db:
         messages = list((await db.execute(select(ChatMessage).where(ChatMessage.sender_id == "manager-0"))).scalars())
     assert any((m.metadata_json or {}).get("waiting_for_manager") is True for m in messages)
+
+
+async def test_a_review_blocked_only_on_an_unreadable_reply_is_retried_once(env, scripted, monkeypatch):
+    """Live 2026-11-26 (PR #6): our own JSON retry was read as the reply; the PR was never judged."""
+    from app.db.base import utcnow
+    from app.orchestration import manager_arena as module
+
+    make, project_id = scripted
+    _page, runtime = make()
+    monkeypatch.setattr(module, "UNREADABLE_RETRY_WAIT_SECONDS", 0)
+    async with env() as db:
+        parent = Task(project_id=project_id, title="UI", status="in_review", assigned_agent_id="worker-2", pr_number=6)
+        db.add(parent)
+        await db.flush()
+        review = Task(project_id=project_id, title="Review PR #6", status="blocked", task_type="review",
+                      assigned_agent_id="manager-0", parent_task_id=parent.id,
+                      error_message="Manager review needs a human: invalid JSON after one retry: verdict must be ...")
+        other = Task(project_id=project_id, title="Review PR #7", status="blocked", task_type="review",
+                     assigned_agent_id="manager-0", parent_task_id=parent.id,
+                     error_message="Manager review needs a human: the review reply names PR #3")
+        db.add_all([review, other])
+        await db.flush()
+        for task in (review, other):
+            db.add(ManagerJob(kind="review", status="needs_human", project_id=project_id, review_task_id=task.id,
+                              finished_at=utcnow()))
+        await db.commit()
+        assert await runtime._retry_unreadable_reviews(db) == 1
+        assert review.status == "in_progress" and other.status == "blocked"
+        review.status = "blocked"
+        review.error_message = "Manager review needs a human: invalid JSON after one retry"
+        for job in (await db.execute(select(ManagerJob).where(ManagerJob.review_task_id == review.id))).scalars():
+            job.status = "needs_human"
+        await db.commit()
+        assert await runtime._retry_unreadable_reviews(db) == 0, "only one automatic retry"

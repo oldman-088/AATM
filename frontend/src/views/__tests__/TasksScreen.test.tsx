@@ -41,6 +41,6 @@ describe('TasksView screen', () => {
   it('renders the status badge tone for each task', () => {
     wrap(<TasksView tasks={tasks} projectId="p1" onReload={() => {}} />)
     const failedRow = screen.getByText('Broken test').closest('.rounded-xl') as HTMLElement
-    expect(within(failedRow).getByText('failed').className).toMatch(/rose|red|danger/)
+    expect(within(failedRow).getByText('failed').className).toMatch(/rose|red|danger|nexus-error/)
   })
 })

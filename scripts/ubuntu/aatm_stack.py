@@ -157,6 +157,25 @@ def _launch(chrome: str, window: Window, target: str) -> None:
     )
 
 
+def restart_window(chrome: str, window: Window, timeout: float = 15.0) -> None:
+    """Close this profile's Chrome and open it again: empty first, then Arena once Tampermonkey has started.
+
+    2026-11-26: a reload (a new tab in the running Chrome) left Worker 4's userscript disconnected; a full
+    restart of the window, the same as start-all does, brought it back.
+    """
+    for pid in chrome_main_processes(window.directory):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and chrome_main_processes(window.directory):
+        time.sleep(0.25)
+    _launch(chrome, window, "about:blank")
+    time.sleep(float(os.environ.get("AATM_WINDOW_SETTLE_SECONDS", "10")))
+    _launch(chrome, window, window.url)
+
+
 def open_windows() -> int:
     """Open each window empty, then load Arena once Tampermonkey has had time to start.
 
