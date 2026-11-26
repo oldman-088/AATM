@@ -84,7 +84,7 @@ async def heal_orphaned_state(db: AsyncSession) -> dict[str, Any]:
 
 # Live 2026-11-26: worker-4's correction of PR #12 failed after 3 quick retries because its Arena page did not
 # send the text ("send_failed"), all within one minute; nothing picked it up again, so PR #12 waited forever.
-TRANSIENT_ARENA_ERRORS = ("send_failed", "Arena Agent timeout", "did not finish 'selector_test'", "offline")
+TRANSIENT_ARENA_ERRORS = ("send_failed", "Arena Agent timeout", "did not finish 'selector_test'", "offline", "page_hidden")
 FOLLOW_UP_HEAL_REQUEUES = 2
 FOLLOW_UP_HEAL_WAIT = timedelta(minutes=5)
 
