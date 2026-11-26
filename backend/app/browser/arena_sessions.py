@@ -12,10 +12,11 @@ survives bridge and backend restarts.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.browser.arena_connector import (
@@ -411,6 +412,19 @@ async def resume_profile_after_human(db: AsyncSession, profile: BrowserProfile, 
     return requeued, skipped
 
 
+# Live 2026-11-26: worker-1's follow-up failed to send 3 times, was escalated as needs_human, and E68 "resumed"
+# it within seconds because the window was ready - 65 times in a row. Only a human check on the page clears by
+# itself; an escalation after repeated failures does not, and no window is resumed in a tight loop.
+FAILURE_ESCALATION_RE = re.compile(r"failed \d+ times in a row|follow-up failed|no pull request", re.IGNORECASE)
+AUTO_RESUME_MAX = 3
+AUTO_RESUME_WINDOW_MINUTES = 30
+
+
+def is_page_human_check(reason: str | None) -> bool:
+    """True unless the reason is AATM's own escalation after repeated failures."""
+    return not FAILURE_ESCALATION_RE.search(reason or "")
+
+
 async def resume_cleared_profiles(db: AsyncSession) -> list[str]:
     """E68: a worker window marked needs_human is resumed once the bridge reports it ready again.
 
@@ -429,10 +443,18 @@ async def resume_cleared_profiles(db: AsyncSession) -> list[str]:
         return []
     live = {str(item.get("profile_id")): item for item in listed.get("profiles") or []}
     resumed: list[str] = []
+    since = utcnow() - timedelta(minutes=AUTO_RESUME_WINDOW_MINUTES)
     for profile in stuck:
         item = live.get(profile.id) or {}
         if not item.get("connected") or item.get("status") != "ready":
             continue
+        if not is_page_human_check(profile.needs_human_reason):
+            continue  # the work failed on the page (e.g. send_failed); a ready window does not undo that
+        recent = (await db.execute(select(func.count()).select_from(AuditLog).where(
+            AuditLog.action == "arena.human_resolved", AuditLog.resource_id == profile.id,
+            AuditLog.actor == "self-heal", AuditLog.created_at >= since))).scalar() or 0
+        if recent >= AUTO_RESUME_MAX:
+            continue  # it keeps coming back: wait for the owner instead of retrying the window in a loop
         requeued, skipped = await resume_profile_after_human(db, profile, actor="self-heal", connected=True)
         db.add(AuditLog(actor="self-heal", action="arena.human_resolved", resource_type="browser_profile",
                         resource_id=profile.id, details={"requeued_tasks": requeued, "skipped_tasks": skipped,

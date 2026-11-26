@@ -124,3 +124,29 @@ def test_the_json_retry_drawn_with_its_code_fence_is_still_our_own_prompt():
     drawn = prompt.replace("```json\n", "json\n").replace("\n```", "\nCopy")
     assert _is_own_prompt(drawn, prompt)
     assert not _is_own_prompt('```json\n{"pr_number": 6, "verdict": "approve", "summary_ar": "سليم", "comments": []}\n```', prompt)
+
+
+async def test_a_failure_escalation_is_not_resumed_as_a_cleared_check(env, monkeypatch):
+    """Live 2026-11-26: worker-1's follow-up failed to send 3 times; E68 resumed it in seconds, 65 times in a row."""
+    profile_id, task_id = await _stuck_worker(env)
+    async with env() as db:
+        profile = await db.get(BrowserProfile, profile_id)
+        profile.needs_human_reason = "follow-up failed 3 times in a row (send_failed: text was typed but not sent)"
+        await db.commit()
+    _bridge(monkeypatch, [{"profile_id": profile_id, "connected": True, "status": "ready"}])
+    async with env() as db:
+        assert await arena_sessions.resume_cleared_profiles(db) == []
+        assert (await db.get(Task, task_id)).status == "blocked"
+
+
+async def test_a_window_that_keeps_coming_back_is_not_resumed_in_a_loop(env, monkeypatch):
+    profile_id, task_id = await _stuck_worker(env)
+    async with env() as db:
+        for _ in range(arena_sessions.AUTO_RESUME_MAX):
+            db.add(AuditLog(actor="self-heal", action="arena.human_resolved", resource_type="browser_profile",
+                            resource_id=profile_id, details={}))
+        await db.commit()
+    _bridge(monkeypatch, [{"profile_id": profile_id, "connected": True, "status": "ready"}])
+    async with env() as db:
+        assert await arena_sessions.resume_cleared_profiles(db) == [], "after a few resumes in 30 minutes the owner decides"
+        assert (await db.get(Task, task_id)).status == "blocked"
