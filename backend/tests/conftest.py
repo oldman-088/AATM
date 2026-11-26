@@ -54,3 +54,15 @@ def _create_test_schema() -> None:
 
 
 _create_test_schema()
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_live_restart_flag(tmp_path_factory, monkeypatch):
+    """A safe restart waiting on this machine (data/restart.pending) must not pause the tests' managers."""
+    from app.orchestration import restart_guard
+
+    flag = tmp_path_factory.mktemp("restart_guard") / restart_guard.FLAG_NAME
+    monkeypatch.setattr(restart_guard, "flag_path", lambda: flag)

@@ -243,7 +243,13 @@ def _squash(text: str) -> str:
 def _is_own_prompt(reply: str, prompt: str) -> bool:
     """E58: the reply reader can land on our own message; that is never the manager's answer."""
     core, sent = _squash(reply), _squash(prompt)
-    return bool(core) and (core == sent or (len(core) >= 20 and core in sent))
+    if not core:
+        return False
+    if core == sent or (len(core) >= 20 and core in sent):
+        return True
+    # Live 2026-11-26: the page drew the JSON retry with its code fence ("json", a copy button), so the text
+    # read back was 2 characters longer than the prompt; the same opening still marks it as our own message.
+    return len(sent) >= 40 and core[:40] == sent[:40]
 
 
 def _looks_cut(text: str) -> bool:
@@ -1326,6 +1332,13 @@ class ManagerArenaRuntime:
         reply = await self.adapter.read_last_reply(session.profile_id)
         if expects_json and _looks_cut(str(reply.get("text") or "")):
             reply = await self._reread_after_reload(db, session, job, reply)
+        if _is_own_prompt(str(reply.get("text") or ""), text):
+            # Our own message is never the answer (its JSON template once became an invalid verdict): load the
+            # chat again and read once more; if it is still our message, there is no answer to parse.
+            append_event(session, "own_prompt_read_back", f"{len(str(reply.get('text') or ''))} chars", job_id=job.id)
+            reply = await self._reread_after_reload(db, session, job, reply, take_any=True)
+            if _is_own_prompt(str(reply.get("text") or ""), text):
+                reply = {**reply, "text": ""}
         text_out = redact_secrets(str(reply.get("text") or ""))[:MAX_REPLY_PARSE_CHARS]  # E63: parse it all
         session.phase = "manager_ready"
         session.last_state_change_at = _now()
@@ -1335,7 +1348,7 @@ class ManagerArenaRuntime:
         return text_out
 
     async def _reread_after_reload(self, db: AsyncSession, session: ArenaSession, job: ManagerJob,
-                                   reply: dict[str, Any]) -> dict[str, Any]:
+                                   reply: dict[str, Any], *, take_any: bool = False) -> dict[str, Any]:
         """E61: after a long agent run the live page can keep only a fragment ("Let") of the answer.
 
         Loading the same chat again draws the whole transcript; the reply is then read once more.
@@ -1359,6 +1372,8 @@ class ManagerArenaRuntime:
             append_event(session, "reply_cut_reload_failed", f"{exc.code}: {exc.message}", job_id=job.id)
             await db.commit()
             return reply
+        if take_any and str(again.get("text") or "").strip():
+            return again  # the first read was our own message: any text read after the reload replaces it
         if len(str(again.get("text") or "")) > len(str(reply.get("text") or "")):
             return again
         return reply

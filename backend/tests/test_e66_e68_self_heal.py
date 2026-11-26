@@ -113,3 +113,14 @@ async def test_a_window_still_stuck_is_left_alone(env, monkeypatch, live):
     async with env() as db:
         assert (await db.get(Task, task_id)).status == "blocked"
         assert (await db.get(Agent, "worker-1")).status == "needs_human"
+
+
+def test_the_json_retry_drawn_with_its_code_fence_is_still_our_own_prompt():
+    """Live 2026-11-26 (PR #6): the page drew the retry's code fence ("json"), so the text read back was 2 chars
+    longer than the prompt; its empty template then failed as an invalid verdict and the owner was asked."""
+    from app.orchestration.manager_arena import _is_own_prompt, _json_retry_prompt
+
+    prompt = _json_retry_prompt("review")
+    drawn = prompt.replace("```json\n", "json\n").replace("\n```", "\nCopy")
+    assert _is_own_prompt(drawn, prompt)
+    assert not _is_own_prompt('```json\n{"pr_number": 6, "verdict": "approve", "summary_ar": "سليم", "comments": []}\n```', prompt)
