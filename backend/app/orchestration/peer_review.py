@@ -195,8 +195,9 @@ class PeerReviewPool:
         self.running = {w: t for w, t in self.running.items() if not t.done()}
         if not settings.PEER_REVIEW_ENABLED:
             return {"enabled": False}
+        healed = await self.heal_orphans(db)
         if POOL_HEALTH["paused_until"] > time.monotonic():
-            return {"paused": True, "running": sorted(self.running)}
+            return {"paused": True, "running": sorted(self.running), "healed": healed}
         free = max(0, settings.PEER_REVIEW_MAX - len(self.running))
         if not free:
             return {"running": sorted(self.running)}
@@ -236,6 +237,32 @@ class PeerReviewPool:
             started.append({"worker": worker.id, "job": job.id})
             free -= 1
         return {"started": started, "running": sorted(self.running)}
+
+    async def heal_orphans(self, db: AsyncSession) -> list[str]:
+        """Free workers whose peer review is no longer running in this process.
+
+        Live 2026-11-26: a backend restart killed a running peer review; its worker stayed 'working' with the
+        review chat open, so it could not take the change request on its own PR. The jobs themselves are
+        requeued by the manager's start-up recovery; here only the worker and its review chat are released."""
+        healed: list[str] = []
+        orphans = list((await db.execute(select(ArenaSession).where(
+            ArenaSession.kind == PEER_SESSION_KIND, ArenaSession.is_open.is_(True)))).scalars())
+        for session in orphans:
+            if session.agent_id in self.running:
+                continue
+            await close_session(db, session, phase="closed", reason="peer review no longer running (backend restart)")
+            worker = await db.get(Agent, session.agent_id) if session.agent_id else None
+            task = await db.get(Task, worker.current_task_id) if worker and worker.current_task_id else None
+            if worker is not None and worker.status == "working" and (task is None or task.task_type == "review"):
+                worker.status, worker.current_task_id = "idle", None
+                if task is not None and task.lock_owner == worker.id:
+                    task.lock_owner = None
+            healed.append(session.agent_id or session.id)
+        if healed:
+            db.add(AuditLog(actor="system", action="peer_review.orphans_healed", resource_type="peer_review_pool",
+                            details={"workers": healed, "at": utcnow().isoformat()}))
+            await db.commit()
+        return healed
 
     async def _free_workers(self, db: AsyncSession) -> list[Agent]:
         from app.orchestration.arena_runner import arena_reservations

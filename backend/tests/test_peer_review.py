@@ -247,3 +247,24 @@ async def test_the_pool_pauses_after_failures_in_a_row_and_tells_the_owner(env, 
         assert started == [] and len(notes) == 1
     finally:
         peer_module.PEER_COOLDOWN.clear()
+
+
+async def test_a_peer_review_killed_by_a_restart_frees_its_worker(env, scripted, monkeypatch):
+    """Live 2026-11-26: after a restart worker-5 stayed 'working' on a dead peer review for 70 minutes."""
+    make, project_id = scripted
+    _page, runtime = make()
+    _no_run(monkeypatch)
+    _, review_id = await _review_job(env, runtime, project_id)
+    async with env() as db:
+        worker = await db.get(Agent, "worker-5")
+        worker.status, worker.current_task_id = "working", review_id
+        db.add(ArenaSession(kind=PEER_SESSION_KIND, agent_id="worker-5", profile_id=worker.browser_profile_id,
+                            phase="manager_busy", is_open=True, events=[]))
+        await db.commit()
+    pool = PeerReviewPool()  # a new process: nothing runs
+    async with env() as db:
+        assert await pool.heal_orphans(db) == ["worker-5"]
+    async with env() as db:
+        assert (await db.get(Agent, "worker-5")).status == "idle"
+        sessions = (await db.execute(select(ArenaSession).where(ArenaSession.kind == PEER_SESSION_KIND))).scalars()
+        assert not any(s.is_open for s in sessions)
